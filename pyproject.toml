@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ion-gym"
+dynamic = ["version"]
+description = "Independent, self-contained ion-optics simulation toolkit (solvers, tracers, geometry, and interactive viz)."
+license = {file = "LICENSE"}
+# Add `email = "..."` here if you want a contact address published
+# with the package metadata; omitted rather than guessed.
+authors = [{name = "Brian Clowers"}]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+]
+requires-python = ">=3.11"
+# Runtime dependencies mirror requirements.txt. Core is always needed; the
+# interactive app + STL/CAD path pull the rest. Kept unpinned here on purpose
+# (the toolkit is developed against a conda env, Q2_2026) — pinning belongs in
+# a lockfile, not the package metadata.
+dependencies = [
+    "numpy",
+    "scipy",
+    "numba",
+    "panel",
+    "plotly",
+    "bokeh",
+    "trimesh",
+    "manifold3d",
+]
+
+# Extras mirror the sectioned tail of requirements.txt, so `pip install
+# -e .` can deliver the same environment as `-r requirements.txt`
+# (2026-09-05: a clean `-e .` install ran nb01 to Stage F and refused on
+# the missing `cma` — the two documented install paths were not
+# equivalent, and the README said they were).
+[project.optional-dependencies]
+editor = ["contourpy"]
+notebooks = ["matplotlib", "cma", "nbformat", "jupyter_bokeh"]
+# The gate suite. pytest is not only the fast-suite runner: one SHIPPED
+# script gate (test_staged_flight) imports it for its `slow` marker, so
+# `run_gates.py` fails with an ImportError on an install that lacks it --
+# reported as a gate FAILURE, which reads as a broken tree rather than a
+# missing package. Declared here so the suite is installable by name.
+gates = ["pytest"]
+all = ["contourpy", "matplotlib", "cma", "nbformat", "jupyter_bokeh",
+       "pytest"]
+
+[tool.setuptools.packages.find]
+# Only the installable package tree ships. Data (geometry/, examples/),
+# gates (tests/), studies/, tools/, and outputs/ are repo-root siblings and
+# are deliberately NOT packaged.
+include = ["ion_gym*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+# SDS diffusion tables live beside the code that loads them
+# (build_planar / tracer3d read them from their own module dir). They MUST
+# ship inside the package, or the collision path raises FileNotFoundError.
+"ion_gym.physics" = ["*.dat"]
+
+[project.scripts]
+ion-gym = "ion_gym.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "ion_gym.__version__"}
+
+[tool.pytest.ini_options]
+# Tiered public suite: a bare
+# `pytest` is the FAST correctness suite; the expensive physics and
+# instrument gates run deliberately, not by accident.
+#   pytest                       -> fast suite (default)
+#   pytest -m slow               -> the expensive physics gates
+#   pytest -m "slow or not slow" -> everything
+#   python tests/run_gates.py    -> the tiered gate runner (numerical
+#                                   certification, tier 2/3)
+markers = [
+    "slow: expensive physics gate (minutes-scale); excluded from the default run",
+    "instrument: full-instrument flight or acceptance sweep; excluded from the default run",
+]
+addopts = "-m 'not slow and not instrument'"
+# A bare root `pytest` walks every directory without this pin, which
+# collects the retired suites (quarantined by NAME, not by config)
+# and dies on 4 collection errors before running one shipped test
+# (measured, 2026-09-07). The shipped suite lives in tests/; retired and
+# study suites are run explicitly by path when wanted.
+testpaths = ["tests"]

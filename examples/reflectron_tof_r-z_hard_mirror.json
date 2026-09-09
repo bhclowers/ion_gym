@@ -1,0 +1,472 @@
+{
+ "schema_version": 1,
+ "name": "reflectron TOF (r-z, hard mirror \u2014 defocused contrast)",
+ "notes": "Reflectron TOF (r-z), HARD-mirror contrast case. Same drift, source, and back voltage as the time-focused variant but a short 12-ring mirror: the steep ladder reflects with little energy-dependent penetration, so the return-time spread is far worse. Load both variants side by side \u2014 mirror LENGTH is the time-focusing knob.",
+ "geometry": {
+  "width_mm": 178.0,
+  "height_mm": 19.0,
+  "depth_mm": 0.0,
+  "axial_extent_mm": null,
+  "mm_per_gu": 1.0,
+  "symmetry": {
+   "coords": "rz",
+   "planes": {
+    "x": "none",
+    "y": "none",
+    "z": "none"
+   }
+  },
+  "stl_dir": null,
+  "electrodes": [
+   {
+    "name": "entrance",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 160.0,
+      "y_mm": 0.0,
+      "width_mm": 0.4,
+      "height_mm": 19.0
+     }
+    ],
+    "stl": null,
+    "is_grid": true,
+    "dc": 0.0,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring01",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 160.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 76.92307692307692,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring02",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 161.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 153.84615384615384,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring03",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 162.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 230.76923076923077,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring04",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 163.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 307.6923076923077,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring05",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 164.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 384.61538461538464,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring06",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 165.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 461.53846153846155,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring07",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 166.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 538.4615384615385,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring08",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 167.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 615.3846153846154,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring09",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 168.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 692.3076923076923,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring10",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 169.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 769.2307692307693,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring11",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 170.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 846.1538461538462,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "ring12",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 171.6,
+      "y_mm": 18.0,
+      "width_mm": 0.8,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 923.0769230769231,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "back",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 173.0,
+      "y_mm": 0.0,
+      "width_mm": 0.4,
+      "height_mm": 19.0
+     }
+    ],
+    "stl": null,
+    "is_grid": true,
+    "dc": 1000.0,
+    "rf_group": null,
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "rf_phase_deg": 0.0,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   }
+  ],
+  "rf_groups": [],
+  "dc_groups": []
+ },
+ "source": {
+  "n_ions": 10,
+  "distribution": "point",
+  "x0_mm": 2.0,
+  "y0_mm": 2.0,
+  "z0_mm": 0.0,
+  "r_mm": 4.0,
+  "len_mm": 0.0,
+  "box_mm": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "axis": "x",
+  "direction": [
+   1.0,
+   0.02,
+   0.0
+  ],
+  "ke_lo": 760.0,
+  "ke_hi": 840.0,
+  "temperature_k": 0.0,
+  "mz_list": [
+   100.0
+  ],
+  "charge": 1,
+  "tob_span_us": 0.0,
+  "births_file": null,
+  "seed": null
+ },
+ "collisions": {
+  "enabled": false,
+  "gas": "N2",
+  "T_k": 273.0,
+  "P_torr": 1.0,
+  "P_pa": 133.32236842105263,
+  "sigma_m2": 2.27e-18,
+  "model": "hs",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "dt_ns": 1.0,
+  "t_max_us": 30.0,
+  "rec_every": 80,
+  "record_channels": [
+   "speed",
+   "ke_ev",
+   "e_field"
+  ]
+ },
+ "bounds": {
+  "x_min_on": false,
+  "x_max_on": false,
+  "y_min_on": false,
+  "y_max_on": false,
+  "z_min_on": false,
+  "z_max_on": false,
+  "x_min": 0.0,
+  "x_max": 100.0,
+  "y_min": -50.0,
+  "y_max": 50.0,
+  "z_min": -50.0,
+  "z_max": 50.0
+ },
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xy"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null,
+ "_ui_hidden": true
+}

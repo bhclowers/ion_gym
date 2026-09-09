@@ -1,0 +1,215 @@
+{
+ "schema_version": 1,
+ "name": "quadrupole \u2014 STL rods, full 3-D (120 mm)",
+ "notes": "The four-rod quadrupole as built: 8.67 mm rods, 120 mm long, solved in full 3-D so the axial transport is real rather than assumed. STL files live in examples/quad_assembly/ (resolved relative to this spec); stl_manifest carries their sha256 so a run verifies the meshes are unchanged. Ions are injected at the entrance and drift along z under the RF confinement only. | L-218 SUB-CELL FIX (2026-09-03): source box [0.6, 0.6, 0.3] -> [1.0, 1.0, 1.0] mm (geometry and 0.5 mm pitch unchanged; no re-solve) so the declared source spans the 2.0-cell advisory line (was 1.20 cells); the prior numbers were exposed to the unresolved-packet-derivative failure mode L-216 measured (5x aberration inflation at 0.19 cells). The advisory line is not proof of convergence; quote packet derivatives from a pitch ladder.",
+ "geometry": {
+  "width_mm": 20.5,
+  "height_mm": 20.5,
+  "depth_mm": 120.5,
+  "axial_extent_mm": [
+   0.0,
+   117.9
+  ],
+  "mm_per_gu": 0.5,
+  "symmetry": {
+   "coords": "xyz",
+   "planes": {
+    "x": "none",
+    "y": "none",
+    "z": "none"
+   }
+  },
+  "stl_dir": "quad_assembly",
+  "electrodes": [
+   {
+    "name": "rod_1",
+    "shapes": [],
+    "stl": "Quad_Assembly_-_Rod_A-1.STL",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RFA"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "rod_2",
+    "shapes": [],
+    "stl": "Quad_Assembly_-_Rod_B-2.STL",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RFB"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "rod_3",
+    "shapes": [],
+    "stl": "Quad_Assembly_-_Rod_C-3.STL",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RFA"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "rod_4",
+    "shapes": [],
+    "stl": "Quad_Assembly_-_Rod_D-4.STL",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RFB"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   }
+  ],
+  "rf_groups": [
+   {
+    "name": "RFA",
+    "frequency_hz": 2000000.0,
+    "amplitude_v": 241.3354813418403,
+    "phase_deg": 0.0,
+    "waveform": "sin",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "RFB",
+    "frequency_hz": 2000000.0,
+    "amplitude_v": 241.3354813418403,
+    "phase_deg": 180.0,
+    "waveform": "sin",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   }
+  ],
+  "dc_groups": [],
+  "stl_manifest": {
+   "Quad_Assembly_-_Rod_A-1.STL": "b3d8ed70387fb737bd66858f69ec6b0c8bec8ff1e700f75251b1cc22bc82e26e",
+   "Quad_Assembly_-_Rod_B-2.STL": "2483ac1688fe571e351f1d7caca8c93b45abe378b3500ec848a405357fb79bd0",
+   "Quad_Assembly_-_Rod_C-3.STL": "d90812816bcaddab8e6c9de1990eff8811876b4df596d1ff4030220ad52b0e4a",
+   "Quad_Assembly_-_Rod_D-4.STL": "3f226b552a3655a60b6ef7fd8cb37881a02319c0beaa62e9f0f40e4d6de5985a"
+  }
+ },
+ "source": {
+  "n_ions": 24,
+  "distribution": "box",
+  "x0_mm": 10.25,
+  "y0_mm": 10.15,
+  "z0_mm": 1.0,
+  "r_mm": 4.0,
+  "len_mm": 0.0,
+  "box_mm": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "axis": "z",
+  "direction": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "ke_lo": 8.0,
+  "ke_hi": 8.0,
+  "temperature_k": 0.0,
+  "mz_list": [
+   100.0
+  ],
+  "charge": 1,
+  "tob_span_us": 0.0,
+  "births_file": null,
+  "seed": null
+ },
+ "collisions": {
+  "enabled": false,
+  "gas": "N2",
+  "T_k": 273.0,
+  "P_torr": 1.0,
+  "P_pa": 133.32236842105263,
+  "sigma_m2": 2.27e-18,
+  "model": "hs",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "dt_ns": 2.0,
+  "t_max_us": 60.0,
+  "rec_every": 2,
+  "record_channels": [
+   "speed",
+   "radius"
+  ]
+ },
+ "bounds": {
+  "x_min": 0.0,
+  "x_min_on": false,
+  "x_max": 20.5,
+  "x_max_on": false,
+  "y_min": 0.0,
+  "y_min_on": false,
+  "y_max": 20.5,
+  "y_max_on": false,
+  "z_min": 0.0,
+  "z_min_on": false,
+  "z_max": 119.0,
+  "z_max_on": true
+ },
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xz"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null,
+ "_display_name": "Quadrupole (3D, STL)"
+}

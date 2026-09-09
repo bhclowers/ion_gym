@@ -1,0 +1,24 @@
+# Lint policy: REAL-BUG classes only.
+# F = pyflakes (undefined/unbound names, unused imports/vars, redefs);
+# E9 = syntax/io errors. Style rules deliberately OFF — churn on a
+# working scientific tree buries signal. Widen deliberately, never by
+# default.
+target-version = "py312"
+extend-exclude = [
+    "internal/quarantine",
+    "internal/tests_retired",
+    "internal/studies",
+    "ion_gym/physics/tracer3d_v61_frozen.py",  # frozen reference
+]
+
+[lint]
+select = ["F", "E9"]
+
+[lint.per-file-ignores]
+# Known benign F811 lazy-import duplicates: function-local imports
+# shadowing module-level ones; the validate script's are deliberate per
+# its fixture-copy doctrine. The F401/F841 cleanup pass cleared the rest;
+# new F811 anywhere ELSE stays a gate failure.
+"tests/validate_einzel_rz.py" = ["F811"]
+"ion_gym/physics/build_stl3d.py" = ["F811"]
+"ion_gym/examples/example_funnel_native.py" = ["F811"]

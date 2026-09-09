@@ -1,0 +1,391 @@
+{
+ "name": "surround SLIM (mini, native extruded shapes)",
+ "notes": "NATIVE extruded inline shapes on the shapes3d route \u2014 no geometry-file import, no STL: x-y cross-sections (circle rods, rect rails, one cutout bore) each carrying extrude {axis,lo_mm,hi_mm}, z-mirrored about the plane at 0. The SS7p3 surround-SLIM architecture in miniature; stored half solves, display and flight read [-1.6,+1.6] mm with the mirror plane at 0.",
+ "builder": "",
+ "geometry": {
+  "width_mm": 8.0,
+  "height_mm": 4.0,
+  "depth_mm": 1.6,
+  "mm_per_gu": 0.1,
+  "symmetry": {
+   "coords": "xyz",
+   "planes": {
+    "z": "mirror"
+   }
+  },
+  "rf_groups": [
+   {
+    "name": "TW1",
+    "waveform": "square",
+    "frequency_hz": 40000.0,
+    "amplitude_v": 4.0,
+    "phase_deg": 0.0
+   },
+   {
+    "name": "TW2",
+    "waveform": "square",
+    "frequency_hz": 40000.0,
+    "amplitude_v": 4.0,
+    "phase_deg": 45.0
+   },
+   {
+    "name": "TW3",
+    "waveform": "square",
+    "frequency_hz": 40000.0,
+    "amplitude_v": 4.0,
+    "phase_deg": 90.0
+   },
+   {
+    "name": "TW4",
+    "waveform": "square",
+    "frequency_hz": 40000.0,
+    "amplitude_v": 4.0,
+    "phase_deg": 135.0
+   },
+   {
+    "name": "TW5",
+    "waveform": "square",
+    "frequency_hz": 40000.0,
+    "amplitude_v": 4.0,
+    "phase_deg": 180.0
+   },
+   {
+    "name": "TW6",
+    "waveform": "square",
+    "frequency_hz": 40000.0,
+    "amplitude_v": 4.0,
+    "phase_deg": 225.0
+   },
+   {
+    "name": "TW7",
+    "waveform": "square",
+    "frequency_hz": 40000.0,
+    "amplitude_v": 4.0,
+    "phase_deg": 270.0
+   },
+   {
+    "name": "TW8",
+    "waveform": "square",
+    "frequency_hz": 40000.0,
+    "amplitude_v": 4.0,
+    "phase_deg": 315.0
+   },
+   {
+    "name": "RFA",
+    "waveform": "sin",
+    "frequency_hz": 1000000.0,
+    "amplitude_v": 40.0,
+    "phase_deg": 0.0
+   },
+   {
+    "name": "RFB",
+    "waveform": "sin",
+    "frequency_hz": 1000000.0,
+    "amplitude_v": 40.0,
+    "phase_deg": 180.0
+   }
+  ],
+  "dc_groups": [],
+  "electrodes": [
+   {
+    "name": "tw1",
+    "dc": 0.0,
+    "rf_groups": [
+     "TW1"
+    ],
+    "color": [
+     60,
+     120,
+     220
+    ],
+    "shapes": [
+     {
+      "type": "ellipse",
+      "cx_mm": 0.85,
+      "cy_mm": 2.0,
+      "rx_mm": 0.3,
+      "ry_mm": 0.3,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "tw2",
+    "dc": 0.0,
+    "rf_groups": [
+     "TW2"
+    ],
+    "color": [
+     60,
+     120,
+     220
+    ],
+    "shapes": [
+     {
+      "type": "ellipse",
+      "cx_mm": 1.75,
+      "cy_mm": 2.0,
+      "rx_mm": 0.3,
+      "ry_mm": 0.3,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "tw3",
+    "dc": 0.0,
+    "rf_groups": [
+     "TW3"
+    ],
+    "color": [
+     60,
+     120,
+     220
+    ],
+    "shapes": [
+     {
+      "type": "ellipse",
+      "cx_mm": 2.65,
+      "cy_mm": 2.0,
+      "rx_mm": 0.3,
+      "ry_mm": 0.3,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "tw4",
+    "dc": 0.0,
+    "rf_groups": [
+     "TW4"
+    ],
+    "color": [
+     60,
+     120,
+     220
+    ],
+    "shapes": [
+     {
+      "type": "ellipse",
+      "cx_mm": 3.5500000000000003,
+      "cy_mm": 2.0,
+      "rx_mm": 0.3,
+      "ry_mm": 0.3,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "tw5",
+    "dc": 0.0,
+    "rf_groups": [
+     "TW5"
+    ],
+    "color": [
+     60,
+     120,
+     220
+    ],
+    "shapes": [
+     {
+      "type": "ellipse",
+      "cx_mm": 4.45,
+      "cy_mm": 2.0,
+      "rx_mm": 0.3,
+      "ry_mm": 0.3,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "tw6",
+    "dc": 0.0,
+    "rf_groups": [
+     "TW6"
+    ],
+    "color": [
+     60,
+     120,
+     220
+    ],
+    "shapes": [
+     {
+      "type": "ellipse",
+      "cx_mm": 5.35,
+      "cy_mm": 2.0,
+      "rx_mm": 0.3,
+      "ry_mm": 0.3,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "tw7",
+    "dc": 0.0,
+    "rf_groups": [
+     "TW7"
+    ],
+    "color": [
+     60,
+     120,
+     220
+    ],
+    "shapes": [
+     {
+      "type": "ellipse",
+      "cx_mm": 6.25,
+      "cy_mm": 2.0,
+      "rx_mm": 0.3,
+      "ry_mm": 0.3,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "tw8",
+    "dc": 0.0,
+    "rf_groups": [
+     "TW8"
+    ],
+    "color": [
+     60,
+     120,
+     220
+    ],
+    "shapes": [
+     {
+      "type": "ellipse",
+      "cx_mm": 7.1499999999999995,
+      "cy_mm": 2.0,
+      "rx_mm": 0.3,
+      "ry_mm": 0.3,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "rail_a",
+    "dc": 0.0,
+    "rf_groups": [
+     "RFA"
+    ],
+    "color": [
+     220,
+     120,
+     60
+    ],
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 0.4,
+      "y_mm": 0.7,
+      "width_mm": 7.2,
+      "height_mm": 0.5,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     }
+    ]
+   },
+   {
+    "name": "rail_b",
+    "dc": 0.0,
+    "rf_groups": [
+     "RFB"
+    ],
+    "color": [
+     220,
+     180,
+     60
+    ],
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 0.4,
+      "y_mm": 2.8,
+      "width_mm": 7.2,
+      "height_mm": 0.5,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 0.55,
+       "hi_mm": 0.75
+      }
+     },
+     {
+      "type": "cutout",
+      "children": [
+       {
+        "type": "ellipse",
+        "cx_mm": 4.0,
+        "cy_mm": 3.05,
+        "rx_mm": 0.25,
+        "ry_mm": 0.2,
+        "extrude": {
+         "axis": "z",
+         "lo_mm": 0.55,
+         "hi_mm": 0.75
+        }
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "source": {
+  "distribution": "point",
+  "x0_mm": 1.0,
+  "y0_mm": 2.0,
+  "z0_mm": 0.0,
+  "n_ions": 8,
+  "mz_list": [
+   622.0
+  ],
+  "ke_lo": 0.0,
+  "ke_hi": 0.05,
+  "temperature_k": 0.0,
+  "tob_span_us": 0.0
+ },
+ "collisions": {
+  "enabled": false
+ },
+ "integration": {
+  "t_max_us": 40.0,
+  "dt_ns": 1.0
+ },
+ "_display_name": "Electrode Definition Example"
+}

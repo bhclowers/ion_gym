@@ -1,0 +1,842 @@
+{
+ "schema_version": 1,
+ "name": "drift_tube_mason_schamp",
+ "notes": "Certified example: Mason-Schamp absolute-rate referee (nb16, 2026-08-13, all four gates PASS). Stacked-ring DC guide, NO RF: 28 rings w 0.5 / pitch 3 / r_in 8 / depth 6 mm (Bohnhorst-2016 ratios w/p 0.167, d/p 2.0), ladder 16.2->0 V = 0.2 V/mm (6.9 Td). Gas: C60 m/z 720 in He, 1.000 Torr, 298 K, sigma 1.25e-18 m^2 from measured Gillig K0 4.310. Smoothness certified pre-flight: on-axis max dev 8.6e-4, Eq.(7) delay bias <=7.9e-5 to Gamma 0.75, window x=[26,59] (>=3 R_ap from ends). CERTIFIED at dt=0.25 ns (plateau shown: 75.54/73.96/73.01/72.80 m/s at 2/1/0.5/0.25 ns): v_d 72.80+-0.32 m/s (n=413 window-complete of 500; walls 87 == diffusion prediction), K0 4.356 (+1.07% of anchor), Omega 123.4 A^2 (-1.30% of authored sigma), transit spread 40.4 vs Einstein 40.3 us. Verdict fn = ccs_reftool v0.11.0 core.py (drift_pack copy). dt >= 1 ns is fast-biased O(dt) even DC-only \u2014 quote at plateau.",
+ "geometry": {
+  "width_mm": 85.5,
+  "height_mm": 14.5,
+  "depth_mm": 0.0,
+  "axial_extent_mm": null,
+  "mm_per_gu": 0.25,
+  "symmetry": {
+   "coords": "rz",
+   "planes": {
+    "x": "none",
+    "y": "none",
+    "z": "none"
+   }
+  },
+  "stl_dir": null,
+  "electrodes": [
+   {
+    "name": "ring_01",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 2.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 16.2,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 1,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_02",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 5.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 15.6,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 2,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_03",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 8.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 15.0,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 3,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_04",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 11.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 14.4,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 4,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_05",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 14.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 13.8,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 5,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_06",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 17.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 13.2,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 6,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_07",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 20.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 12.6,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 7,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_08",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 23.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 12.0,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 8,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_09",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 26.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 11.4,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 9,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_10",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 29.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 10.8,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 10,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_11",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 32.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 10.2,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 11,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_12",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 35.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 9.6,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 12,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_13",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 38.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 9.0,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 13,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_14",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 41.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 8.4,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 14,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_15",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 44.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 7.8,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 15,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_16",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 47.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 7.2,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 16,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_17",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 50.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 6.6,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 17,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_18",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 53.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 6.0,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 18,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_19",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 56.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 5.4,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 19,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_20",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 59.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 4.8,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 20,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_21",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 62.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 4.2,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 21,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_22",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 65.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 3.6,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 22,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_23",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 68.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 3.0,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 23,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_24",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 71.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 2.4,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 24,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_25",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 74.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 1.8,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 25,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_26",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 77.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 1.2,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 26,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_27",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 80.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.6,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 27,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   },
+   {
+    "name": "ring_28",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 83.0,
+      "y_mm": 8.0,
+      "width_mm": 0.5,
+      "height_mm": 6.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [],
+    "dc_group": "ladder",
+    "dc_index": 28,
+    "dc_weight": null,
+    "color": [
+     120,
+     120,
+     200
+    ],
+    "basis": null,
+    "rf_group": null
+   }
+  ],
+  "rf_groups": [],
+  "dc_groups": [
+   {
+    "name": "ladder",
+    "v_in": 16.2,
+    "v_out": 0.0,
+    "interp": "linear"
+   }
+  ]
+ },
+ "source": {
+  "n_ions": 500,
+  "distribution": "disc",
+  "x0_mm": 6.0,
+  "y0_mm": 0.0,
+  "z0_mm": 0.0,
+  "r_mm": 0.3,
+  "len_mm": 0.0,
+  "box_mm": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "axis": "x",
+  "direction": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "ke_lo": 0.1,
+  "ke_hi": 1.9,
+  "temperature_k": 0.0,
+  "mz_list": [
+   720.0
+  ],
+  "charge": 1,
+  "tob_span_us": 2.0,
+  "births_file": null,
+  "seed": null
+ },
+ "collisions": {
+  "enabled": true,
+  "gas": "He",
+  "T_k": 298.0,
+  "P_torr": 1.0,
+  "P_pa": 133.322,
+  "sigma_m2": 1.25e-18,
+  "model": "hs",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "dt_ns": 1.0,
+  "t_max_us": 1600.0,
+  "rec_every": 1000,
+  "record_channels": [
+   "speed",
+   "ke_ev"
+  ]
+ },
+ "bounds": {
+  "x_min_on": false,
+  "x_max_on": false,
+  "y_min_on": false,
+  "y_max_on": false,
+  "z_min_on": false,
+  "z_max_on": false,
+  "x_min": 0.0,
+  "x_max": 100.0,
+  "y_min": -50.0,
+  "y_max": 50.0,
+  "z_min": -50.0,
+  "z_max": 50.0
+ },
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xy"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null,
+ "_display_name": "Drift Tube (Mason-Schamp)"
+}

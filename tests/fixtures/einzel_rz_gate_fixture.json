@@ -1,0 +1,184 @@
+{
+ "schema_version": 1,
+ "name": "einzel (r-z) — GATE FIXTURE for validate_einzel_rz; the geometry this gate was authored against. Not a shipped example: the shipped einzel is examples/einzel_round_r-z.json (Abdulla & Hussein 2020).",
+ "notes": "",
+ "geometry": {
+  "width_mm": 52.0,
+  "height_mm": 8.0,
+  "depth_mm": 0.0,
+  "axial_extent_mm": null,
+  "mm_per_gu": 0.1,
+  "symmetry": {
+   "coords": "rz",
+   "planes": {
+    "x": "none",
+    "y": "none",
+    "z": "none"
+   }
+  },
+  "stl_dir": null,
+  "stl_manifest": null,
+  "electrodes": [
+   {
+    "name": "entrance",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 4.0,
+      "y_mm": 6.0,
+      "width_mm": 9.5,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "lens",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 14.5,
+      "y_mm": 6.0,
+      "width_mm": 9.5,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": -120.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "exit",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 25.0,
+      "y_mm": 6.0,
+      "width_mm": 9.5,
+      "height_mm": 1.0
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   }
+  ],
+  "rf_groups": [],
+  "dc_groups": []
+ },
+ "source": {
+  "n_ions": 12,
+  "distribution": "disc",
+  "x0_mm": 1.5,
+  "y0_mm": 0.0,
+  "z0_mm": 0.0,
+  "r_mm": 1.2,
+  "len_mm": 0.0,
+  "box_mm": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "axis": "x",
+  "direction": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "ke_lo": 50.0,
+  "ke_hi": 50.0,
+  "temperature_k": 0.0,
+  "mz_list": [
+   100.0
+  ],
+  "charge": 1,
+  "tob_span_us": 0.0,
+  "births_file": null,
+  "seed": 0
+ },
+ "collisions": {
+  "enabled": false,
+  "gas": "N2",
+  "T_k": 273.0,
+  "P_torr": 1.0,
+  "P_pa": 133.32236842105263,
+  "sigma_m2": 2.27e-18,
+  "model": "hs",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "dt_ns": 0.5,
+  "t_max_us": 8.0,
+  "rec_every": 8,
+  "max_records": 100000,
+  "record_channels": [
+   "speed",
+   "ke_ev",
+   "e_field"
+  ]
+ },
+ "bounds": {
+  "x_min_on": false,
+  "x_max_on": true,
+  "y_min_on": false,
+  "y_max_on": false,
+  "z_min_on": false,
+  "z_max_on": false,
+  "x_min": 0.0,
+  "x_max": 51.0,
+  "y_min": -50.0,
+  "y_max": 50.0,
+  "z_min": -50.0,
+  "z_max": 50.0
+ },
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xy"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null
+}
