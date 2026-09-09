@@ -9,6 +9,37 @@ routes), and an interactive Panel/Plotly workbench.
 Developed in the Clowers Research Group, Washington State University,
 as the design and validation environment for systems used to manipulate gas-phase ions.
 
+## What & who
+
+- **What is ion_gym?** A Python-native toolkit that takes a declarative
+  JSON geometry to flown ions in one scriptable path: solve the fields,
+  cache per-electrode bases (a voltage change is a re-weight, not a
+  re-solve), drive them with RF/DC/traveling waves, and fly ions in
+  vacuum or buffer gas — with the same machinery behind the interactive
+  workbench and the teaching notebooks.
+- **What can it do today?** 2-D planar, r-z, and full-3-D
+  (extruded/STL) routes; HS and SDS collision models for buffer-gas
+  work; a Panel/Plotly workbench with a geometry editor; a shipped
+  example gallery spanning einzel lenses, quadrupoles, ion funnels,
+  hexapoles, SLIM boards, drift cells, Paul and Kingdon traps, an
+  Orbitrap-class geometry, ELIT, and reflectron TOFs; and a numbered
+  notebook series written for 1st/2nd-year graduate students.
+- **What can it *not* do yet?** No space charge (ions fly
+  independently), no ion–neutral reaction chemistry, no magnetic
+  fields, no GPU backend (CPU with NumPy/numba), and the field solver
+  is finite-difference electrostatics on a regular grid — not BEM/FMM.
+  If those are load-bearing for your problem, see
+  [docs/RELATED_SOFTWARE.md](docs/RELATED_SOFTWARE.md) for tools that
+  cover them.
+- **Who is it for?** Researchers designing and validating ion-optics
+  instruments, and instructors teaching ion optics and mass
+  spectrometry at the undergraduate and graduate levels.
+- **Expectations.** ion_gym favors explicit, reproducible workflows
+  over breadth: stated refusals instead of silent fallbacks, figures
+  that carry their operating points, and validation against analytic
+  references. Where its scope overlaps specialized tools, validate
+  against them rather than treating any single package as ground truth.
+
 ## Quick start
 
     pip install -e ".[all]"     # everything, incl. notebooks + editor
@@ -31,10 +62,19 @@ edit, solve, and fly from the app — integration time steps ship
 pre-tuned against the RF-period and collision-sampling bounds the Gas
 tab's Δt advisor displays.
 
+## Troubleshooting
+
+If the dashboard appears to hang or stop responding in the browser,
+refresh the page — nine times out of ten that fixes it. The simulation
+state lives in the server process, not the page, so a refresh reattaches
+to the running app without losing your work.
+
 ## Documentation
 
 `docs/` holds the user manual plus the reference set: GLOSSARY,
-MODULES (architecture map), DATA_LAYOUT, and SETUP_GUIDE. The
+MODULES (architecture map), DATA_LAYOUT, SETUP_GUIDE, and
+RELATED_SOFTWARE (where ion_gym sits among related simulation
+packages, with references). The
 numbered validation-notebook series covers field
 accuracy vs. analytic potentials, Mathieu stability, TOF timing vs.
 Wiley–McLaren, collisional thermalization, and transport/Einstein
