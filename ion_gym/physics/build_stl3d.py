@@ -982,7 +982,11 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
                             dt_ns=integ.dt_ns, t_max_us=integ.t_max_us,
                             record_every=max(int(integ.rec_every), 1),
                             max_records=_mrec, seed=env.seed,
-                            ion_label=f"ion {i}")
+                            ion_label=f"ion {i}",
+                            # stations + declared bounds, same list the
+                            # HS path gets: the model choice must not
+                            # change which declarations a run obeys.
+                            planes=_plane_list())
         elif coll is not None and _model not in ("hs", ""):
             raise ValueError(
                 f"build_stl3d: unknown collisions.model {_model!r} on the "

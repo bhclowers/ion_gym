@@ -983,16 +983,21 @@ class SimApp:
                               options=["square", "sin"], value="square",
                               description="square = classic stepped SLIM TW; "
                                           "sin = sinusoidal TW.")
+        # TW BUILDER DEFAULTS (PI 2026-09-13): 10 kHz, 10 V, 0 V offset
+        # — a bipolar +/-10 V drive rather than the old unipolar 0..50 V
+        # (25/25/25). These are the STARTING POINT for a new ladder only;
+        # an existing deck's groups are never re-defaulted.
         self.w_tw_freq = _mkw(pn.widgets.FloatInput, name="TW freq (kHz)",
-                              value=25.0, width=110)
+                              value=10.0, width=110)
         self.w_tw_amp = _mkw(pn.widgets.FloatInput, name="amp (V)",
-                             value=25.0, width=90)
+                             value=10.0, width=90)
         self.w_tw_off = _mkw(pn.widgets.FloatInput, name="offset (V)",
-                             value=25.0, width=90,
-                             description="DC offset of the drive. Unipolar "
-                                         "0..V SLIM drive = amp V/2, offset "
-                                         "V/2 (e.g. amp 25, offset 25 -> "
-                                         "0..50 V).")
+                             value=0.0, width=90,
+                             description="DC offset of the drive. 0 = "
+                                         "bipolar, +/-amp about ground. For "
+                                         "a unipolar 0..V SLIM drive set "
+                                         "amp V/2 and offset V/2 (e.g. amp "
+                                         "25, offset 25 -> 0..50 V).")
         self.w_tw_prefix = _mkw(pn.widgets.TextInput, name="prefix",
                                 value="TW", width=80)
         self.w_tw_build = _mkw(pn.widgets.Button,
@@ -1936,11 +1941,27 @@ class SimApp:
         # Liveness probe: one click prints a heartbeat
         # line to the SERVER console (stdout), so a wedged browser tab can
         # be told apart from a wedged kernel. Touches no state.
-        self.w_ping = pn.widgets.Button(name="ping → stdout", width=110)
+        self.w_ping = pn.widgets.Button(
+            name="ping → stdout", width=110,
+            description="Print one line to the SERVER console. If the UI "
+                        "feels wedged, a ping that appears means the "
+                        "kernel is alive and the browser tab is the "
+                        "problem; no line means the server is busy or "
+                        "stuck. Touches no state and cannot disturb a "
+                        "run.")
         self.w_ping.on_click(self._on_ping)
         # Auto memory heartbeat (bug A): daemon-thread RSS logger for
         # catching the long-session leak, toggled on demand.
+        # Toggle takes no `description` in this Panel version (Button
+        # does), so its tooltip rides alongside as a TooltipIcon rather
+        # than being dropped.
         self.w_autolog = pn.widgets.Toggle(name="mem autolog", width=110)
+        self.w_autolog_tip = pn.widgets.TooltipIcon(
+            value="mem autolog: log this process's memory (RSS) on a "
+                  "heartbeat to the server console, for catching growth "
+                  "over a long session. Diagnostic only — it records "
+                  "usage, it does not limit it (that is the record RAM "
+                  "budget in Config).")
         self.w_autolog.param.watch(self._on_autolog, "value")
         self.w_pitch.param.watch(self._refresh_sizing, "value")
         self.w_minfeat.param.watch(self._refresh_sizing, "value")
@@ -2151,7 +2172,7 @@ class SimApp:
 
         load_tab = pn.Column(
             pn.pane.Markdown(
-                "#### 1 · start from a built-in example\n"
+                "### 1 · start from a built-in example\n"
                 "*Selecting one STAGES it in the JSON box below and prices it. "
                 "It is not loaded until you press the button.*"),
             pn.Row(self.w_examples, pn.Column(pn.Spacer(height=18),
@@ -2163,7 +2184,7 @@ class SimApp:
             # tab and are never duplicated here (one widget in two
             # containers is the two-parent Bokeh defect).
             pn.pane.Markdown(
-                "#### 2 · or upload a spec file / paste JSON\n"
+                "### 2 · or upload a spec file / paste JSON\n"
                 "*`Apply JSON` commits whatever is in the box. To keep a spec "
                 "for later, use the **Save** tab — an example is something you "
                 "load, not something you write to.*\n\n"
@@ -2271,7 +2292,7 @@ class SimApp:
             # before the move, so every reader (_on_start's n_workers,
             # the record-volume quote) is unchanged.
             pn.Card(pn.Row(self.w_workers, self.w_ram_budget),
-                    title="machine resources — this installation",
+                    title="Compute Resources",
                     collapsed=False, sizing_mode="stretch_width"),
             pn.layout.Divider(),
             self.w_cfgtabs,
@@ -2558,6 +2579,13 @@ class SimApp:
             # flight it describes is reported.
             self.workers_line,
             pn.layout.Divider(),
+            # SESSION DIAGNOSTICS (PI 2026-09-13). Moved here from the
+            # run-controls row: neither touches a deck or a run, and
+            # both answer "is this session healthy?", which is what the
+            # Status tab is for.
+            pn.pane.Markdown("#### diagnostics"),
+            pn.Row(self.w_ping, self.w_autolog, self.w_autolog_tip),
+            pn.layout.Divider(),
             pn.pane.Markdown(
                 f"#### history *(this session, newest first, "
                 f"last {STATUS_LOG_MAX})*"),
@@ -2786,7 +2814,10 @@ class SimApp:
                      self.recompute_btn, self.reset_btn,
                      self.fly_chip,
                      pn.layout.HSpacer(), editor_link, flight_link,
-                     self.w_ping, self.w_autolog,
+                     # ping / mem-autolog moved to the Status tab (PI
+                     # 2026-09-13): they are session DIAGNOSTICS, and
+                     # they belong with the health readouts rather than
+                     # beside the run controls.
                      sizing_mode="stretch_width")
         views = pn.Row(pn.pane.Markdown("**view:**", width=45),
                        self.view_xy, self.view_xz, self.view_yz)

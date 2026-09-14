@@ -678,31 +678,7 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
     # kind 6 (detect) is a DETECTOR PATCH — inside ABSORBS (fate 6,
     # the detection event), outside passes (ruled 2026-09-12:
     # record = pass+log, detect = splat+log).
-    if planes:
-        _AX = {"x": 0, "y": 1, "z": 2}
-        _INF = float("inf")
-        pl_col = np.array([_AX[str(p[0])] for p in planes], np.int64)
-        pl_val = np.array([float(p[1]) for p in planes], np.float64)
-        pl_sgn = np.array([float(p[2]) for p in planes], np.float64)
-        pl_w = np.empty((len(planes), 4), np.float64)
-        pl_kind = np.empty(len(planes), np.int64)
-        for _i, p in enumerate(planes):
-            if len(p) == 3:
-                pl_w[_i] = (_INF, -_INF, _INF, -_INF)
-                pl_kind[_i] = 3
-            elif len(p) == 5:
-                pl_w[_i] = [float(v) for v in p[3]]
-                pl_kind[_i] = int(p[4])
-            else:
-                raise ValueError(
-                    f"fly3d: plane entry {_i} has {len(p)} fields — "
-                    f"3 (bounds) or 5 (windowed station) only")
-    else:
-        pl_col = np.empty(0, np.int64)
-        pl_val = np.empty(0, np.float64)
-        pl_sgn = np.empty(0, np.float64)
-        pl_w = np.empty((0, 4), np.float64)
-        pl_kind = np.empty(0, np.int64)
+    pl_col, pl_val, pl_sgn, pl_w, pl_kind = pack_planes(planes, "fly3d")
     # TRANSPORTER contract: dict/namespace with axis ('x'|'y'|
     # 'z'), accept_mm, emit_mm (LOCAL frame -- caller converts), direction
     # (+1/-1), max_passes. None -> disabled.
@@ -792,6 +768,41 @@ def _sds_field(EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om, ch_ph,
 _N_DIST_COLLISIONS = float(_NDC)
 
 
+def pack_planes(planes, who="tracer"):
+    """Plane tuples -> the five kernel arrays (col, val, sgn, window4, kind).
+
+    ONE packer for every kernel that takes planes (fly3d and fly3d_sds
+    here; the planar and r-z routes build the same arrays from the same
+    shared plane builder). A 3-tuple is a bounding plane (fate 3, an
+    impossible window so nothing is ever "inside"); a 5-tuple is a
+    windowed station carrying its own fate. Any other width is refused
+    by name rather than packed into a silently wrong array.
+    """
+    _AX = {"x": 0, "y": 1, "z": 2}
+    _INF = float("inf")
+    if not planes:
+        return (np.empty(0, np.int64), np.empty(0, np.float64),
+                np.empty(0, np.float64), np.empty((0, 4), np.float64),
+                np.empty(0, np.int64))
+    pl_col = np.array([_AX[str(p[0])] for p in planes], np.int64)
+    pl_val = np.array([float(p[1]) for p in planes], np.float64)
+    pl_sgn = np.array([float(p[2]) for p in planes], np.float64)
+    pl_w = np.empty((len(planes), 4), np.float64)
+    pl_kind = np.empty(len(planes), np.int64)
+    for _i, p in enumerate(planes):
+        if len(p) == 3:
+            pl_w[_i] = (_INF, -_INF, _INF, -_INF)
+            pl_kind[_i] = 3
+        elif len(p) == 5:
+            pl_w[_i] = [float(v) for v in p[3]]
+            pl_kind[_i] = int(p[4])
+        else:
+            raise ValueError(
+                f"{who}: plane entry {_i} has {len(p)} fields — "
+                f"3 (bounds) or 5 (windowed station) only")
+    return pl_col, pl_val, pl_sgn, pl_w, pl_kind
+
+
 @njit(cache=True, fastmath=False, nogil=True)
 def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
                EAx, EAy, EAz, ExK, EyK, EzK,
@@ -799,7 +810,7 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
                ele, h_mm, damping, mfp_mm, V_mm_us, log_mr,
                stats, vgx, vgy, vgz, diffusion_on, seed,
                xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs,
-               record_every):
+               record_every, pl_col, pl_val, pl_sgn, pl_w, pl_kind):
     """SDS dynamics in mm/us: field acceleration damped toward the mobility
     drift (Stokes, apply_stokes_damping) + ICDF random-walk diffusion
     (apply_diffusion). Faithful to the published SDS formulation. Gas P,T,velocity are
@@ -841,6 +852,12 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
             aex = afx; aey = afy; aez = afz
 
         vx = vx + aex * dt_us; vy = vy + aey * dt_us; vz = vz + aez * dt_us
+        # pre-step state for plane crossing: the crossing is tested over
+        # the WHOLE step, advection PLUS the diffusion jump below, so a
+        # diffusing ion cannot hop across a detector between samples.
+        xo = x; yo = y; zo = z
+        vxo = vx; vyo = vy; vzo = vz
+        to = t
         x = x + vx * dt_us; y = y + vy * dt_us; z = z + vz * dt_us
 
         # random-walk diffusion (apply_diffusion)
@@ -878,6 +895,76 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
                     tob_us + t, nx, ny, nz, K)
                 ts[nrec] = tob_us + t; nrec += 1
             break
+        # STATION AND BOUND PLANES. The SDS kernel had NO plane handling
+        # at all (fates 0 metal, 1 box exit, 2 timeout), so under
+        # collisions.model="sds" a declared detector, impact plane OR
+        # bounding plane was silently inert while the same deck honoured
+        # them under "hs" — the model choice quietly changed which
+        # declarations the run obeyed. Same crossing math, window sense
+        # and ordering as fly3d/_fly_planar/tracer_rz, from the one
+        # shared plane builder.
+        if pl_col.shape[0] > 0:
+            hit_pl = False
+            for ip in range(pl_col.shape[0]):
+                pcol = pl_col[ip]
+                if pcol == 0:
+                    cn = x; co = xo
+                elif pcol == 1:
+                    cn = y; co = yo
+                else:
+                    cn = z; co = zo
+                sgn = pl_sgn[ip]
+                val = pl_val[ip]
+                if sgn == 0.0:
+                    crossed = (cn - val) * (co - val) <= 0.0 and cn != co
+                else:
+                    crossed = ((cn - val) * sgn >= 0.0
+                               and (co - val) * sgn < 0.0)
+                if crossed:
+                    den = cn - co
+                    if den == 0.0:
+                        f = 0.0
+                    else:
+                        f = (val - co) / den
+                    if f < 0.0:
+                        f = 0.0
+                    if f > 1.0:
+                        f = 1.0
+                    xc = xo + f * (x - xo)
+                    yc = yo + f * (y - yo)
+                    zc = zo + f * (z - zo)
+                    if pcol == 0:
+                        w1 = yc; w2 = zc
+                    elif pcol == 1:
+                        w1 = xc; w2 = zc
+                    else:
+                        w1 = xc; w2 = yc
+                    _ins = (pl_w[ip, 0] <= w1 <= pl_w[ip, 1]
+                            and pl_w[ip, 2] <= w2 <= pl_w[ip, 3])
+                    if pl_kind[ip] == 6:
+                        if not _ins:
+                            continue    # detector patch: outside passes
+                    elif pl_kind[ip] == 5 and _ins:
+                        continue        # plate: inside the aperture passes
+                    x = xc; y = yc; z = zc
+                    vx = vxo + f * (vx - vxo)
+                    vy = vyo + f * (vy - vyo)
+                    vz = vzo + f * (vz - vzo)
+                    t = to + f * (t - to)
+                    kind = pl_kind[ip]
+                    hit_pl = True
+                    break
+            if hit_pl:
+                if nrec < xs.shape[0]:
+                    xs[nrec] = x; ys[nrec] = y; zs[nrec] = z
+                    vxs[nrec] = vx; vys[nrec] = vy; vzs[nrec] = vz
+                    exs[nrec], eys[nrec], ezs[nrec] = _sds_field(
+                        EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om,
+                        ch_ph, ch_amp, ch_off, ch_duty, tab_t, tab_v,
+                        tab_off, x * inv_h, y * inv_h, z * inv_h,
+                        tob_us + t, nx, ny, nz, K)
+                    ts[nrec] = tob_us + t; nrec += 1
+                break
         if step % record_every == 0 and nrec < xs.shape[0]:
             xs[nrec] = x; ys[nrec] = y; zs[nrec] = z
             vxs[nrec] = vx; vys[nrec] = vy; vzs[nrec] = vz
@@ -908,7 +995,7 @@ def _sds_data():
 
 def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
               dt_ns=5.0, t_max_us=50.0, record_every=50, max_records=200000,
-              seed=1, diffusion=True, ion_label=""):
+              seed=1, diffusion=True, ion_label="", planes=None):
     """Fly one ion under the SDS collision model. `collisions` carries gas,
     gas_diam_nm, T_k, P_torr; per-ion mobility/MFP/diffusion come from the
     the reference mass table + estimators. Returns the same dict shape as fly3d
@@ -955,7 +1042,8 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
         fields["ele"], fields["h_mm"],
         P["damping"], P["mfp_mm"], P["V_mm_us"], P["log_mr_ratio"],
         stats, vg[0], vg[1], vg[2], bool(diffusion), int(seed),
-        xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs, record_every)
+        xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs, record_every,
+        *pack_planes(planes, "fly3d_sds"))
     KE = 0.5 * m * ((vx*1e3)**2 + (vy*1e3)**2 + (vz*1e3)**2) / E_CHG
     # FLIGHT-OUTPUT CONTRACT. This wrapper once returned a partial
     # dict, which only worked because the (now retired) import route had its
