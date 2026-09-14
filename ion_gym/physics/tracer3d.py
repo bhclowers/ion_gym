@@ -252,18 +252,25 @@ def _wave_eval(kind, om, ph, amp, off, duty, tab_t, tab_v, o0, o1, t):
 
 # ------------------------------------------------------------- 3-D integrator
 @njit(cache=True, fastmath=False, nogil=True)
-def _fly3d(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
+def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
           EAx, EAy, EAz, ExK, EyK, EzK,
           ch_kind, ch_om, ch_ph, ch_amp, ch_off, ch_duty, tab_t, tab_v, tab_off,
           ele, h_mm, xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs,
           record_every,
           collide_on, T_k, P_pa, sigma_m2, c_star, c_bar, sig1d, m_gas, seed,
-          pl_col, pl_val, pl_sgn,
+          pl_col, pl_val, pl_sgn, pl_w, pl_kind,
           tp_col, tp_accept, tp_emit, tp_sgn, tp_maxp, wrs):
     """RK4 in LOCAL mm; field E(x,t) = E_A + sum_k w_k(t)*E_k (V/mm), each
     w_k on the absolute clock in us. Returns (nrec, x,y,z, vx,vy,vz, t_s, kind)
     with kind: 0 = impact on metal, 1 = left array box, 2 = time out,
-    3 = crossed an enabled BOUNDING PLANE, 4 = transporter max_passes.
+    3 = crossed an enabled BOUNDING PLANE, 4 = transporter max_passes,
+    5 = station impact plane (crossed an impact plane OUTSIDE its
+    pass window; sgn 0 on a plane means BOTH crossing directions).
+    pl_w is (n,4): [a_lo,a_hi,b_lo,b_hi] over the two transverse axes
+    in ascending order; a crossing whose interpolated point lies
+    inside that window PASSES. Bounding planes carry an impossible
+    window (+inf,-inf), so every crossing kills: bit-identical to the
+    pre-window behavior. pl_kind is the fate each plane assigns.
 
     TRANSPORTER (device-agnostic periodic plane pair):
     tp_col -1 disables; else axis 0/1/2, accept/emit planes in LOCAL mm.
@@ -292,7 +299,10 @@ def _fly3d(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
     nx, ny, nz = EAx.shape
     inv_h = 1.0 / h_mm
     K = ch_kind.shape[0]
-    m_ion_amu = (E_CHG / qm) / AMU        # for the collision partner kinematics
+    # m_ion_amu (true ion mass, Da) is a PARAMETER: it was formerly
+    # back-derived as (E_CHG/qm)/AMU, which equals mass/charge and is
+    # only correct for charge=1 — at z=2 the collision partner
+    # kinematics ran at HALF the ion mass (issues.md 2026-09-09).
     ncol = 0
     if collide_on:
         np.random.seed(seed)
@@ -458,7 +468,13 @@ def _fly3d(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
                     cn = z; co = zo
                 sgn = pl_sgn[ip]
                 val = pl_val[ip]
-                if (cn - val) * sgn >= 0.0 and (co - val) * sgn < 0.0:
+                if sgn == 0.0:
+                    crossed = ((cn - val) * (co - val) <= 0.0
+                               and cn != co)
+                else:
+                    crossed = ((cn - val) * sgn >= 0.0
+                               and (co - val) * sgn < 0.0)
+                if crossed:
                     den = cn - co
                     if den == 0.0:
                         f = 0.0
@@ -468,14 +484,31 @@ def _fly3d(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
                         f = 0.0
                     if f > 1.0:
                         f = 1.0
-                    x = xo + f * (x - xo)
-                    y = yo + f * (y - yo)
-                    z = zo + f * (z - zo)
+                    # candidate crossing point FIRST: a pass-window hit
+                    # must leave the step untouched
+                    xc = xo + f * (x - xo)
+                    yc = yo + f * (y - yo)
+                    zc = zo + f * (z - zo)
+                    if col == 0:
+                        t1 = yc; t2 = zc
+                    elif col == 1:
+                        t1 = xc; t2 = zc
+                    else:
+                        t1 = xc; t2 = yc
+                    _ins = (pl_w[ip, 0] <= t1 <= pl_w[ip, 1]
+                            and pl_w[ip, 2] <= t2 <= pl_w[ip, 3])
+                    if pl_kind[ip] == 6:
+                        if not _ins:
+                            continue    # detector patch: outside
+                    elif _ins:          #   the patch passes
+                        continue        # plate: inside the aperture
+                                        #   window passes
+                    x = xc; y = yc; z = zc
                     vx = vxo + f * (vx - vxo)
                     vy = vyo + f * (vy - vyo)
                     vz = vzo + f * (vz - vzo)
                     t = to + f * dt_s
-                    kind = 3
+                    kind = pl_kind[ip]
                     hit_pl = True
                     break
             if hit_pl:
@@ -636,15 +669,40 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
     # exit state interpolated WITHIN the step. `planes` is a list of
     # (axis, value_mm, sign) with axis in 'xyz' and sign +1 (crossing upward
     # through the plane) or -1 (downward). Empty -> no plane termination.
+    # entries are (axis, value_mm, sign) for whole-plane kills (bounds;
+    # impossible pass window, fate 3) or (axis, value_mm, sign, window4,
+    # kind) for windowed planes (stations): window4 = [a_lo,a_hi,b_lo,
+    # b_hi] over the two transverse axes ascending; sign 0 = both
+    # crossing directions. Window SENSE depends on kind: kind 5
+    # (impact plane) is a PLATE — inside passes, outside splats;
+    # kind 6 (detect) is a DETECTOR PATCH — inside ABSORBS (fate 6,
+    # the detection event), outside passes (ruled 2026-09-12:
+    # record = pass+log, detect = splat+log).
     if planes:
         _AX = {"x": 0, "y": 1, "z": 2}
-        pl_col = np.array([_AX[str(a)] for a, _v, _s in planes], np.int64)
-        pl_val = np.array([float(v) for _a, v, _s in planes], np.float64)
-        pl_sgn = np.array([float(s) for _a, _v, s in planes], np.float64)
+        _INF = float("inf")
+        pl_col = np.array([_AX[str(p[0])] for p in planes], np.int64)
+        pl_val = np.array([float(p[1]) for p in planes], np.float64)
+        pl_sgn = np.array([float(p[2]) for p in planes], np.float64)
+        pl_w = np.empty((len(planes), 4), np.float64)
+        pl_kind = np.empty(len(planes), np.int64)
+        for _i, p in enumerate(planes):
+            if len(p) == 3:
+                pl_w[_i] = (_INF, -_INF, _INF, -_INF)
+                pl_kind[_i] = 3
+            elif len(p) == 5:
+                pl_w[_i] = [float(v) for v in p[3]]
+                pl_kind[_i] = int(p[4])
+            else:
+                raise ValueError(
+                    f"fly3d: plane entry {_i} has {len(p)} fields — "
+                    f"3 (bounds) or 5 (windowed station) only")
     else:
         pl_col = np.empty(0, np.int64)
         pl_val = np.empty(0, np.float64)
         pl_sgn = np.empty(0, np.float64)
+        pl_w = np.empty((0, 4), np.float64)
+        pl_kind = np.empty(0, np.int64)
     # TRANSPORTER contract: dict/namespace with axis ('x'|'y'|
     # 'z'), accept_mm, emit_mm (LOCAL frame -- caller converts), direction
     # (+1/-1), max_passes. None -> disabled.
@@ -663,7 +721,7 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
     wrs = np.zeros(max_records, np.int64)
 
     nrec, x, y, z, vx, vy, vz, t, kind, ncol = _fly3d(
-        qm, float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
+        qm, float(mz_Da), float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         v0_mm_us[0] * 1e3, v0_mm_us[1] * 1e3, v0_mm_us[2] * 1e3,
         float(tob_us), dt_ns * 1e-9, t_max_us * 1e-6,
         fields["EAx"], fields["EAy"], fields["EAz"],
@@ -675,7 +733,7 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
         fields["ele"], fields["h_mm"],
         xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs, record_every,
         on, T_k, P_pa, sigma_m2, c_star, c_bar, sig1d, mg, int(seed),
-        pl_col, pl_val, pl_sgn,
+        pl_col, pl_val, pl_sgn, pl_w, pl_kind,
         tp_col, tp_accept, tp_emit, tp_sgn, tp_maxp, wrs)
     KE = 0.5 * m * (vx * vx + vy * vy + vz * vz) / E_CHG
     # No silent truncation: a full record buffer once
@@ -706,11 +764,31 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
                 t_end_us=float(t_end_us))
 
 
-_KIND_NAME = {0: "impact/electrode", 1: "left array box", 2: "timeout",
-              3: "bounding plane", 4: "transporter max_passes"}
+from ion_gym.physics.ion_envelope import FATE_NAME as _KIND_NAME
 
 
 # ============================================================ SDS integrator
+@njit(cache=True)
+def _sds_field(EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om, ch_ph,
+               ch_amp, ch_off, ch_duty, tab_t, tab_v, tab_off,
+               gx, gy, gz, tt, nx, ny, nz, K):
+    """Total E (V/mm) at grid coords (gx,gy,gz), time tt — the ONE
+    field authority for the SDS kernel: the motion loop and the
+    record buffer both call this, so a recorded field is exactly the
+    field the ion felt (2026-09-12 extension: SDS records ex/ey/ez
+    like the base kernel, so field channels are available under
+    model='sds' instead of refusing)."""
+    ex = _tri(EAx, gx, gy, gz, nx, ny, nz)
+    ey = _tri(EAy, gx, gy, gz, nx, ny, nz)
+    ez = _tri(EAz, gx, gy, gz, nx, ny, nz)
+    for kk in range(K):
+        w = _wave_eval(ch_kind[kk], ch_om[kk], ch_ph[kk], ch_amp[kk],
+                       ch_off[kk], ch_duty[kk], tab_t, tab_v,
+                       tab_off[kk], tab_off[kk + 1], tt)
+        ex = ex + w * _tri(ExK[kk], gx, gy, gz, nx, ny, nz)
+        ey = ey + w * _tri(EyK[kk], gx, gy, gz, nx, ny, nz)
+        ez = ez + w * _tri(EzK[kk], gx, gy, gz, nx, ny, nz)
+    return ex, ey, ez
 _N_DIST_COLLISIONS = float(_NDC)
 
 
@@ -720,7 +798,8 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
                ch_kind, ch_om, ch_ph, ch_amp, ch_off, ch_duty, tab_t, tab_v, tab_off,
                ele, h_mm, damping, mfp_mm, V_mm_us, log_mr,
                stats, vgx, vgy, vgz, diffusion_on, seed,
-               xs, ys, zs, ts, vxs, vys, vzs, record_every):
+               xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs,
+               record_every):
     """SDS dynamics in mm/us: field acceleration damped toward the mobility
     drift (Stokes, apply_stokes_damping) + ICDF random-walk diffusion
     (apply_diffusion). Faithful to the published SDS formulation. Gas P,T,velocity are
@@ -735,21 +814,19 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
     t = 0.0
     xs[0] = x; ys[0] = y; zs[0] = z; ts[0] = tob_us
     vxs[0] = vx; vys[0] = vy; vzs[0] = vz
+    exs[0], eys[0], ezs[0] = _sds_field(
+        EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om, ch_ph, ch_amp,
+        ch_off, ch_duty, tab_t, tab_v, tab_off,
+        x * inv_h, y * inv_h, z * inv_h, tob_us, nx, ny, nz, K)
     nrec = 1; step = 0; kind = 2
 
     while t < t_max_us:
         tt = tob_us + t
         gx = x * inv_h; gy = y * inv_h; gz = z * inv_h
-        ex = _tri(EAx, gx, gy, gz, nx, ny, nz)
-        ey = _tri(EAy, gx, gy, gz, nx, ny, nz)
-        ez = _tri(EAz, gx, gy, gz, nx, ny, nz)
-        for kk in range(K):
-            w = _wave_eval(ch_kind[kk], ch_om[kk], ch_ph[kk], ch_amp[kk],
-                           ch_off[kk], ch_duty[kk], tab_t, tab_v,
-                           tab_off[kk], tab_off[kk + 1], tt)
-            ex = ex + w * _tri(ExK[kk], gx, gy, gz, nx, ny, nz)
-            ey = ey + w * _tri(EyK[kk], gx, gy, gz, nx, ny, nz)
-            ez = ez + w * _tri(EzK[kk], gx, gy, gz, nx, ny, nz)
+        ex, ey, ez = _sds_field(
+            EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om, ch_ph,
+            ch_amp, ch_off, ch_duty, tab_t, tab_v, tab_off,
+            gx, gy, gz, tt, nx, ny, nz, K)
         # field acceleration in mm/us^2  (a[m/s2]*1e-9; qm*E[V/mm]*1e-6)
         afx = qm * 1e-6 * ex; afy = qm * 1e-6 * ey; afz = qm * 1e-6 * ez
 
@@ -781,6 +858,11 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
             if nrec < xs.shape[0]:
                 xs[nrec] = x; ys[nrec] = y; zs[nrec] = z
                 vxs[nrec] = vx; vys[nrec] = vy; vzs[nrec] = vz
+                exs[nrec], eys[nrec], ezs[nrec] = _sds_field(
+                    EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om,
+                    ch_ph, ch_amp, ch_off, ch_duty, tab_t, tab_v,
+                    tab_off, x * inv_h, y * inv_h, z * inv_h,
+                    tob_us + t, nx, ny, nz, K)
                 ts[nrec] = tob_us + t; nrec += 1
             break
         if (x < 0.0 or y < 0.0 or z < 0.0 or x > (nx - 1) * h_mm
@@ -789,11 +871,21 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
             if nrec < xs.shape[0]:
                 xs[nrec] = x; ys[nrec] = y; zs[nrec] = z
                 vxs[nrec] = vx; vys[nrec] = vy; vzs[nrec] = vz
+                exs[nrec], eys[nrec], ezs[nrec] = _sds_field(
+                    EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om,
+                    ch_ph, ch_amp, ch_off, ch_duty, tab_t, tab_v,
+                    tab_off, x * inv_h, y * inv_h, z * inv_h,
+                    tob_us + t, nx, ny, nz, K)
                 ts[nrec] = tob_us + t; nrec += 1
             break
         if step % record_every == 0 and nrec < xs.shape[0]:
             xs[nrec] = x; ys[nrec] = y; zs[nrec] = z
             vxs[nrec] = vx; vys[nrec] = vy; vzs[nrec] = vz
+            exs[nrec], eys[nrec], ezs[nrec] = _sds_field(
+                EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om, ch_ph,
+                ch_amp, ch_off, ch_duty, tab_t, tab_v, tab_off,
+                x * inv_h, y * inv_h, z * inv_h, tob_us + t,
+                nx, ny, nz, K)
             ts[nrec] = tob_us + t; nrec += 1
 
     return nrec, x, y, z, vx, vy, vz, t, kind
@@ -847,6 +939,8 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
     zs = np.empty(max_records); ts = np.empty(max_records)
     vxs = np.empty(max_records); vys = np.empty(max_records)
     vzs = np.empty(max_records)
+    exs = np.empty(max_records); eys = np.empty(max_records)
+    ezs = np.empty(max_records)
     vg = [v * 1e-3 for v in _get(collisions, "flow_m_s", (0.0, 0.0, 0.0))]
     nrec, x, y, z, vx, vy, vz, t, kind = _fly3d_sds(
         qm, float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
@@ -861,7 +955,7 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
         fields["ele"], fields["h_mm"],
         P["damping"], P["mfp_mm"], P["V_mm_us"], P["log_mr_ratio"],
         stats, vg[0], vg[1], vg[2], bool(diffusion), int(seed),
-        xs, ys, zs, ts, vxs, vys, vzs, record_every)
+        xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs, record_every)
     KE = 0.5 * m * ((vx*1e3)**2 + (vy*1e3)**2 + (vz*1e3)**2) / E_CHG
     # FLIGHT-OUTPUT CONTRACT. This wrapper once returned a partial
     # dict, which only worked because the (now retired) import route had its
@@ -875,6 +969,8 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
     return dict(x=xs[:nrec].copy(), y=ys[:nrec].copy(), z=zs[:nrec].copy(),
                 vx=vxs[:nrec].copy(), vy=vys[:nrec].copy(), vz=vzs[:nrec].copy(),
                 t_us=ts[:nrec].copy(), tof_us=tob_us + t, KE_eV=KE,
+                ex=exs[:nrec].copy(), ey=eys[:nrec].copy(),
+                ez=ezs[:nrec].copy(),
                 v_mm_us=np.array([vx, vy, vz]), kind=kind, sds=P,
                 final_xyz_mm=(float(x), float(y), float(z)),
                 t_end_us=_t_end, truncated=bool(nrec >= len(xs)))

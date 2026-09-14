@@ -323,12 +323,12 @@
   ],
   "axis": "x",
   "direction": [
-   0.0,
+   1.0,
    0.0,
    0.0
   ],
-  "ke_lo": 0.02,
-  "ke_hi": 0.05,
+  "ke_lo": 0.0,
+  "ke_hi": 0.0,
   "temperature_k": 0.0,
   "mz_list": [
    300.0

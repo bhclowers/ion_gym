@@ -524,6 +524,157 @@ def run_for(label, make_spec):
 for label, mk in FIXTURES:
     run_for(label, mk)
 
+
+def run_station_and_retune_guards():
+    """Standalone section for the 2026-09-12 UI fixes (station
+    write-through + retune-in-place). Tiny inline decks — nothing here
+    may trigger a heavy solve. Each refusal path added by the fix gets
+    its adversarial check (chartered: a guard ships with its test)."""
+    from ion_gym.io.sim_spec import SimSpec
+    from ion_gym.ui.sim_app import SimApp
+    doc = {"name": "guard-tiny", "geometry": {
+            "width_mm": 12.0, "height_mm": 8.0, "mm_per_gu": 0.5,
+            "electrodes": [
+                {"name": f"E{i+1}", "dc": 0.0, "shapes": [
+                    {"type": "rect", "x_mm": 1.0 + 2.0 * i, "y_mm": 1.0,
+                     "width_mm": 1.0, "height_mm": 1.0}]}
+                for i in range(4)]},
+           "source": {"x0_mm": 6.0, "y0_mm": 5.0, "mz_list": [100.0],
+                      "n_ions": 2, "seed": 3},
+           "stations": [
+            {"name": "DET1", "kind": "detect", "on_hit": "pass",
+             "axis": "x", "pos_mm": 6.0, "window": {}},
+            {"name": "DET2", "kind": "detect", "on_hit": "pass",
+             "axis": "x", "pos_mm": 9.0, "window": {}}]}
+    print("\n=== station_writethrough_and_retune_guards ===")
+    app = SimApp(SimSpec.from_dict(doc))
+    app._station_editor()
+
+    def station_writethrough_survives_sync():
+        """THE REPORTED DEFECT: an on_hit flip with no Apply press must
+        register in the spec and survive the next editor sync instead of
+        silently reverting to the spec's old value."""
+        app.w_stn_onhit.value = "splat"
+        st = next(s for s in app.spec.stations if s.name == "DET1")
+        assert st.on_hit == "splat", "write-through did not reach the spec"
+        app._station_sync_pick()          # the old resetter
+        assert app.w_stn_onhit.value == "splat", \
+            "editor sync snapped the widget back"
+        st = next(s for s in app.spec.stations if s.name == "DET1")
+        assert st.on_hit == "splat", "editor sync reverted the spec"
+        import json as _json
+        jd = _json.loads(app.w_json.value)
+        assert next(s for s in jd["stations"]
+                    if s["name"] == "DET1")["on_hit"] == "splat", \
+            "JSON box does not carry the write-through"
+        assert [s.name for s in app.spec.stations] == ["DET1", "DET2"], \
+            "station edit shuffled deck order"
+    check("station: on_hit write-through survives editor sync",
+          station_writethrough_survives_sync)
+
+    def station_load_is_not_an_edit():
+        """Picking a station populates the editor programmatically; that
+        load must not itself write (or the read-back would masquerade as
+        an edit and mark the document modified)."""
+        app.w_stn_pick.value = "DET2"
+        st = next(s for s in app.spec.stations if s.name == "DET2")
+        assert st.on_hit == "pass" and app.w_stn_onhit.value == "pass", \
+            "programmatic load wrote through"
+    check("station: programmatic load does not write", 
+          station_load_is_not_an_edit)
+
+    def station_invalid_window_reported_not_written():
+        """ADVERSARIAL on the new refusal: a mid-edit invalid window
+        (lo >= hi) must be reported and NOT written; the next valid
+        change writes."""
+        app.w_stn_w1_on.value = True                 # valid -5..5 writes
+        app.w_stn_w1_lo.value = 7.0                  # lo > hi: refuse
+        st = next(s for s in app.spec.stations if s.name == "DET2")
+        assert "not written" in str(app.w_stn_msg.object), \
+            "invalid window was not reported"
+        assert (st.window or {}).get("y", [-5, 5])[0] == -5.0, \
+            "invalid window was WRITTEN"
+        app.w_stn_w1_hi.value = 9.0                  # valid again
+        st = next(s for s in app.spec.stations if s.name == "DET2")
+        assert (st.window or {}).get("y") == [7.0, 9.0], \
+            "recovered valid window did not write"
+    check("station: invalid window reported, not written",
+          station_invalid_window_reported_not_written)
+
+    def station_new_needs_apply():
+        """'(new)' + field edits must not create a station per keystroke
+        — creation is the explicit Apply action."""
+        app.w_stn_pick.value = "(new)"
+        n0 = len(app.spec.stations)
+        app.w_stn_pos.value = 3.3
+        assert len(app.spec.stations) == n0, \
+            "a field edit under '(new)' created a station"
+    check("station: '(new)' creates only via Apply", station_new_needs_apply)
+
+    def station_edit_leaves_build_sig():
+        """Stations are fly-time config (the fly closure re-reads the
+        live spec); a station edit must not change the build signature,
+        or every station edit re-runs the channel compose."""
+        sig_a = app._build_sig(app.spec)
+        app.w_stn_pick.value = "DET1"
+        app.w_stn_onhit.value = "pass"
+        sig_b = app._build_sig(app.spec)
+        assert sig_a == sig_b, "a station edit changed the build sig"
+    check("station: edits leave the build signature unchanged",
+          station_edit_leaves_build_sig)
+
+    def retune_updates_in_place():
+        """A retune is a VALUE change: the spec and the per-group editor
+        widgets update in place, with NO control-column rebuild (the
+        rebuild was the scroll-reset + stale-widget freeze) and the
+        builder boxes keeping what the user typed."""
+        app.w_tw_members.value = list(app.w_tw_members.options)[:4]
+        app.w_tw_nphase.value = 4
+        app.w_tw_amp.value = 30.0
+        app.w_tw_freq.value = 20.0
+        app._on_build_tw()                # structural: rebuild expected
+        gnames = [g.name for g in app.spec.geometry.rf_groups]
+        assert len(gnames) == 4, f"ladder build failed: {gnames}"
+        tabs_children = [id(t) for t in app.tabs]
+        amp_box = app.w_tw_amp
+        grp_amp = {n: app._grp_widgets[n]["amp"] for n in gnames}
+        app.w_tw_amp.value = 55.0
+        app.w_tw_freq.value = 35.0
+        app._on_retune_tw()
+        assert all(abs(g.amplitude_v - 55.0) < 1e-9
+                   and abs(g.frequency_hz - 35000.0) < 1e-9
+                   for g in app.spec.geometry.rf_groups), \
+            "retune did not reach the spec"
+        assert all(app._grp_widgets[n]["amp"] is grp_amp[n]
+                   and abs(app._grp_widgets[n]["amp"].value - 55.0) < 1e-9
+                   for n in gnames), \
+            "group editors were rebuilt or not refreshed"
+        assert [id(t) for t in app.tabs] == tabs_children, \
+            "retune rebuilt the control column"
+        assert app.w_tw_amp is amp_box and app.w_tw_amp.value == 55.0, \
+            "builder boxes were rebuilt/reset by retune"
+    check("retune: values update in place, no column rebuild",
+          retune_updates_in_place)
+
+    def retune_divergence_refuses():
+        """ADVERSARIAL on the new refusal: a group with no editor row
+        (editor/spec structural divergence) must surface a diagnostic on
+        the status line, never a silent partial refresh."""
+        gname = app.spec.geometry.rf_groups[0].name
+        saved = app._grp_widgets.pop(gname)
+        try:
+            app._on_retune_tw()
+            msg = str(app.status.object)
+            assert "no editor row" in msg and "refusing" in msg, \
+                f"divergence not diagnosed: {msg}"
+        finally:
+            app._grp_widgets[gname] = saved
+    check("retune: editor/spec divergence refuses with a diagnostic",
+          retune_divergence_refuses)
+
+
+run_station_and_retune_guards()
+
 print("\n" + "=" * 66)
 print(f"PASSED {len(PASSED)}   FAILED {len(FAILED)}")
 for n, e in FAILED:

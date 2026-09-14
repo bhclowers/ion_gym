@@ -72,6 +72,11 @@ GATE_TIER = {
     "test_polygon_raster":       1,
     "test_scene_resolution":     1,
     "test_ui_smoke":             1,
+    # 0.8 s measured. Edit-viewer frame contract (L-432): extrude-axis
+    # permutation, mirror clip, mixed-axis refusal, clamp mapping —
+    # payload walks only, zero solves. The edit subsystem's FIRST
+    # standing gate (2026-09-12).
+    "test_edit_frame":           1,
     "test_fa_cache":             1,
     "test_stl_cache":            1,
     "test_solve_orchestrator":   1,

@@ -25,7 +25,9 @@ import plotly.graph_objects as go
 from ion_gym.viz import viz_core as V
 from ion_gym.viz import viz_core as _VIZ
 
-FATE_COLOR = {0: "#2ca02c", 1: "#d62728", 2: "#ff7f0e", 3: "#9467bd"}
+# Fate colours from THE single authority (physics.ion_envelope); the
+# local copy stopped at 3, so station fates drew in the fallback blue.
+from ion_gym.physics.ion_envelope import FATE_COLOR  # noqa: F401
 
 # classic palette: pale green sheet, darker green mesh, red contours,
 # blue default trajectories.
@@ -1387,6 +1389,9 @@ class PeSurfaceTab:
         self._sync_planes(model)
         p = types.SimpleNamespace(model=model)
         p.mz = float(self.w_mz.value)
+        # spec charge rides the pack: the surface must show the ion the
+        # spec flies (displayed == solver input), not a hard-coded z=1
+        p.charge = int(getattr(self.get_spec().source, "charge", 1))
         p.stride = self._stride_for(model)
         p.comp = self.w_comp.value
         p.plane = self.w_plane.value
@@ -1465,7 +1470,8 @@ class PeSurfaceTab:
         no widgets, no Panel objects, no shared spec (everything arrives
         in `p`, assembled on the doc thread by _prep)."""
         import numpy as np
-        surface = compute_component(p.model, p.mz, 1, p.comp,
+        surface = compute_component(p.model, p.mz,
+                                    getattr(p, "charge", 1), p.comp,
                                     plane=p.plane, index=p.idx)
         fig = pe_figure_3d(
             p.model, surface=surface, results=p.results,

@@ -9,7 +9,7 @@ routes), and an interactive Panel/Plotly workbench.
 Developed in the Clowers Research Group, Washington State University,
 as the design and validation environment for systems used to manipulate gas-phase ions.
 
-## Scope:
+## Overview
 
 - **What is ion_gym?** A Python-native toolkit that takes a declarative
   JSON geometry to flown ions in one scriptable path: solve the fields,

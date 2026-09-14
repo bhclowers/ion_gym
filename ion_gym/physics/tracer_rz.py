@@ -111,7 +111,7 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzB, EuB,
                   T_k, P_pa, sigma, c_star, c_bar, sig1d, m_gas,
                   rec, rec_every, seed,
                   cs, cke, cke_x, cke_y, cke_z, cef, cea, cer, crad, cncol, cpath, ceat, cket,
-                  bnd_on, bnd_val):
+                  bnd_on, bnd_val, pl_col, pl_val, pl_sgn, pl_w, pl_kind):
     """Records base kinematics + enabled optional channels every
     rec_every steps. E-field stored is in V/mm per the channel contract
     (basis arrays are V/m; the write scale converts). Returns (nrec, kind, ncol)."""
@@ -256,6 +256,84 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzB, EuB,
         if x < 0 or r / mm > (nu - 2):
             kind = 1
             break
+        # STATION PLANES (fate 5 impact_plane / 6 detect). Identical
+        # crossing math, window sense and step ordering to tracer3d and
+        # the planar kernel — metal, then box exit, then stations, then
+        # declared bounds — from the ONE shared plane builder
+        # (physics.stations.station_planes). This kernel carries a full
+        # 3-D transverse state (y, z with r = sqrt(y^2+z^2) supplying the
+        # cylindrical field lookup only), so a rectangular y/z window
+        # needs no r-z-specific reinterpretation: it is the same window
+        # the other routes evaluate.
+        if pl_col.shape[0] > 0:
+            hit_pl = False
+            for ip in range(pl_col.shape[0]):
+                pcol = pl_col[ip]
+                if pcol == 0:
+                    cn = x
+                    co = xo
+                elif pcol == 1:
+                    cn = y
+                    co = yo
+                else:
+                    cn = z
+                    co = zo
+                sgn = pl_sgn[ip]
+                val = pl_val[ip]
+                if sgn == 0.0:
+                    crossed = (cn - val) * (co - val) <= 0.0 and cn != co
+                else:
+                    crossed = ((cn - val) * sgn >= 0.0
+                               and (co - val) * sgn < 0.0)
+                if crossed:
+                    den = cn - co
+                    if den == 0.0:
+                        f = 0.0
+                    else:
+                        f = (val - co) / den
+                    if f < 0.0:
+                        f = 0.0
+                    if f > 1.0:
+                        f = 1.0
+                    # candidate crossing point FIRST: a pass-window hit
+                    # must leave the step untouched
+                    xc = xo + f * (x - xo)
+                    yc = yo + f * (y - yo)
+                    zc = zo + f * (z - zo)
+                    if pcol == 0:
+                        w1 = yc
+                        w2 = zc
+                    elif pcol == 1:
+                        w1 = xc
+                        w2 = zc
+                    else:
+                        w1 = xc
+                        w2 = yc
+                    _ins = (pl_w[ip, 0] <= w1 <= pl_w[ip, 1]
+                            and pl_w[ip, 2] <= w2 <= pl_w[ip, 3])
+                    if pl_kind[ip] == 6:
+                        if not _ins:
+                            continue    # detector patch: outside passes
+                    elif _ins:
+                        continue        # plate: inside the aperture passes
+                    # the step was only flown to fraction f: remove the
+                    # unflown remainder from the arc length, exactly as
+                    # the metal-impact backtrack above does
+                    path -= (1.0 - f) * math.sqrt(
+                        (x - xo) * (x - xo) + (y - yo) * (y - yo)
+                        + (z - zo) * (z - zo))
+                    x = xc
+                    y = yc
+                    z = zc
+                    vx = vxo + f * (vx - vxo)
+                    vy = vyo + f * (vy - vyo)
+                    vz = vzo + f * (vz - vzo)
+                    t = to + f * dt
+                    kind = pl_kind[ip]
+                    hit_pl = True
+                    break
+            if hit_pl:
+                break
         # optional bounding/impact planes (fate 3). In r-z, x is axis, the
         # transverse coordinate is (y,z); check y and z against the
         # y-bounds (radial aperture) symmetrically.

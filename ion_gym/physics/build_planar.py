@@ -1056,7 +1056,8 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
                 ele, mm, acc, dt, t_max_us, collide_on, T_k, P_pa,
                 sigma, c_star, c_bar, sig1d, m_gas, rec, rec_every,
                 nch_flags, bnd_on, bnd_val, seed, z0, vz,
-                sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, sds_stats):
+                sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, sds_stats,
+                pl_col, pl_val, pl_sgn, pl_w, pl_kind):
     """Planar Verlet + optional HS + N DRIVE CHANNELS, with a FIELD-FREE
     axial drift along z. The transverse field is
         E(x,y,t) = E_A + sum_k w_k(t) E_k
@@ -1159,6 +1160,7 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
         # old state for the impact backtrack (bisection to the boundary)
         xo = x
         yo = y
+        zo = z                    # station planes interpolate on z too
         vxo = vx
         vyo = vy
         to = t
@@ -1230,6 +1232,76 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
         if x < 0 or y < 0 or x / mm > nx - 1 or y / mm > ny - 1:
             kind = 1
             break
+        # STATION PLANES (fate 5 impact_plane / 6 detect). Same crossing
+        # math, window sense and step ordering as tracer3d's block —
+        # metal impact first, then box exit, then stations, then the
+        # declared bounds — so the two routes cannot diverge on the
+        # contract. The plane list itself comes from the ONE shared
+        # builder (physics.stations.station_planes), already converted
+        # into this kernel's anchored frame by the caller. sgn is 0 for
+        # a station: it terminates on a crossing in either direction.
+        if pl_col.shape[0] > 0:
+            hit_pl = False
+            for ip in range(pl_col.shape[0]):
+                pcol = pl_col[ip]
+                if pcol == 0:
+                    cn = x
+                    co = xo
+                elif pcol == 1:
+                    cn = y
+                    co = yo
+                else:
+                    cn = z
+                    co = zo
+                sgn = pl_sgn[ip]
+                val = pl_val[ip]
+                if sgn == 0.0:
+                    crossed = (cn - val) * (co - val) <= 0.0 and cn != co
+                else:
+                    crossed = ((cn - val) * sgn >= 0.0
+                               and (co - val) * sgn < 0.0)
+                if crossed:
+                    den = cn - co
+                    if den == 0.0:
+                        f = 0.0
+                    else:
+                        f = (val - co) / den
+                    if f < 0.0:
+                        f = 0.0
+                    if f > 1.0:
+                        f = 1.0
+                    # candidate crossing point FIRST: a pass-window hit
+                    # must leave the step untouched
+                    xc = xo + f * (x - xo)
+                    yc = yo + f * (y - yo)
+                    zc = zo + f * (z - zo)
+                    if pcol == 0:
+                        w1 = yc
+                        w2 = zc
+                    elif pcol == 1:
+                        w1 = xc
+                        w2 = zc
+                    else:
+                        w1 = xc
+                        w2 = yc
+                    _ins = (pl_w[ip, 0] <= w1 <= pl_w[ip, 1]
+                            and pl_w[ip, 2] <= w2 <= pl_w[ip, 3])
+                    if pl_kind[ip] == 6:
+                        if not _ins:
+                            continue    # detector patch: outside passes
+                    elif _ins:
+                        continue        # plate: inside the aperture passes
+                    x = xc
+                    y = yc
+                    z = zc
+                    vx = vxo + f * (vx - vxo)
+                    vy = vyo + f * (vy - vyo)
+                    t = to + f * dt
+                    kind = pl_kind[ip]
+                    hit_pl = True
+                    break
+            if hit_pl:
+                break
         # optional bounding/impact planes (fate 3). bnd_on: 6 flags
         # [x_min,x_max,y_min,y_max,z_min,z_max]; bnd_val: 6 values. z now
         # carries the real axial drift, so z bounds are meaningful (e.g.
@@ -1379,6 +1451,23 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
         bnd_val[2] -= _any
         bnd_val[3] -= _any      # y_min, y_max
 
+    # STATION PLANES for the kernel, from the ONE shared builder. The
+    # kernel flies the ANCHORED frame (node i at i*h), so stations —
+    # authored in the user frame like bounds and births above — are
+    # converted with the same anchor offset; z carries no anchor (the
+    # planar route's z is the field-free drift coordinate, recorded
+    # as-is), hence the 0.0. This also serves the stl2d route, which
+    # flies through this same fly_fn.
+    from ion_gym.physics.stations import station_planes as _st_planes
+    _AXCOL = {"x": 0, "y": 1, "z": 2}
+    _pl = _st_planes(spec, (_anx, _any, 0.0))
+    pl_col = np.array([_AXCOL[p[0]] for p in _pl], np.int64)
+    pl_val = np.array([p[1] for p in _pl], np.float64)
+    pl_sgn = np.array([p[2] for p in _pl], np.float64)
+    pl_w = (np.array([list(p[3]) for p in _pl], np.float64)
+            if _pl else np.empty((0, 4), np.float64))
+    pl_kind = np.array([p[4] for p in _pl], np.int64)
+
     # DRIFT EXTENSION: residual |E| on each boundary face, ONCE
     # per model. Static A exactly; each drive channel at its worst-case
     # gain -- |w| <= 1 for sin/cos/square waveforms, max|table| for
@@ -1440,7 +1529,8 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
             col.enabled, col.T_k, col.P_pa, col.sigma_m2, c_star, c_bar,
             sig1d, mg, rec, rec_every, nch,
             bnd_on, bnd_val, env.seed, b[2], b[5],
-            sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, _sds_stats)
+            sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, _sds_stats,
+            pl_col, pl_val, pl_sgn, pl_w, pl_kind)
         traj = rec[:n].copy()
         from ion_gym.io.records import TrajRecord
         rec_view = TrajRecord(traj, col_names)

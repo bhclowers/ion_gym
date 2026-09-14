@@ -631,7 +631,14 @@ def _rz_full(arr, axis):
 
 # fate codes the 3-D/planar kernels return (tracer3d.fly3d `kind`)
 FATE_NAMES = {0: "struck metal or left the domain", 1: "left the field box",
-              2: "still in flight at t_max", 3: "crossed a declared plane"}
+              2: "still in flight at t_max", 3: "crossed a declared plane",
+              4: "hit the transporter pass limit",
+              5: "struck a station impact plane",
+              6: "were detected at a station"}
+# PROSE register, deliberately NOT physics.ion_envelope.FATE_NAME: these
+# are sentence fragments ("3 ion(s) were detected at a station"), while
+# that table holds short labels for legends and tables. Same codes, two
+# registers — keep them in step when a fate is added.
 
 
 def world_off(model):
@@ -1208,8 +1215,22 @@ def scene_from_simspec(spec, model=None, *, field: str | None = "phi",
                metal=metal_slices,
                bounds=((_MOFF[0], _MOFF[0] + W, -H, H, z0, z1)
                        if (_rz and revolve) else
+                       # ONE application of the frame offset PER AXIS.
+                       # x and y add theirs once here; z used to add
+                       # _MOFF[2] a SECOND time on top of a z0/z1 that
+                       # every branch above already states canonically
+                       # (the 3-D branch computes _MOFF[2],
+                       # _MOFF[2] + span; slab_z_mm is user-stated in
+                       # the canonical frame). Measured on a z-mirrored
+                       # deck of depth 2H = 7.5 mm: the box came out
+                       # (-2H, 0) = (-7.5, 0.0) instead of (-H, +H), so
+                       # the view framed the instrument hard against one
+                       # edge (L-437). The rule is now identical on all
+                       # three axes, which is what makes it hold for any
+                       # mirrored axis or combination rather than for
+                       # the one deck in front of us.
                        (_MOFF[0], _MOFF[0] + W, _MOFF[1], _MOFF[1] + H,
-                        z0 + _MOFF[2], z1 + _MOFF[2])), slab_mm=slab_mm,
+                        z0, z1)), slab_mm=slab_mm,
                provenance=provenance,
                notes=[f"domain {W:.3g} x {H:.3g} mm, h = {h:g} mm/gu "
                       f"(node-centred: node (0,0) at "
@@ -1959,6 +1980,41 @@ def set_style(**kw):
                        f"known: {sorted(STYLE)}")
     STYLE.update(kw)
     return dict(STYLE)
+
+
+# Colorblind-safe categorical cycle (Okabe & Ito 2008). Ordered so the
+# first few overlaid series (ATD rungs, decomposition panels) are
+# maximally separable; vermilion sits 4th as the natural accent.
+OKABE_ITO = ("#0072B2", "#E69F00", "#009E73", "#D55E00",
+             "#CC79A7", "#56B4E9", "#F0E442", "#000000")
+
+
+def apply_house_style(palette=OKABE_ITO, font_family="sans-serif"):
+    """Set the notebook-wide matplotlib house style (Tufte-informed,
+    2026-09-11): colorblind-safe Okabe-Ito prop cycle, sans-serif
+    text, top/right spines OFF (range-frame direction), no grid,
+    frameless legends, outward ticks. Mutates matplotlib rcParams
+    GLOBALLY — that is its job: one call, every subsequent figure
+    inherits — and returns the dict of keys it set so the change is
+    inspectable, never silent. Renderers that set explicit colors via
+    STYLE are unaffected; this governs the default cycle and chrome."""
+    import matplotlib as mpl
+    from cycler import cycler
+    rc = {
+        "axes.prop_cycle": cycler(color=list(palette)),
+        "font.family": font_family,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": False,
+        "legend.frameon": False,
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "axes.titlesize": 11,
+        "axes.labelsize": 10,
+        "legend.fontsize": 8,
+    }
+    mpl.rcParams.update(rc)
+    return dict(rc)
 
 
 def _body_colors(bodies):
@@ -6652,4 +6708,370 @@ def assembly_overview(stages, *, seams=None, trajs=None, traj_style=None, height
         legend=dict(orientation="h", yanchor="top", y=-0.14,
                     xanchor="left", x=0, font=dict(size=9)),
         title=dict(text=" · ".join(bits), x=0.01, font=dict(size=12)))
+    return fig
+
+
+# the ShapeSpec extrusion convention — aliased from the schema owner
+# rather than restated (a second literal is a second authority that
+# can drift; the edit viewer is a third consumer of the same map).
+from ion_gym.io.sim_spec import EXTRUDE_INPLANE_AXES as _CYCLIC
+
+
+def _deck_shapes3d(spec, caller):
+    """Collect every shape of a deck as a typed 3-D record:
+    (electrode, drive-group label, kind, extrude_axis, lo, hi,
+    inplane) where inplane is (u0, v0, du, dv) for rect and
+    (cu, cv, ru, rv) for ellipse over the CYCLIC in-plane axes of
+    the extrude axis (x->(y,z), y->(z,x), z->(x,y)) — the ShapeSpec
+    extrusion convention. No extrude descriptor = the z-slab
+    default of build_shapes3d. Shared by the plan preview and the
+    multi-axis view so the two can never disagree about a deck's
+    contents. Unhandled shape kinds REFUSE, naming the caller —
+    never silently skipped."""
+    recs = []
+    depth = float(getattr(spec.geometry, "depth_mm", 0.0) or 0.0)
+    for el in spec.geometry.electrodes:
+        for sh in el.shapes:
+            p = sh.params
+            ex = sh.extrude() if callable(getattr(sh, "extrude",
+                                                  None)) else None
+            eax, lo, hi = ((ex["axis"], float(ex["lo_mm"]),
+                            float(ex["hi_mm"])) if ex
+                           else ("z", 0.0, depth))
+            grp = ",".join(el.rf_groups) or (el.dc_group or "DC")
+            if sh.type == "cutout":
+                if not sh.children:
+                    raise ValueError(f"{caller}: electrode "
+                                     f"{el.name!r} has an empty "
+                                     f"cutout — a hole with no shape "
+                                     f"is a spec bug, not renderable")
+                ch = sh.children[0]
+                cex = (ch.extrude() if callable(getattr(ch, "extrude",
+                       None)) else None)
+                ceax, clo, chi = ((cex["axis"], float(cex["lo_mm"]),
+                                   float(cex["hi_mm"])) if cex
+                                  else ("z", 0.0, depth))
+                cp = ch.params
+                if ch.type == "ellipse":
+                    recs.append((el.name, grp, "cut:ellipse", ceax,
+                                 clo, chi,
+                                 (float(cp["cx_mm"]),
+                                  float(cp["cy_mm"]),
+                                  float(cp["rx_mm"]),
+                                  float(cp["ry_mm"]))))
+                elif ch.type == "rect":
+                    recs.append((el.name, grp, "cut:rect", ceax,
+                                 clo, chi,
+                                 (float(cp["x_mm"]), float(cp["y_mm"]),
+                                  float(cp["width_mm"]),
+                                  float(cp["height_mm"]))))
+                else:
+                    raise ValueError(
+                        f"{caller}: electrode {el.name!r} cutout "
+                        f"child {ch.type!r} — extend the renderer "
+                        f"rather than skipping the hole silently")
+                continue
+            if sh.type == "rect" and {"x_mm", "y_mm", "width_mm",
+                                      "height_mm"} <= set(p):
+                recs.append((el.name, grp, "rect", eax, lo, hi,
+                             (float(p["x_mm"]), float(p["y_mm"]),
+                              float(p["width_mm"]),
+                              float(p["height_mm"]))))
+            elif sh.type == "ellipse" and {"cx_mm", "cy_mm", "rx_mm",
+                                           "ry_mm"} <= set(p):
+                recs.append((el.name, grp, "ellipse", eax, lo, hi,
+                             (float(p["cx_mm"]), float(p["cy_mm"]),
+                              float(p["rx_mm"]), float(p["ry_mm"]))))
+            else:
+                raise ValueError(
+                    f"{caller}: electrode {el.name!r} shape type "
+                    f"{sh.type!r} with params {sorted(p)} — extend "
+                    f"the renderer for that shape kind rather than "
+                    f"skipping it silently")
+    if not recs:
+        raise ValueError(f"{caller}: spec has no drawable shapes")
+    return recs
+
+
+def _rec_extent(rec, axis):
+    """(lo, hi) span of a shape record along a named axis."""
+    _n, _g, kind, eax, lo, hi, ip = rec
+    kind = kind.split(":")[-1]
+    if axis == eax:
+        return (lo, hi)
+    u_ax, v_ax = _CYCLIC[eax]
+    if kind == "rect":
+        u0, v0, du, dv = ip
+        return (u0, u0 + du) if axis == u_ax else (v0, v0 + dv)
+    cu, cv, ru, rv = ip
+    return (cu - ru, cu + ru) if axis == u_ax else (cv - rv, cv + rv)
+
+
+def deck_multiview(spec, *, operating_point, planes=None,
+                   views=("xy", "xz", "yz"), aspect="equal",
+                   figsize=(11.0, 8.0), trajectories=None):
+    """Multi-axis schematic of a 3-D deck — the doctrine view (any
+    3-D representation is shown multi-axis; axial coordinate
+    horizontal): xy plan, xz side, yz cross-section, drawn FROM THE
+    SPEC ITSELF and colored by drive group with one shared legend.
+    z spans come from each shape's extrude descriptor; on a declared
+    z-mirror the stored half is UNFOLDED (both halves drawn) so the
+    xz/yz views show the physical device, with the unfold noted on
+    the axis label. ``planes`` ({label: x_mm}) overlay on the
+    x-bearing views. Faithful mm aspect by default (ruled
+    2026-09-11); pass aspect="auto"/ratio to distort deliberately.
+    ``trajectories=(results, cols)`` overlays each ion's recorded
+    path on EVERY view (x-y, x-z, y-z projections of the same
+    flight) — the doctrine's multi-axis flight-path clause; ions
+    without a usable trajectory are counted and reported on the
+    figure, never silently dropped.
+    Returns the figure; no side effects."""
+    import textwrap
+    import matplotlib.pyplot as plt
+    recs = _deck_shapes3d(spec, "deck_multiview")
+    for v in views:
+        if v not in ("xy", "xz", "yz"):
+            raise ValueError(f"deck_multiview: unknown view {v!r} "
+                             f"(xy|xz|yz)")
+    sym = getattr(spec.geometry, "symmetry", None)
+    zmirror = bool(sym and (getattr(sym, "planes", None) or {})
+                   .get("z") == "mirror")
+    groups = sorted({g for _, g, *_ in recs})
+    cmap = plt.get_cmap("tab10")
+    gcol = {g: cmap(i % 10) for i, g in enumerate(groups)}
+    n = len(views)
+    fig = plt.figure(figsize=figsize, layout="constrained")
+    axes = {}
+    if n == 3:
+        gs = fig.add_gridspec(2, 2, height_ratios=[1, 1.4],
+                              width_ratios=[3, 1])
+        axes["xy"] = fig.add_subplot(gs[0, :])
+        axes["xz"] = fig.add_subplot(gs[1, 0],
+                                     sharex=axes.get("xy"))
+        axes["yz"] = fig.add_subplot(gs[1, 1])
+    else:
+        for i, v in enumerate(views):
+            axes[v] = fig.add_subplot(n, 1, i + 1)
+    for v in views:
+        ax = axes[v]
+        if aspect is not None:
+            ax.set_aspect(aspect)
+        A, B = v[0], v[1]
+        from matplotlib.patches import Ellipse as _Ell
+        _cut_section = False
+        for rec in sorted(recs, key=lambda r:
+                          r[2].startswith("cut:")):  # metal, then cuts
+            _nm, g, kind, eax, lo, hi, ip = rec
+            _is_cut = kind.startswith("cut:")
+            kind = kind.split(":")[-1]
+            u_ax, v_ax = _CYCLIC[eax]
+            if _is_cut:
+                third = ({"x", "y", "z"} - {A, B}).pop()
+                if {A, B} != {u_ax, v_ax}:
+                    t0, t1 = _rec_extent(rec, third)
+                    if not (third == "z" and t0 <= 0.0 <= t1):
+                        continue   # a hole only shows in its own
+                    _cut_section = True    # plane or a z=0 section
+                style = dict(facecolor="white", edgecolor="0.5",
+                             lw=0.4, alpha=1.0)
+            else:
+                style = dict(facecolor=gcol[g], edgecolor="0.3",
+                             lw=0.4, alpha=0.9)
+            patches = []
+            if kind == "ellipse" and {A, B} == {u_ax, v_ax}:
+                cu, cv, ru, rv = ip          # TRUE cross-section
+                c = {u_ax: cu, v_ax: cv}
+                r = {u_ax: ru, v_ax: rv}
+                patches.append(("ell", c[A], c[B],
+                                2 * r[A], 2 * r[B]))
+            else:                            # projected band
+                a0, a1 = _rec_extent(rec, A)
+                b0, b1 = _rec_extent(rec, B)
+                patches.append(("rect", a0, b0, a1 - a0, b1 - b0))
+            if zmirror and "z" in (A, B):
+                mirrored = []
+                for kp, a, b, da, db in patches:
+                    if B == "z":
+                        mb = (-b - db) if kp == "rect" else -b
+                        mirrored.append((kp, a, mb, da, db))
+                    else:
+                        ma = (-a - da) if kp == "rect" else -a
+                        mirrored.append((kp, ma, b, da, db))
+                for m in mirrored:           # drop plane-centred
+                    if m not in patches:     # coincident copies
+                        patches.append(m)
+            for kp, a, b, da, db in patches:
+                if kp == "rect":
+                    ax.add_patch(plt.Rectangle((a, b), da, db,
+                                               **style))
+                else:
+                    ax.add_patch(_Ell((a, b), da, db, **style))
+        ax.autoscale_view()
+        ax.margins(0.04)
+        lab_z = "z [mm]" + (" (mirror unfolded)" if zmirror else "")
+        ax.set_xlabel({"xy": "x [mm] (axis, horizontal per doctrine)",
+                       "xz": "x [mm] (axis, horizontal per doctrine)",
+                       "yz": "y [mm]"}[v])
+        ax.set_ylabel({"xy": "y [mm]", "xz": lab_z, "yz": lab_z}[v])
+        _t = {"xy": "xy — plan", "xz": "xz — side",
+              "yz": "yz — cross-section"}[v]
+        if _cut_section:
+            _t += " (holes shown at the z = 0 section)"
+        ax.set_title(_t, fontsize=9)
+        for lab, xv in (planes or {}).items():
+            if v in ("xy", "xz"):
+                ax.axvline(float(xv), ls="--", lw=1.2, color="k")
+        if v == "xy" and planes:
+            for lab, xv in planes.items():
+                ax.annotate(f"{lab} = {xv:g}",
+                            xy=(float(xv), 0.99),
+                            xycoords=("data", "axes fraction"),
+                            ha="center", va="top", fontsize=8,
+                            bbox=dict(facecolor="white",
+                                      edgecolor="none", alpha=0.75,
+                                      pad=1.5))
+    if trajectories is not None:
+        results, cols = trajectories
+        need = {"x", "y", "z"}
+        if not need <= set(cols):
+            raise ValueError(
+                f"deck_multiview: trajectories need channels "
+                f"{sorted(need)}; cols has {list(cols)} — record "
+                f"the missing axes rather than plotting a partial "
+                f"projection")
+        ii = {a: cols.index(a) for a in need}
+        n_skip = 0
+        for r in results:
+            tr = getattr(r, "traj", None)
+            if tr is None or len(tr) < 2:
+                n_skip += 1
+                continue
+            for v in views:
+                a, b = v[0], v[1]
+                axes[v].plot(tr[:, ii[a]], tr[:, ii[b]],
+                             lw=0.7, alpha=0.8, color="0.15")
+        if n_skip:
+            axes[views[0]].annotate(
+                f"{n_skip} ion(s) had no usable trajectory",
+                xy=(0.01, 0.01), xycoords="axes fraction",
+                fontsize=7, color="0.4")
+    handles = [plt.Line2D([], [], color=gcol[g], lw=4, label=g)
+               for g in groups]
+    fig.legend(handles=handles, fontsize=7, frameon=False,
+               loc="outside right upper")
+    fig.suptitle("\n".join(textwrap.wrap(
+        f"deck multiview — {operating_point}", width=64)),
+        fontsize=10)
+    return fig
+
+
+def deck_plane_preview(spec, *, planes, operating_point,
+                       trajectories=None, figsize=(10.0, 6.5),
+                       aspect="equal", rail_map=True):
+    """Plan-view schematic of a deck's electrode footprints with named
+    x-planes overlaid (birth / transporter emit / accept). Added
+    2026-09-09 for transporter-window verification: the caller passes
+    ``planes`` as {label: x_mm} and adjusts the window against what is
+    DRAWN FROM THE SPEC ITSELF (display equals solver input — the
+    rectangles are the spec's own shape parameters, nothing derived).
+    Two views: the xy plan and a per-electrode x-extent rail map
+    grouped by drive assignment. The rail map projects every shape
+    onto x, which is meaningful ONLY when transport runs along a
+    single straight x-leg (its original transporter-window purpose,
+    2026-09-09) — on a multi-turn track it is chart junk (ruled
+    2026-09-11): pass rail_map=False there and the figure is the
+    plan alone. Returns the figure; no side effects.
+    """
+    # NO backend selection here: the renderer contract makes display
+    # the CALLER's decision, and pinning Agg in a fresh Jupyter kernel
+    # silently disabled inline rendering (found 2026-09-10). Headless
+    # environments auto-select Agg on their own.
+    import matplotlib.pyplot as plt
+
+    rects = []
+    for rec in _deck_shapes3d(spec, "deck_plane_preview"):
+        if rec[2].startswith("cut:"):
+            continue          # holes are not metal footprints
+
+        (_x0, _x1) = _rec_extent(rec, "x")
+        (_y0, _y1) = _rec_extent(rec, "y")
+        rects.append((rec[0], rec[1], _x0, _y0,
+                      _x1 - _x0, _y1 - _y0))
+
+    # constrained layout: the ONLY mpl layout engine that budgets an
+    # outside legend + wrapped suptitle against an equal-aspect axes
+    # without shrinking it into a corner (tight_layout + rect did
+    # exactly that, 2026-09-11)
+    if rail_map:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize,
+                                       sharex=True,
+                                       layout="constrained")
+    else:
+        fig, ax1 = plt.subplots(figsize=figsize,
+                                layout="constrained")
+        ax2 = None
+    # FAITHFUL ASPECT by default (ruled 2026-09-11): an instrument's
+    # xy plan renders in true mm proportions first; distortion is the
+    # user's explicit choice (aspect="auto" or a numeric ratio), never
+    # the renderer's. Applies to the plan only — the rail map's y is
+    # an index, not a length.
+    if aspect is not None:
+        ax1.set_aspect(aspect)
+    groups = sorted({g for _, g, *_ in rects})
+    cmap = plt.get_cmap("tab10")
+    gcol = {g: cmap(i % 10) for i, g in enumerate(groups)}
+    for name, g, x, y, w, h in rects:
+        ax1.add_patch(plt.Rectangle((x, y), w, h, facecolor=gcol[g],
+                                    edgecolor="k", lw=0.3, alpha=0.8))
+    if trajectories is not None:
+        # ions IN the apparatus: (results, cols, axial_ch, transv_ch)
+        res, tcols, ach, tch = trajectories
+        for ch in (ach, tch):
+            if ch not in tcols:
+                raise ValueError(
+                    f"deck_plane_preview: overlay channel {ch!r} not in "
+                    f"cols {list(tcols)}")
+        ia, it = tcols.index(ach), tcols.index(tch)
+        for r in res:
+            if r.traj is not None and len(r.traj):
+                ax1.plot(r.traj[:, ia], r.traj[:, it], lw=0.9, alpha=0.9)
+    ax1.set_ylabel("y [mm] (gap axis)")
+    ax1.set_title("xy plan — electrode footprints by drive group")
+    ax1.autoscale_view()
+    if rail_map:
+        for i, (name, g, x, y, w, h) in enumerate(rects):
+            ax2.plot([x, x + w], [i, i], color=gcol[g], lw=3)
+        ax2.set_ylabel("electrode index")
+        ax2.set_xlabel("x [mm] (transport axis, horizontal per "
+                       "doctrine)")
+        ax2.set_title("x-extent rail map by drive group")
+    else:
+        ax1.set_xlabel("x [mm] (transport axis, horizontal per "
+                       "doctrine)")
+    for lab, xv in planes.items():
+        for ax in ((ax1, ax2) if rail_map else (ax1,)):
+            ax.axvline(float(xv), ls="--", lw=1.5, color="k")
+        # in-axes top slot WITH a translucent backing: readable over
+        # any plan content, and no external slot exists that never
+        # collides (below-axis met the xlabel; the bare top met the
+        # title — Brian's markup, 2026-09-11)
+        ax1.annotate(f"{lab} = {xv:g}",
+                     xy=(float(xv), 0.99), xycoords=("data",
+                                                     "axes fraction"),
+                     ha="center", va="top", fontsize=8,
+                     bbox=dict(facecolor="white", edgecolor="none",
+                               alpha=0.75, pad=1.5))
+    handles = [plt.Line2D([], [], color=gcol[g], lw=4, label=g)
+               for g in groups]
+    # legend OUTSIDE the data area (figure-level, budgeted by the
+    # constrained engine): inside placement covered electrodes on
+    # dense plans (Brian's markup, 2026-09-11)
+    fig.legend(handles=handles, fontsize=7, frameon=False,
+               loc="outside right upper")
+    # wrapped suptitle: long operating points overran fixed-width
+    # figures and clipped at the edges (Brian's markup, 2026-09-11)
+    import textwrap
+    fig.suptitle("\n".join(textwrap.wrap(
+        f"deck plane preview — {operating_point}", width=64)),
+        fontsize=10)
     return fig

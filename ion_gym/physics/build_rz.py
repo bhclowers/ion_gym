@@ -449,6 +449,21 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
     bnd_on = np.array(_bf, np.bool_)
     bnd_val = np.array(_bv, np.float64)
 
+    # STATION PLANES for the kernel, from the ONE shared builder. This
+    # route flies the frame the deck is authored in (no anchor offset —
+    # bounds go in raw, just above), so the offset is zeros. The kernel
+    # carries the full (y, z) transverse state, so windows are the same
+    # rectangles every other route evaluates.
+    from ion_gym.physics.stations import station_planes as _st_planes
+    _AXCOL = {"x": 0, "y": 1, "z": 2}
+    _pl = _st_planes(spec, (0.0, 0.0, 0.0))
+    pl_col = np.array([_AXCOL[p[0]] for p in _pl], np.int64)
+    pl_val = np.array([p[1] for p in _pl], np.float64)
+    pl_sgn = np.array([p[2] for p in _pl], np.float64)
+    pl_w = (np.array([list(p[3]) for p in _pl], np.float64)
+            if _pl else np.empty((0, 4), np.float64))
+    pl_kind = np.array([p[4] for p in _pl], np.int64)
+
     # DRIFT EXTENSION: residual |E| on each OPEN boundary face,
     # measured ONCE per model (the guard input). Component magnitudes
     # are worst-case bounds: static A exactly, RF basis B at |rf_V|,
@@ -503,7 +518,8 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
             model.mm_per_gu, acc_i, model.rf_V, model.om_rad_us, dt,
             spec.integration.t_max_us, T, P, model.sigma_m2, c_star,
             c_bar, sig1d, mg, rec, spec.integration.rec_every,
-            env.seed, *f13, bnd_on, bnd_val)
+            env.seed, *f13, bnd_on, bnd_val,
+            pl_col, pl_val, pl_sgn, pl_w, pl_kind)
         traj = rec[:n].copy()
         # Honor declared downstream bounds/stations by exact
         # ballistic algebra when the flight left the solved domain.

@@ -860,25 +860,18 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
     bnd = spec.bounds
 
     def _plane_list():
-        """Enabled bounding planes as (axis, value_mm, sign) for the KERNEL.
+        """Stations + enabled bounding planes for the KERNEL.
 
-        sign = -1 means "terminate on crossing DOWNWARD through the plane"
-        (a min plane), +1 means upward (a max plane) -- matching the sense the
-        post-hoc scan used.
+        Delegates to physics.stations.kernel_planes — the ONE
+        implementation of the station contract, shared with every other
+        route (extracted from this closure 2026-09-12; it had been
+        stl3d-private, which is why planar/r-z/stl2d silently ignored
+        stations). This route unfolds mirrored axes, so it passes its
+        world offset: the deck is authored in the canonical [-H,+H]
+        frame and the kernel flies the field's [0,2H] frame.
         """
-        pl = []
-        # user bounds are authored in the CANONICAL [-H,+H] frame (same as
-        # the display and recorded output); the kernel flies in the field's
-        # [0,2H] frame, so convert: field = canonical - mirror_off.
-        _axoff = dict(zip("xyz", _world_off_mm))
-        for ax in ("x", "y", "z"):
-            if getattr(bnd, f"{ax}_min_on", False):
-                pl.append((ax, float(getattr(bnd, f"{ax}_min"))
-                           - _axoff[ax], -1.0))
-            if getattr(bnd, f"{ax}_max_on", False):
-                pl.append((ax, float(getattr(bnd, f"{ax}_max"))
-                           - _axoff[ax], +1.0))
-        return pl
+        from ion_gym.physics.stations import kernel_planes
+        return kernel_planes(spec, _world_off_mm)
 
     def _apply_bounds(tr, summ):
         """FALLBACK ONLY. The kernel now finds the crossing per step and

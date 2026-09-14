@@ -177,7 +177,21 @@ def generate_births(spec: SimSpec):
             ke = rng.uniform(s.ke_lo, s.ke_hi)
             sp = math.sqrt(2 * ke * E_CHG / m_kg) / 1000.0
             d = np.array(s.direction, float)
-            d = d / (np.linalg.norm(d) or 1.0)
+            _n = float(np.linalg.norm(d))
+            if _n == 0.0:
+                # Defence in depth behind SimSpec.validate(): the old
+                # `or 1.0` guard turned this contradiction (energy
+                # declared, no direction to put it in) into a zero
+                # directed velocity, so the deck's ke_lo..ke_hi never
+                # reached the solver and nothing said so. Refuse with
+                # the same fix the validator names.
+                raise ValueError(
+                    f"source.direction is the zero vector while "
+                    f"ke_lo..ke_hi = {s.ke_lo}..{s.ke_hi} eV declares a "
+                    f"directed beam — the energy has nowhere to point. "
+                    f"Give the beam a direction (e.g. [1.0, 0.0, 0.0]) "
+                    f"or declare ke_lo = ke_hi = 0 for births at rest.")
+            d = d / _n
             v = v + sp * d
         if s.temperature_k > 0:
             sig = math.sqrt(KB * s.temperature_k / m_kg) / 1000.0

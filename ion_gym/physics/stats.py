@@ -6,9 +6,11 @@ gate script render from the same `compute_stats()`, so they can never
 disagree.
 
 Conventions (pinned against v51 code, not assumed):
-- fate codes (build_planar / build_rz / sim_app._FATE_NAME):
+- fate codes (THE table: physics.ion_envelope.FATE_NAME):
       0 = impact / exit (electrode)     1 = boundary exit (left domain)
       2 = timeout (still flying)       3 = bounding plane
+      4 = transporter max_passes       5 = station impact plane
+      6 = station detect (absorbed by a detector patch)
 - summary keys: kind, tof [us], x_end, y_end, z_end, r_end [mm], n_col
 - "transmitted" is EXAMPLE-DEPENDENT: the r-z einzel detector is a fate-3
   bound; the quad's success case is fate-2 drift-through. So the
@@ -25,9 +27,12 @@ from dataclasses import dataclass
 import math
 from typing import Any, Iterable, Optional, Sequence
 
-FATE_NAME = {0: "impact / exit", 1: "boundary exit", 2: "timeout",
-             3: "bounding plane"}
-FATE_COLOR = {0: "#2ca02c", 1: "#d62728", 2: "#ff7f0e", 3: "#9467bd"}
+# Fate tables are re-exported from their single authority
+# (physics.ion_envelope, where make_summary constructs the codes) so the
+# many existing `from ...stats import FATE_NAME` consumers keep working
+# without a second, driftable copy living here.
+from ion_gym.physics.ion_envelope import (  # noqa: F401
+    FATE_COLOR, FATE_NAME, fate_color, fate_name)
 
 FWHM_PER_SIGMA = 2.35482004503  # Gaussian
 

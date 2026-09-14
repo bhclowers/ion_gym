@@ -14,9 +14,11 @@ Parity enumeration (PARITY_RULE.md — the gate eats its own dogfood):
              stl3d share build_stl3d's per-ion envelope, so the envelope
              assertions transfer; their file-fixture front doors are the
              excluded part)
-  tw2d     — PARTIAL: birth-refusal parity only, by direct kernel call —
-             tw2d is not spec-routed; mass/summary are direct arguments,
-             so R1/R3/R4 have no meaning for it
+  tw2d     — COVERED for R2 (birth refusal) and R1-authority via the
+             fly_tw2d_ion spec adapter (mass = mz_of, charge =
+             source.charge; direct mz_Da/charge kwargs REFUSED). The
+             full-summary R1 and R3/R4 remain out of scope: tw2d
+             returns a raw dict, not the per-ion summary contract
 
 Contract cases, per covered route:
   R1  summary: every ion's summary carries kind/tof/mz/x_end/y_end/z_end,
@@ -165,7 +167,42 @@ def main():
         raise AssertionError("tw2d: in-metal birth flew")
     check("R2 tw2d (partial route): in-metal birth refuses loudly", t1)
 
-    n = 3 * len(ROUTES) + len(ROUTES) + 1
+    # tw2d — R1-authority via the spec adapter (2026-09-09): the flown
+    # mass and charge COME FROM the spec, and charge genuinely reaches
+    # the kernel (a 2+ ion gains twice the velocity of a 1+ ion of the
+    # same mass in the same uniform field over the same time).
+    def t2():
+        import types
+        from ion_gym.physics.tracer_tw2d import (fly_tw2d_ion,
+                                                 build_tw2d_fields)
+        nx = ny = 20
+        # uniform E_x from a linear DC basis: phi = -x -> E_x = +1 V/mm
+        gx = np.tile(-np.arange(nx, dtype=float)[:, None] * 0.5, (1, ny))
+        f = build_tw2d_fields({1: gx}, groups=[], assign={},
+                              dc={1: 1.0}, h_mm=0.5)
+        src1 = types.SimpleNamespace(n_ions=1, mz_list=[100.0], charge=1)
+        src2 = types.SimpleNamespace(n_ions=1, mz_list=[100.0], charge=2)
+        s1 = types.SimpleNamespace(source=src1)
+        s2 = types.SimpleNamespace(source=src2)
+        kw = dict(r0_mm=(1.0, 5.0), v0_mm_us=(0, 0, 0),
+                  t_max_us=0.5, dt_ns=1.0, record_every=1)
+        r1 = fly_tw2d_ion(s1, f, 0, **kw)
+        r2 = fly_tw2d_ion(s2, f, 0, **kw)
+        v1 = float(r1["vx"][-1]); v2 = float(r2["vx"][-1])
+        assert v1 > 0.0, f"tw2d authority: 1+ ion did not accelerate ({v1})"
+        assert abs(v2 / v1 - 2.0) < 1e-6,             f"tw2d authority: charge=2 gained {v2/v1:.6f}x, expected 2x"
+        try:
+            fly_tw2d_ion(s1, f, 0, mz_Da=100.0, **kw)
+        except TypeError as e:
+            assert "single authority" in str(e), e
+        else:
+            raise AssertionError(
+                "tw2d authority: direct mz_Da kwarg was accepted")
+    check("R1 tw2d (spec adapter): mass/charge from the spec authority, "
+          "charge reaches the kernel (2x velocity), direct kwargs refused",
+          t2)
+
+    n = 3 * len(ROUTES) + len(ROUTES) + 2
     print("=" * 60)
     print(f"ROUTE CONFORMANCE: PASSED {n - len(FAILED)}   "
           f"FAILED {len(FAILED)}")

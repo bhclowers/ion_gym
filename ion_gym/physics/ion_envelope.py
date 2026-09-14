@@ -89,6 +89,35 @@ def per_ion(spec, i, seed_base=None):
                         else resolve_run_seed(spec)) + int(i))
 
 
+FATE_NAME = {0: "impact / exit", 1: "boundary exit", 2: "timeout",
+             3: "bounding plane", 4: "transporter max_passes",
+             5: "station impact plane", 6: "station detect"}
+
+FATE_COLOR = {0: "#2ca02c", 1: "#d62728", 2: "#ff7f0e", 3: "#9467bd",
+              4: "#8c564b", 5: "#e377c2", 6: "#17becf"}
+
+
+def fate_name(kind):
+    """Label for a fate code, for display. THE one table (2026-09-12).
+
+    It previously lived in four places — sim_app._FATE_NAME,
+    stats.FATE_NAME, viz_core.FATE_NAMES and tracer3d._KIND_NAME — and
+    the copies drifted: three of them stopped at 3, so the station fates
+    the kernels have been emitting (5 impact_plane, 6 detect) had no
+    label and no colour anywhere in the UI. An absorbed ion therefore
+    looked like nothing had happened, which is part of why a working
+    splat still read as "does nothing". Fates are constructed here by
+    make_summary, so the naming lives here too and every consumer
+    imports it.
+    """
+    return FATE_NAME.get(int(kind), f"unknown fate {int(kind)}")
+
+
+def fate_color(kind):
+    """Colour for a fate code, from the same single table."""
+    return FATE_COLOR.get(int(kind), "#7f7f7f")
+
+
 def make_summary(*, kind, tof, mz, x_end, y_end, z_end, **extras):
     """Construct a per-ion summary that SATISFIES THE CONTRACT by
     construction: the six required keys are keyword-only arguments, so

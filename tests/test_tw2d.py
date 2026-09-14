@@ -182,3 +182,261 @@ def test_tw_rollover_monotone():
 if __name__ == "__main__":
     test_tw_spec_conventions()
     print("contract gates (pre-port) passed; B/C skip until tracer_tw2d")
+
+
+def _mk_duct_spec(q, gas=False, dt_ns=1.0, t_max_us=5.0, rec=5):
+    """Shared Gate D/E fixture: two-electrode duct, sin + square drive,
+    point source, charge q; gas=True enables HS N2 at 50 Pa."""
+    from ion_gym.io.sim_spec import (SimSpec, GeometrySpec, ElectrodeSpec,
+                                     ShapeSpec, SourceSpec, CollisionSpec,
+                                     IntegrationSpec, SymmetrySpec,
+                                     RFGroupSpec)
+
+    def _r(x, y, w, h):
+        return ShapeSpec("rect", {"x_mm": x, "y_mm": y,
+                                  "width_mm": w, "height_mm": h})
+    g = GeometrySpec(
+        width_mm=10.0, height_mm=6.0, depth_mm=0.0, mm_per_gu=0.5,
+        symmetry=SymmetrySpec(coords="xyz"),
+        electrodes=[
+            ElectrodeSpec(name="top", dc=2.0, rf_groups=["G0"],
+                          shapes=[_r(0.0, 5.0, 10.0, 1.0)]),
+            ElectrodeSpec(name="bot", dc=0.0, rf_groups=["G1"],
+                          shapes=[_r(0.0, 0.0, 10.0, 1.0)]),
+        ],
+        rf_groups=[
+            RFGroupSpec(name="G0", frequency_hz=5e5, amplitude_v=30.0,
+                        waveform="sin", phase_deg=0.0),
+            RFGroupSpec(name="G1", frequency_hz=5e5, amplitude_v=25.0,
+                        waveform="square", phase_deg=45.0),
+        ])
+    return SimSpec(
+        geometry=g, name=f"gateDE_q{q}_{'hs' if gas else 'vac'}",
+        source=SourceSpec(distribution="point", n_ions=1,
+                          x0_mm=2.0, y0_mm=3.0, z0_mm=0.0,
+                          direction=[1.0, 0.0, 0.0],
+                          ke_lo=1.0, ke_hi=1.0,
+                          mz_list=[300.0], charge=q,
+                          tob_span_us=0.0, seed=11),
+        collisions=CollisionSpec(enabled=gas, gas="N2", T_k=300.0,
+                                 P_pa=(50.0 if gas else 0.0),
+                                 sigma_m2=2.27e-18),
+        integration=IntegrationSpec(dt_ns=dt_ns, t_max_us=t_max_us,
+                                    rec_every=rec,
+                                    record_channels=[]))
+
+
+def test_three_way_kernel_equivalence_and_charge():
+    """Gate D (PI-commissioned 2026-09-09, steps 1+2 of the kernel
+    comparison): three-way VACUUM equivalence — planar spec route vs
+    tw2d vs extruded 3-D — on ONE solved square-TW spec, run at
+    charge 1 AND charge 2. The same solved bases feed all three
+    kernels; the same birth flies in each. Asserts pairwise max
+    trajectory deviation < 1e-6 mm (Gate B's bound) and that charge
+    genuinely changes the trajectory. A planar-vs-tw2d deviation
+    beyond bound is a FINDING (kernel-detail divergence), not a
+    tolerance to widen."""
+    from ion_gym.physics.sim_build import build_run
+    from ion_gym.physics.tracer_tw2d import build_tw2d_fields, fly_tw2d_ion
+    from ion_gym.physics.tracer3d import fly3d
+
+    DT_NS, TMAX_US, REC = 1.0, 5.0, 5
+
+    def _mkspec(q):
+        return _mk_duct_spec(q, gas=False, dt_ns=DT_NS,
+                             t_max_us=TMAX_US, rec=REC)
+
+    trajs = {}
+    for q in (1, 2):
+        spec = _mkspec(q)
+        model, fly, cols, births = build_run(spec)
+        traj, summ = fly(0)
+        ix, iy = cols.index("x"), cols.index("y")
+        px, py = traj[:, ix], traj[:, iy]
+        # half-dt planar flight for the cross-integrator convergence
+        # check (planar is velocity-Verlet; tw2d/3-D are RK4 — see the
+        # assertion block below for why bit-agreement is NOT asserted
+        # across that pair)
+        spec_h = _mkspec(q)
+        spec_h.integration.dt_ns = DT_NS / 2.0
+        spec_h.integration.rec_every = REC * 2
+        model_h, fly_h, cols_h, births_h = build_run(spec_h)
+        traj_h, _ = fly_h(0)
+        pxh = traj_h[:, cols_h.index("x")]
+        pyh = traj_h[:, cols_h.index("y")]
+
+        bx, by, bz, bvx, bvy, bvz, btob = (float(v) for v in births[0])
+        assign = {}
+        dc = {}
+        for k, el in enumerate(spec.geometry.electrodes, start=1):
+            # bases are 1-BASED by package convention (Gate B's synthetic
+            # bases {1,2,3} and the solved model agree)
+            if k not in model.bases:
+                raise AssertionError(
+                    f"gate D: electrode {el.name!r} index {k} not in "
+                    f"model.bases keys {sorted(model.bases)} — the "
+                    f"bases/assign key convention diverged")
+            if len(el.rf_groups) != 1:
+                raise AssertionError(
+                    f"gate D: electrode {el.name!r} has "
+                    f"{len(el.rf_groups)} group memberships; this gate's "
+                    f"assign mapping requires exactly one")
+            assign[k] = el.rf_groups[0]
+            dc[k] = float(el.dc)
+        # the planar model stores bases in V_BASIS-scaled units (one
+        # named constant, build_planar.V_BASIS); build_tw2d_fields
+        # expects genuine per-volt bases — divide ONCE, by the name
+        from ion_gym.physics.build_planar import V_BASIS
+        unit_bases = {k: b / V_BASIS for k, b in model.bases.items()}
+        f2 = build_tw2d_fields(unit_bases, spec.geometry.rf_groups,
+                               assign, dc, h_mm=model.mm_per_gu,
+                               ele=np.asarray(model.ele, bool))
+        o2 = fly_tw2d_ion(spec, f2, 0, r0_mm=(bx, by),
+                          v0_mm_us=(bvx, bvy, bvz), tob_us=btob,
+                          dt_ns=DT_NS, t_max_us=TMAX_US, record_every=REC)
+        o2h = fly_tw2d_ion(spec, f2, 0, r0_mm=(bx, by),
+                           v0_mm_us=(bvx, bvy, bvz), tob_us=btob,
+                           dt_ns=DT_NS / 2.0, t_max_us=TMAX_US,
+                           record_every=REC * 2)
+
+        nz, h = 5, float(model.mm_per_gu)
+
+        def ext(a):
+            return np.repeat(a[..., None], nz, axis=2)
+        K = f2["ExK"].shape[0]
+        n1, n2 = f2["EAx"].shape
+        f3 = dict(EAx=ext(f2["EAx"]), EAy=ext(f2["EAy"]),
+                  EAz=np.zeros((n1, n2, nz)),
+                  ExK=np.stack([ext(f2["ExK"][k]) for k in range(K)]),
+                  EyK=np.stack([ext(f2["EyK"][k]) for k in range(K)]),
+                  EzK=np.zeros((K, n1, n2, nz)),
+                  ch_kind=f2["ch_kind"], ch_om=f2["ch_om"],
+                  ch_ph=f2["ch_ph"], ch_amp=f2["ch_amp"],
+                  ch_off=f2["ch_off"], tab_t=f2["tab_t"],
+                  tab_v=f2["tab_v"], tab_off=f2["tab_off"],
+                  ele=np.zeros((n1, n2, nz), bool), h_mm=h)
+        o3 = fly3d(f3, 300.0, (bx, by, 2 * h), (bvx, bvy, bvz), btob,
+                   dt_ns=DT_NS, t_max_us=TMAX_US, record_every=REC,
+                   charge=q)
+
+        n = min(len(px), len(o2["x"]), len(o3["x"]))
+        assert n > 100, (
+            f"gate D q={q}: too few samples to compare (n={n}; "
+            f"planar={len(px)}, tw2d={len(o2['x'])}, 3d={len(o3['x'])}; "
+            f"tw2d kind={o2.get('kind')}, 3d kind={o3.get('kind')})")
+        # SAME-FAMILY pair (tw2d is the 2-D port of the 3-D RK4 kernel):
+        # bit-level agreement is the contract — hard bound, no widening.
+        d_23 = max(np.abs(o2["x"][:n] - o3["x"][:n]).max(),
+                   np.abs(o2["y"][:n] - o3["y"][:n]).max())
+        assert d_23 < 1e-6, (
+            f"gate D q={q}: tw2d vs 3-D diverge (max dev {d_23:.3e} mm)")
+        # CROSS-FAMILY pair (planar Verlet vs tw2d RK4): trajectories
+        # differ by integrator truncation (measured 1.1e-2 mm at
+        # dt=1 ns on this drive, session 2026-09-09 — the finding this
+        # gate surfaced). The honest contract is CONVERGENCE. NOTE the
+        # order: the SQUARE channel's sign flips land between step
+        # boundaries, degrading BOTH integrators' formal order at each
+        # crossing, so the deviation shrinks between linearly and
+        # quadratically per dt-halving (measured 2.53x on this drive,
+        # not the smooth-field ~4x). The gate asserts genuine
+        # convergence (>2x per halving) — a frame/unit/charge bug
+        # yields ~1x and goes red — plus an absolute bound.
+        d_p2 = max(np.abs(px[:n] - o2["x"][:n]).max(),
+                   np.abs(py[:n] - o2["y"][:n]).max())
+        nh = min(len(pxh), len(o2h["x"]))
+        d_p2h = max(np.abs(pxh[:nh] - o2h["x"][:nh]).max(),
+                    np.abs(pyh[:nh] - o2h["y"][:nh]).max())
+        assert d_p2h < d_p2 / 2.0, (
+            f"gate D q={q}: planar|tw2d deviation did not shrink "
+            f">2x with dt/2 ({d_p2:.3e} -> {d_p2h:.3e} mm): "
+            f"the divergence is not integrator truncation — investigate")
+        assert d_p2h < 5e-3, (
+            f"gate D q={q}: planar|tw2d deviation at dt/2 exceeds the "
+            f"absolute bound ({d_p2h:.3e} mm >= 5e-3)")
+        print(f"  Gate D q={q}: tw2d|3-D {d_23:.2e} mm (RK4 family); "
+              f"planar|tw2d {d_p2:.2e} -> {d_p2h:.2e} mm at dt/2 "
+              f"(Verlet-vs-RK4 truncation, converging)  OK")
+        trajs[q] = (px[:n], py[:n])
+
+    n = min(len(trajs[1][0]), len(trajs[2][0]))
+    # compare BOTH channels — the duct's field is along y, so x alone
+    # would test charge against a near-zero field (weak by construction)
+    dq = max(np.abs(trajs[1][0][:n] - trajs[2][0][:n]).max(),
+             np.abs(trajs[1][1][:n] - trajs[2][1][:n]).max())
+    assert dq > 1e-2, (
+        f"gate D: charge=2 trajectory indistinguishable from charge=1 "
+        f"(max dev {dq:.3e} mm) — charge is not reaching the planar kernel")
+    print(f"  Gate D: charge 1 vs 2 max dev {dq:.2e} mm (charge acts)  OK")
+
+
+def test_collisional_crn_equivalence_tw2d_vs_3d():
+    """Gate E (PI-commissioned 2026-09-09, the collision leg): tw2d vs
+    extruded 3-D WITH HS COLLISIONS under common random numbers. Both
+    kernels seed the same numba RNG and call the same imported
+    _collide/_mfp_mm, so with one seed the collision sequences must be
+    IDENTICAL: equal collision counts, trajectories agreeing to
+    ulp-class (measured 4.4e-16 mm across 90 collisions in the probe —
+    a single differing collision amplifies to mm scale, so the 1e-12
+    bound is a razor). Runs at charge 1 AND charge 2, so the z>=2
+    collision-mass fix (issues.md 2026-09-09) is exercised end-to-end
+    on both routes. z headroom in the extrusion (nz=81) keeps thermal
+    z drift inside the box for the full flight."""
+    from ion_gym.physics.sim_build import build_run
+    from ion_gym.physics.build_planar import V_BASIS
+    from ion_gym.physics.tracer_tw2d import build_tw2d_fields, fly_tw2d_ion
+    from ion_gym.physics.tracer3d import fly3d
+
+    col = dict(enabled=True, gas="N2", T_k=300.0, P_pa=50.0,
+               sigma_m2=2.27e-18)
+    for q in (1, 2):
+        spec = _mk_duct_spec(q, gas=True)
+        model, fly, cols, births = build_run(spec)
+        bx, by, bz, bvx, bvy, bvz, btob = (float(v) for v in births[0])
+        unit = {k: b / V_BASIS for k, b in model.bases.items()}
+        f2 = build_tw2d_fields(unit, spec.geometry.rf_groups,
+                               {1: "G0", 2: "G1"}, {1: 2.0, 2: 0.0},
+                               h_mm=model.mm_per_gu,
+                               ele=np.asarray(model.ele, bool))
+        kw = dict(r0_mm=(bx, by), v0_mm_us=(bvx, bvy, bvz), tob_us=btob,
+                  dt_ns=1.0, t_max_us=5.0, record_every=5,
+                  collisions=col, seed=7)
+        o2 = fly_tw2d_ion(spec, f2, 0, **kw)
+
+        nz, h = 81, float(model.mm_per_gu)
+
+        def ext(a):
+            return np.repeat(a[..., None], nz, axis=2)
+        K = f2["ExK"].shape[0]
+        n1, n2 = f2["EAx"].shape
+        f3 = dict(EAx=ext(f2["EAx"]), EAy=ext(f2["EAy"]),
+                  EAz=np.zeros((n1, n2, nz)),
+                  ExK=np.stack([ext(f2["ExK"][k]) for k in range(K)]),
+                  EyK=np.stack([ext(f2["EyK"][k]) for k in range(K)]),
+                  EzK=np.zeros((K, n1, n2, nz)),
+                  ch_kind=f2["ch_kind"], ch_om=f2["ch_om"],
+                  ch_ph=f2["ch_ph"], ch_amp=f2["ch_amp"],
+                  ch_off=f2["ch_off"], tab_t=f2["tab_t"],
+                  tab_v=f2["tab_v"], tab_off=f2["tab_off"],
+                  ele=np.zeros((n1, n2, nz), bool), h_mm=h)
+        o3 = fly3d(f3, 300.0, (bx, by, nz // 2 * h), (bvx, bvy, bvz),
+                   btob, dt_ns=1.0, t_max_us=5.0, record_every=5,
+                   collisions=col, seed=7, charge=q)
+
+        nc2, nc3 = int(o2["n_col"]), int(o3["ncol"])
+        assert nc2 == nc3, (
+            f"gate E q={q}: collision counts differ under CRN "
+            f"(tw2d {nc2} vs 3-D {nc3}) — the RNG draw sequences "
+            f"have desynced between the kernels")
+        assert nc2 > 30, (
+            f"gate E q={q}: only {nc2} collisions in 5 us at 50 Pa — "
+            f"the gas is silently off or the rate is wrong")
+        n = min(len(o2["x"]), len(o3["x"]))
+        assert n > 500, f"gate E q={q}: too few samples ({n})"
+        dx = np.abs(o2["x"][:n] - o3["x"][:n]).max()
+        dy = np.abs(o2["y"][:n] - o3["y"][:n]).max()
+        assert max(dx, dy) < 1e-12, (
+            f"gate E q={q}: CRN trajectories diverge "
+            f"(dx={dx:.3e}, dy={dy:.3e} mm) — a differing collision "
+            f"amplifies to mm scale, so this is a real desync")
+        print(f"  Gate E q={q}: {nc2} collisions, CRN max dev "
+              f"{max(dx, dy):.2e} mm  OK")

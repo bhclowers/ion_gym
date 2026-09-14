@@ -1,10 +1,6 @@
 __pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
+*.pyc
+.DS_Store
 .ruff_cache/
-.ipynb_checkpoints/
 fields/
 outputs/
-notebooks/out/
-.DS_Store

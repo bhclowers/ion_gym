@@ -180,6 +180,19 @@ class EditorViewer(JSComponent):
     export function render({ model }) {
       const pay = model.payload || {};
       const scene2 = pay.scene || {}, prims = pay.prims || {};
+      // PAYLOAD FRAME (2026-09-12, the x-extrusion fix): which WORLD
+      // axis each viewer axis displays. Python resolves it
+      // (policy.viewer_frame via prims.frame); a payload without one
+      // is the identity — the pre-frame contract. The geometry itself
+      // needs NO transform here (outlines arrive in the extrude
+      // axis's in-plane coordinates by the ShapeSpec convention);
+      // this frame only relabels axes and maps world-named inputs
+      // (mirror planes) onto viewer axes. This renderer stays dumb:
+      // the frame is data, not a route check.
+      const FRAME = (prims.frame && prims.frame.axes)
+        ? prims.frame.axes : ['x', 'y', 'z'];
+      const W2V = {};                       // world name -> viewer axis
+      FRAME.forEach((w, i) => { W2V[w] = 'xyz'[i]; });
       // stretch policy (PI 2026-08-25): canvas_w is only the
       // pre-layout FALLBACK; a ResizeObserver below re-fits the
       // canvas to its container on every width change.
@@ -345,7 +358,11 @@ class EditorViewer(JSComponent):
           });
           const holder = new THREE.Group();
           holder.add(img);
-          for (const a of combo) holder.scale[a] *= -1;
+          // plane axes are WORLD names (the spec's declaration, kept
+          // truthful in the scene); the mesh lives in the VIEWER
+          // frame, so flip the viewer axis that world axis maps to.
+          // Identity frame: W2V[a] === a, byte-for-byte the old flip.
+          for (const a of combo) holder.scale[W2V[a] || a] *= -1;
           gGhost.add(holder);
         }
         if (mirrors.length)
@@ -359,11 +376,19 @@ class EditorViewer(JSComponent):
           notes.push('revolved body is a courtesy ghost with a 270\\u00b0 ' +
                      'cutaway; the r-x section is the stored truth');
         if (qcut)
-          notes.push('QUARTER CUTAWAY: the +x/+y quadrant of every ' +
+          notes.push('QUARTER CUTAWAY: the +' + FRAME[0] + '/+' +
+                     FRAME[1] + ' quadrant of every ' +
                      'electrode is clipped about (' +
                      qcut.x_mm.toFixed(2) + ', ' + qcut.y_mm.toFixed(2) +
                      ') mm \\u2014 display only; the flown geometry is ' +
                      'uncut');
+        if (FRAME.join('') !== 'xyz')
+          notes.push('VIEW FRAME: this deck extrudes along world ' +
+                     FRAME[2] + '; the viewer\\u2019s (x, y, z) show ' +
+                     'world (' + FRAME.join(', ') + '). Labels and ' +
+                     'trajectories carry world coordinates; stored ' +
+                     'shape x/y are the in-plane (' + FRAME[0] + ', ' +
+                     FRAME[1] + ') coordinates.');
 
         // SELECTED-ELECTRODE HIGHLIGHT (PI 2026-08-25): emissive
         // tint on every mesh of the selected electrode, including its
@@ -531,14 +556,24 @@ class EditorViewer(JSComponent):
         axes.position.copy(ctr); axes.layers.set(1);
         scene.add(axes);
 
-        // viewports from the POLICY (data), laid out 1 / 1x2 / 2x2
+        // viewports from the POLICY (data), laid out 1 / 1x2 / 2x2.
+        // Ortho labels carry WORLD axis names via the payload frame:
+        // wlab('x','y') === 'xy  (x\\u2192, y\\u2191)' — for the
+        // identity frame these are character-for-character the labels
+        // that were hardcoded here, so certified z-decks read
+        // unchanged; a permuted deck's panels name the world planes
+        // they actually show. dir/up/ax/ay stay VIEWER-frame: the
+        // meshes live in viewer coordinates, so camera placement and
+        // extent framing (dim[ax]) are frame-blind by design.
+        const wlab = (h, v) => [h, v].sort().join('') +
+          '  (' + h + '\\u2192, ' + v + '\\u2191)';
         const defs = {
           persp: { label: 'perspective (drag to orbit)', kind: 'persp' },
-          xy: { label: 'xy  (x\\u2192, y\\u2191)', dir: [0, 0, 1],
+          xy: { label: wlab(FRAME[0], FRAME[1]), dir: [0, 0, 1],
                 up: [0, 1, 0], ax: 'x', ay: 'y' },
-          xz: { label: 'xz  (x\\u2192, z\\u2191)', dir: [0, -1, 0],
+          xz: { label: wlab(FRAME[0], FRAME[2]), dir: [0, -1, 0],
                 up: [0, 0, 1], ax: 'x', ay: 'z' },
-          yz: { label: 'yz  (z\\u2192, y\\u2191)', dir: [-1, 0, 0],
+          yz: { label: wlab(FRAME[2], FRAME[1]), dir: [-1, 0, 0],
                 up: [0, 1, 0], ax: 'z', ay: 'y' },
           rx: { label: 'r\\u2013x  (x axial \\u2192, r \\u2191)',
                 dir: [0, 0, 1], up: [0, 1, 0], ax: 'x', ay: 'y' },

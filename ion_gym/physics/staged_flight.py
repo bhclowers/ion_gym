@@ -54,6 +54,18 @@ from ion_gym.physics.collision3d import (E_CHG, KG_AMU,
 # a stale conversion is wrong in a way no test would name.
 from ion_gym.physics.stats import FWHM_PER_SIGMA
 
+# EMPTY station-plane arrays for the per-region kernels. The staged
+# route does not yet hand its stations to the kernel (they are stated in
+# the assembly world frame and need the same world->local conversion the
+# exit seam gets), so both region flyers pass these and keep the
+# existing post-hoc station behaviour exactly. One definition, so the
+# two call sites cannot drift apart.
+_NO_PL_COL = np.empty(0, np.int64)
+_NO_PL_VAL = np.empty(0, np.float64)
+_NO_PL_SGN = np.empty(0, np.float64)
+_NO_PL_W = np.empty((0, 4), np.float64)
+_NO_PL_KIND = np.empty(0, np.int64)
+
 
 def _rot_matrix(rot_deg):
     """Intrinsic X->Y->Z rotation (deg) -> 3x3. Identity for None/zeros.
@@ -461,7 +473,17 @@ def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
         g["c_star"], g["c_bar"], g["sig1d"], g["m_gas"],
         rec, int(reg.rec_every), nch, bnd_on, bnd_val, int(seed),
         float(r0_mm[2]), float(v0_mm_us[2]),
-        False, 0.0, 0.0, 0.0, 0.0, sds_stats)
+        False, 0.0, 0.0, 0.0, 0.0, sds_stats,
+        # STATION PLANES: EMPTY on the staged route. The per-region
+        # kernels now accept them (L-435 steps 2-3), but a staged
+        # region flies its OWN local frame and reg.stations are stated
+        # in the assembly's world frame, so they need the same
+        # world->local conversion the exit seam gets before they can be
+        # handed over. Until that lands, staged flight behaves exactly
+        # as it always has (stations post-hoc only, via _detect_hit) —
+        # passing empty arrays keeps that behaviour bit-identical
+        # rather than half-applying a wrong-frame plane.
+        _NO_PL_COL, _NO_PL_VAL, _NO_PL_SGN, _NO_PL_W, _NO_PL_KIND)
     if n >= max_records:
         raise RuntimeError(
             f"region {reg.name!r}: the trajectory buffer filled "
@@ -679,7 +701,12 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
         f["rf_V"], f["om_rad_us"], dt, float(reg.t_max_us),
         g["T_k"], g["P_pa"], g["sigma_m2"], g["c_star"], g["c_bar"],
         g["sig1d"], g["m_gas"], rec, int(reg.rec_every), int(seed),
-        *f13, bnd_on, bnd_val)
+        *f13, bnd_on, bnd_val,
+        # STATION PLANES: EMPTY on the staged route — see the note at
+        # the planar region flyer above (world->local conversion for
+        # reg.stations is the pending piece; empty keeps staged
+        # behaviour bit-identical meanwhile).
+        _NO_PL_COL, _NO_PL_VAL, _NO_PL_SGN, _NO_PL_W, _NO_PL_KIND)
     if n >= max_records:
         raise RuntimeError(
             f"region {reg.name!r}: the trajectory buffer filled "
@@ -1396,6 +1423,22 @@ def load_assembly(path):
         _po = _pose_from(st.get("pose"))
         if _ex is not None:
             _ex = exit_world_to_local(_ex, _po)
+        # LOUD non-support notice (PI ruling 2026-09-12): the staged
+        # route cannot hand stations to its kernel yet — regions fly a
+        # LOCAL frame while stations are stated in the assembly WORLD
+        # frame — so any station that would ABSORB or SPLAT is reported
+        # here, by name, with the fix. Silently dropping them is what
+        # made a working splat look broken. Arrival-time stations
+        # (detect/on_hit='pass') are served post-hoc and are not
+        # reported.
+        from ion_gym.physics.stations import unsupported_stations_notice
+        _note = unsupported_stations_notice(
+            spec, route=f"staged assembly (stage {st['name']!r})",
+            fix="Fix: fly this stage on its own (single-stage honours "
+                "stations on every route), or use detect with "
+                "on_hit='pass' if you only need the arrival time.")
+        if _note:
+            print(_note, flush=True)
         regions.append(Region(
             name=st["name"], fields=fields, pose=_po,
             exit=_ex, gas=gas,

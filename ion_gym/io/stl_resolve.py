@@ -68,6 +68,16 @@ def preflight_stls(spec):
     if the spec carries stl_manifest, unchanged. report names exactly
     what is wrong so the caller can raise a clean diagnostic."""
     d = resolve_stl_dir(spec)
+    # A relative dir with no recorded spec path is the CWD fallback --
+    # legal, but it MUST say so: a bare "dir ." sent a user hunting file
+    # placement when the real cause was a spec loaded from TEXT, which
+    # has no path to anchor against (2026-09-11 field report).
+    note = ""
+    if not d.is_absolute() and getattr(spec, "_loaded_from", None) is None:
+        note = (f" (= CWD fallback {(Path.cwd() / d).resolve()} -- the spec "
+                f"records no file path, so a relative stl_dir has nothing "
+                f"to anchor against; select the spec and its STL files "
+                f"together, or set an absolute stl_dir)")
     manifest = getattr(spec.geometry, "stl_manifest", None) or {}
     missing, changed, ok_files = [], [], []
     for el in spec.geometry.electrodes:
@@ -82,7 +92,7 @@ def preflight_stls(spec):
         else:
             ok_files.append(el.stl)
     ok = not missing and not changed
-    lines = [f"STL preflight for {spec.name!r}: dir {d}"]
+    lines = [f"STL preflight for {spec.name!r}: dir {d}{note}"]
     if ok_files:
         lines.append(f"  {len(ok_files)} file(s) present"
                      + (" and matching manifest" if manifest else ""))
@@ -105,6 +115,175 @@ def require_stls(spec):
             "above (keep the spec and its STL folder together), or "
             "re-import the geometry.")
     return resolve_stl_dir(spec)
+
+
+# ------------------------------------------------------ upload payload
+def _payload_digest(name_to_sha256):
+    """Content address of a mesh set: sha256 over sorted (name, byte-hash)
+    pairs. THE one derivation -- computable from raw bytes at install time
+    and from a spec's stl_manifest alone at re-load time, which is what
+    lets a previously installed deck resolve from its JSON with no bytes
+    re-supplied."""
+    h = hashlib.sha256()
+    for n in sorted(name_to_sha256):
+        h.update(n.encode())
+        h.update(bytes.fromhex(name_to_sha256[n]))
+    return h.hexdigest()
+
+
+def install_stl_payload(doc, payload, workdir):
+    """Make an in-memory spec DOCUMENT's STL references resolvable by
+    materializing the mesh bytes that arrived with it.
+
+    A spec and the meshes it names are ONE unit. Any transport that
+    carries bytes without a filesystem path (a browser upload, a message
+    body, a notebook string) strands a relative ``stl_dir``: there is no
+    anchor, so resolution falls back to the process CWD and the solve
+    refuses. This function is that transport's other half -- it takes the
+    meshes too and writes them somewhere the spec can point at.
+
+    doc      : the PARSED spec JSON (mutated in place: geometry.stl_dir is
+               set to the absolute directory the meshes were written to).
+               Operating on the document, not a SimSpec, is deliberate --
+               the rewrite must happen BEFORE the spec is built and drawn,
+               so no consumer ever sees the unresolvable state.
+    payload  : {filename: bytes} of the STL files supplied alongside.
+    workdir  : root for materialized decks (caller's choice; no path is
+               baked in here). Deck bytes land in a CONTENT-ADDRESSED
+               subdirectory, so re-supplying the same deck reuses the same
+               directory and the bases cache key (which hashes STL bytes)
+               stays stable across loads.
+
+    Returns (directory | None, notes). None means the document declares no
+    STL electrodes and nothing was written. REFUSES, by name, when a
+    declared mesh is absent from the payload or when supplied bytes do not
+    match the document's stl_manifest -- a deck solved from the wrong
+    meshes is wrong silently, which is the failure this refuses to allow.
+    """
+    geom = doc.get("geometry") if isinstance(doc, dict) else None
+    if not isinstance(geom, dict):
+        if payload:
+            raise ValueError(
+                f"{len(payload)} STL file(s) supplied with a document that "
+                f"has no 'geometry' section to attach them to "
+                f"({', '.join(sorted(payload))}) -- a staged assembly or a "
+                f"non-spec document is not handled by this door")
+        return None, []
+    needed = [el.get("stl") for el in geom.get("electrodes", [])
+              if isinstance(el, dict) and el.get("stl")]
+    if not needed:
+        # Not an STL deck. Extra meshes are a visible, reported decision.
+        notes = ([f"**ignored {len(payload)} STL file(s):** this deck "
+                  f"declares no STL electrodes."] if payload else [])
+        return None, notes
+
+    manifest = geom.get("stl_manifest") or {}
+    missing = [n for n in dict.fromkeys(needed) if n not in payload]
+    if missing and not payload:
+        # JSON alone. The manifest names every mesh AND its sha256, which
+        # fully determines the content address below -- so a deck whose
+        # meshes were installed by an earlier load resolves EXACTLY, with
+        # every byte re-verified. Not a search, not a guess: either the
+        # manifest-addressed directory holds the exact bytes, or refuse.
+        if all(n in manifest for n in dict.fromkeys(needed)):
+            cand = Path(workdir) / _payload_digest(
+                {n: manifest[n] for n in dict.fromkeys(needed)})[:16]
+            if cand.is_dir():
+                stale = [n for n in dict.fromkeys(needed)
+                         if not (cand / Path(n).name).exists()
+                         or hashlib.sha256(
+                             (cand / Path(n).name).read_bytes()
+                         ).hexdigest() != manifest[n]]
+                if not stale:
+                    geom["stl_dir"] = str(cand.resolve())
+                    return cand, [
+                        f"**{len(set(needed))} STL file(s) found from a "
+                        f"previous install** at `{cand.resolve()}` -- every "
+                        f"file re-verified against the spec's manifest; "
+                        f"`geometry.stl_dir` now points there."]
+    if missing:
+        raise FileNotFoundError(
+            f"this deck references {len(set(needed))} STL file(s) and "
+            f"{len(missing)} did not arrive with it: {', '.join(missing)}"
+            f"\n  -> select the spec .json AND its .stl files TOGETHER in "
+            f"the picker (Cmd/Ctrl-click; they are one unit -- the upload "
+            f"carries bytes, not the folder they sit in). A deck loaded "
+            f"this way once resolves from the .json alone afterwards.")
+
+    bad = [n for n in dict.fromkeys(needed)
+           if n in manifest
+           and hashlib.sha256(payload[n]).hexdigest() != manifest[n]]
+    if bad:
+        raise ValueError(
+            f"STL bytes do not match the spec's stl_manifest for: "
+            f"{', '.join(bad)}\n  -> these are not the meshes this deck "
+            f"was authored with; re-export the deck or supply the "
+            f"matching files")
+
+    # content address over (name, bytes) of exactly the meshes in use --
+    # via the SAME function the manifest-only path uses, so the two can
+    # never derive different addresses for the same deck
+    out = Path(workdir) / _payload_digest(
+        {n: hashlib.sha256(payload[n]).hexdigest()
+         for n in dict.fromkeys(needed)})[:16]
+    out.mkdir(parents=True, exist_ok=True)
+    for n in dict.fromkeys(needed):
+        fp = out / Path(n).name
+        # rewrite only when content differs: an untouched file keeps its
+        # mtime, and the deck stays byte-identical across reloads
+        if not fp.exists() or fp.read_bytes() != payload[n]:
+            fp.write_bytes(payload[n])
+    geom["stl_dir"] = str(out.resolve())
+
+    notes = [f"**{len(set(needed))} STL file(s) installed** to "
+             f"`{out.resolve()}`"
+             + (" and verified against the spec's manifest"
+                if manifest else " (spec carries no manifest to verify "
+                                 "against)")
+             + "; `geometry.stl_dir` in the editor now points there, so "
+               "what is displayed is what solves."]
+    extra = [n for n in payload if n not in set(needed)]
+    if extra:
+        notes.append(f"**ignored {len(extra)} unreferenced STL file(s):** "
+                     f"{', '.join(sorted(extra))}")
+    return out, notes
+
+
+def portable_stl_dir(doc, cache_root):
+    """Make a spec DOCUMENT portable for saving: when geometry.stl_dir
+    points inside the app's own mesh cache (`cache_root`, where
+    install_stl_payload materializes uploaded meshes), rewrite it to
+    "." in the document. The cache path is a fact about ONE machine's
+    session, and a saved deck carrying it breaks everywhere else --
+    while "." plus the intact stl_manifest is the portable truth: the
+    deck resolves beside its meshes on any path load, and resolves from
+    the JSON alone through the manifest-addressed reload on the machine
+    that installed it. A user-managed absolute stl_dir OUTSIDE the cache
+    is a deliberate declaration and is left untouched.
+
+    Mutates doc in place; returns a note string when it rewrote,
+    None otherwise. Never touches spec objects -- the LIVE session keeps
+    its absolute dir (it must keep solving); only the saved copy is
+    normalized.
+    """
+    geom = doc.get("geometry") if isinstance(doc, dict) else None
+    if not isinstance(geom, dict):
+        return None
+    raw = geom.get("stl_dir")
+    if not raw:
+        return None
+    d = Path(raw)
+    if not d.is_absolute():
+        return None
+    try:
+        d.resolve().relative_to(Path(cache_root).resolve())
+    except ValueError:
+        return None            # user-managed absolute dir: theirs, kept
+    geom["stl_dir"] = "."
+    return ('stl_dir rewritten to "." for portability (it pointed into '
+            'this machine\'s mesh cache); keep the .stl files with the '
+            'saved JSON, or reload the JSON alone on this machine and '
+            'the meshes resolve by manifest')
 
 
 # --------------------------------------------------- declared placement

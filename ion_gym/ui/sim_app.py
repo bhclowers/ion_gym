@@ -55,7 +55,12 @@ from ion_gym.viz import viz_core as V
 # generous. The server path never uses it (it schedules a poll).
 _BUILD_JOIN_TIMEOUT_S = 900.0
 
-_FATE_COLOR = {0: "#2ca02c", 1: "#d62728", 2: "#ff7f0e", 3: "#9467bd"}
+# Fate tables come from THE single authority
+# (physics.ion_envelope): this module's own copies stopped at
+# 3, so station fates 5/6 had no name, no colour and no impact
+# marker anywhere in the UI even though the kernels emit them.
+from ion_gym.physics.ion_envelope import (  # noqa: E402
+    FATE_COLOR as _FATE_COLOR, FATE_NAME as _FATE_NAME)
 # Control-column geometry (a duty box was once cut off by
 # the plot). A drive-group row is the widest thing the left column holds,
 # so the column width is DERIVED from that row instead of being a literal
@@ -88,8 +93,24 @@ CONTOURS_DEFAULT = 16
 # magic number in the body.
 STATUS_LOG_MAX = 100
 
-_FATE_NAME = {0: "impact / exit", 1: "boundary exit", 2: "timeout",
-              3: "bounding plane"}
+
+def _mz_color_map(mz_values):
+    """THE m/z -> colour convention for the app (PI 2026-09-13).
+
+    Plotly's Dark24, imported from the installed package rather than
+    copied as literals: 24 well-separated hues, so a many-mass deck gets
+    discrete levels instead of an 8-colour cycle repeating.
+
+    Callers pass the SPEC's declared mz_list, not the masses that
+    happen to appear in a result set. Keying off what was detected
+    would shift every colour when one mass records no hits, so the
+    trajectories and the detector histogram would disagree about which
+    colour means which mass.
+    """
+    from plotly.colors import qualitative as _q
+    pal = list(_q.Dark24)
+    return {m: pal[k % len(pal)] for k, m in enumerate(sorted(set(mz_values)))}
+
 # One-time numba tracer compile on the FIRST fly of a session -- already
 # stated in the flying status; the sizing readout states it
 # too so the pre-run estimate does not over-promise.
@@ -369,7 +390,7 @@ class SimApp:
     def __init__(self, spec: SimSpec = None):
         if not _HAVE:
             raise ImportError("pip install panel plotly")
-        pn.extension("plotly")
+        pn.extension("plotly", "tabulator")
         # Pay numba kernel compilation + plotly's import in the background
         # NOW, so the first Fly / Compute click doesn't stall 15-60 s on a
         # cold cache (6 of 9 events in a hang dump).
@@ -643,9 +664,18 @@ class SimApp:
                                             width=90, step=0.1,
                                             description=_dir_help)
         self.w_mz = pn.widgets.TextInput(
-            name="m/z list (Da, comma-separated)",
+            name="ion mass list (Da, comma-separated)",
             value=", ".join(f"{m:g}" for m in src.mz_list),
             placeholder="e.g. 100, 200, 500")
+        # CHARGE STATE (PI directive 2026-09-09): the ion description is
+        # mass in Da + a signed integer charge, default 1. The list above
+        # carries MASSES (the mz_list field name is historical); charge
+        # is NOT folded into the masses anywhere.
+        self.w_charge = pn.widgets.IntInput(
+            name="charge state (signed z)", value=int(src.charge),
+            step=1, width=140,
+            description="Signed integer charge state for every ion in "
+            "the packet (spec source.charge). 0 refuses at fly time.")
         # A second access point for clear-ions ON the
         # Source subtab (same handler as the top bar — one behavior).
         self.w_clear_ions_src = pn.widgets.Button(
@@ -675,6 +705,7 @@ class SimApp:
                              pn.Row(self.w_seeded, self.w_seedval)),
                    self.w_ion_total),
             self.w_mz,
+            self.w_charge,
             pn.pane.Markdown(
                 "*Each m/z is flown with its OWN block of "
                 "`ions per m/z` ions — e.g. 50 with 3 masses flies "
@@ -735,8 +766,64 @@ class SimApp:
                                  pn.Row(self.w_dirx, self.w_diry,
                                         self.w_dirz),
                                  self.w_clear_ions_src)
-        ionsrc_adv = pn.Column(self._beam_panel())
-        ionsrc_stations = pn.Column(self._station_editor())
+        # BUILD-ONCE (L-192 family, field-hit 2026-09-11: add-DC-group /
+        # TW-group edits froze the visible tab until a tab switch). The
+        # Advanced and Stations sub-tabs hold PERSISTENT columns
+        # (_beam_col, _station_col); a fresh pn.Column wrapper around
+        # them each build re-parented the persistent halves — the exact
+        # two-parent transient the stats.card/STL-panel fix removed, one
+        # wrapper level down. Advanced needs no wrapper at all; Stations
+        # keeps its static caption in a once-built column.
+        ionsrc_adv = self._beam_panel()
+        if getattr(self, "_stations_col", None) is None:
+            # Reference text lives in a COLLAPSED accordion (PI request
+            # 2026-09-12): it is reference prose, not a control, and as
+            # a permanent wall of text above the editor it was being
+            # scrolled past — the impact_plane aperture/patch
+            # distinction below cost a session to rediscover. The
+            # editor itself stays visible and un-nested.
+            _kinds_md = pn.pane.Markdown(
+                "**record** — transparent tally; crossings are logged, "
+                "flight unchanged.\n\n"
+                "**detect** — also transparent in flight; the FIRST "
+                "window crossing is the arrival time and later motion "
+                "is ignored by analysis.\n\n"
+                "**detect / on_hit='pass'** — log only; never touches "
+                "the flight. Crossings come post-hoc from the "
+                "trajectory.\n\n"
+                "**detect / on_hit='splat'** — a detector PATCH: "
+                "crossings INSIDE the window ABSORB the ion (fate "
+                "'station detect', the detection event); outside "
+                "passes. Empty window = full-plane detector.\n\n"
+                "**impact_plane** — a physical PLATE: crossings "
+                "OUTSIDE the window splat (fate 'station impact "
+                "plane'), inside passes. Empty window = wall. "
+                "`on_hit` does not apply to this kind.\n\n"
+                "**The window inverts when you change kind.** The same "
+                "numbers mean a detector patch under `detect` and an "
+                "APERTURE under `impact_plane` — a window drawn on the "
+                "beam absorbs as a detector and passes everything as a "
+                "plate. To stop a beam with `impact_plane`, clear the "
+                "window (= solid wall) or set one that EXCLUDES the "
+                "beam.\n\n"
+                "Bounding planes (Bounds tab) are absolute whole-plane "
+                "kills and cannot make a splat window.")
+            self._stations_col = pn.Column(
+                pn.Accordion(("Station kinds — what each one does",
+                              _kinds_md),
+                             active=[], sizing_mode="stretch_width",
+                             # Panel's default accordion header is bold
+                             # and larger than the controls around it,
+                             # which made this reference panel shout at
+                             # the editor it belongs to (PI 2026-09-13).
+                             # Normal weight, inherited size.
+                             stylesheets=[
+                                 ".accordion-header button, "
+                                 ".card-header button, "
+                                 ".bk-btn { font-weight: 400; "
+                                 "font-size: 1em; }"]),
+                self._station_editor())
+        ionsrc_stations = self._stations_col
 
         # --- Voltages tab: session RF groups + per-electrode DC & group
         # DC and RF are independent — each electrode has a DC value AND an
@@ -1313,7 +1400,7 @@ class SimApp:
                 step=0.05), wire=_disp)
         self._persistent(
             "w_colorby", lambda: pn.widgets.Select(
-                name="colour traces by", value="fate",
+                name="colour traces by", value="m/z",
                 options=["fate", "m/z", "solid color"]
                 + list(OPTIONAL_CHANNELS.keys()),
                 description="Colour each trajectory by its outcome (fate), "
@@ -1400,19 +1487,26 @@ class SimApp:
         # SQUARE VIEW REMOVED (it did not work smoothly).
         # There is now NO under-plot control row at all, so nothing sits
         # between the pane and the control column to bleed across it.
-        disp_tab = pn.Column(
-            pn.pane.Markdown("#### field overlay", margin=(6, 0, 0, 0)),
-            self.w_plane,
-            pn.Row(self.w_contours, self.w_contours_toggle),
-            self.w_showfield,
-            self.w_fieldmode, self.w_viewslice, self.w_lock,
-            self.w_verbose,
-            self.w_trajmode, self.w_width, self.w_maxpaths,
-            self.w_alpha, self.w_colorby,
-            self.w_solidcolor, self.w_decim, self.w_impactsize,
-            self.w_impactsym, pn.Row(self.w_elfill, self.w_ellabel),
-            pn.Row(self.w_elcolor, self.w_elalpha),
-            self.w_field_btn)
+        # BUILD-ONCE: every child here is a _persistent widget (or static
+        # markdown); a fresh Column around them each build re-parented
+        # all ~22 on every rebuild — the measured freeze trigger for the
+        # 2026-09-11 field report (add group -> visible tab dead until a
+        # tab switch re-rendered).
+        if getattr(self, "_disp_col", None) is None:
+            self._disp_col = pn.Column(
+                pn.pane.Markdown("#### field overlay", margin=(6, 0, 0, 0)),
+                self.w_plane,
+                pn.Row(self.w_contours, self.w_contours_toggle),
+                self.w_showfield,
+                self.w_fieldmode, self.w_viewslice, self.w_lock,
+                self.w_verbose,
+                self.w_trajmode, self.w_width, self.w_maxpaths,
+                self.w_alpha, self.w_colorby,
+                self.w_solidcolor, self.w_decim, self.w_impactsize,
+                self.w_impactsym, pn.Row(self.w_elfill, self.w_ellabel),
+                pn.Row(self.w_elcolor, self.w_elalpha),
+                self.w_field_btn)
+        disp_tab = self._disp_col
         # Watchers for every display widget above are wired ONCE at first
         # creation (the wire= of each _persistent call). The per-rebuild
         # watch loop that lived here would now attach a DUPLICATE watcher
@@ -1922,9 +2016,19 @@ class SimApp:
             or "instrument"
         if not _fn.lower().endswith(".json"):
             _fn += ".json"
+        # the FileDownload below is deliberately fresh each build
+        # (state-derived enable); the PERSISTENT filename field must not
+        # share a fresh container with it (re-parent -> freeze), so the
+        # pair lives in a once-built column and only the button is
+        # swapped in place.
         self.w_instrument_dl = pn.widgets.FileDownload(
             filename=_fn, label="Download instrument",
             callback=self._instrument_bytes, disabled=not _has_asm)
+        if getattr(self, "_instr_dl_col", None) is None:
+            self._instr_dl_col = pn.Column(self.w_instr_name,
+                                           self.w_instrument_dl)
+        else:
+            self._instr_dl_col[1] = self.w_instrument_dl
 
         def _sync_cfgname(evt):
             nm = (evt.new or "sim_spec").strip()
@@ -1932,8 +2036,21 @@ class SimApp:
                 nm += ".json"
             self.w_download.filename = nm
         self.w_cfgname.param.watch(_sync_cfgname, "value")
-        self.w_upload = pn.widgets.FileInput(accept=".json")
+        # ONE LOAD DOOR, and it carries the whole deck. A spec and the
+        # STL files it names are ONE unit, so they are selected together
+        # HERE rather than through a second path/browse control. The
+        # browser hands over BYTES and hides the folder they came from,
+        # so a relative stl_dir has nothing to anchor against; the answer
+        # is to take the meshes too (io.stl_resolve.install_stl_payload),
+        # never to ask the user where the file lives.
+        self.w_upload = pn.widgets.FileInput(accept=".json,.stl",
+                                             multiple=True)
         self.w_upload.param.watch(self._on_upload, "value")
+        # Load results and refusals render HERE, beside the widget the
+        # user is looking at. The status pane lives on another tab, and a
+        # refusal written only there reads as "nothing happened" (L-422
+        # lesson, re-learned on this very door 2026-09-11).
+        self.w_load_msg = pn.pane.Markdown("", sizing_mode="stretch_width")
         # reloadable runs
         self.w_runsel = pn.widgets.Select(name="stored runs", options=[])
         self.w_reload = pn.widgets.Button(name="Reload run into view")
@@ -2049,30 +2166,51 @@ class SimApp:
                 "#### 2 · or upload a spec file / paste JSON\n"
                 "*`Apply JSON` commits whatever is in the box. To keep a spec "
                 "for later, use the **Save** tab — an example is something you "
-                "load, not something you write to.*"),
+                "load, not something you write to.*\n\n"
+                "*An **STL deck** is its .json plus its .stl meshes: select "
+                "them **together** (Cmd/Ctrl-click) the first time. After "
+                "that, the .json alone reloads it — the meshes are kept and "
+                "re-verified by hash.*"),
             self.w_upload,
+            self.w_load_msg,
             self.w_json,
             pn.Row(self.w_applyjson, self.w_apply_busy),
             pn.pane.Markdown("##### spec summary *(live)*"),
             self.w_spec_summary,
             name="Load", sizing_mode="stretch_width")
 
-        save_tab = pn.Column(
-            pn.pane.Markdown(
-                "#### save this configuration\n"
-                "*Writes the spec **currently loaded** (name, notes, geometry, "
-                "voltages, source, gas, integration) to a JSON file. This is "
-                "not related to the built-in examples on the Load tab.*"),
-            self.w_cfgname,
-            self.w_download,
-            pn.pane.Markdown(
-                "*With an instrument loaded, **Download instrument** writes "
-                "the whole assembly — every stage's CURRENT parameters "
-                "(voltage, source and gas edits included) inline in one "
-                "file, ready to reload or share.*"),
-            self.w_instr_name,
-            self.w_instrument_dl,
-            name="Save", sizing_mode="stretch_width")
+        # BUILD-ONCE (the freeze chain must be unbroken to the root): the
+        # persistent _instr_dl_col re-parented whenever this tab column
+        # was rebuilt fresh around it. The column is now built once; its
+        # deliberately-fresh members (name field, spec download) are
+        # swapped IN PLACE each build — a fresh widget in a stable
+        # container renders; a persistent widget in a fresh container
+        # orphans.
+        if getattr(self, "_save_col", None) is None:
+            self._save_col = pn.Column(
+                pn.pane.Markdown(
+                    "#### save this configuration\n"
+                    "*Writes the spec **currently loaded** (name, notes, "
+                    "geometry, voltages, source, gas, integration) to a "
+                    "JSON file. This is not related to the built-in "
+                    "examples on the Load tab. STL decks loaded through "
+                    "the upload door save with `stl_dir: \".\"` — keep "
+                    "the JSON with its .stl files, or reload the JSON "
+                    "alone and the app finds the installed meshes by "
+                    "manifest.*"),
+                self.w_cfgname,
+                self.w_download,
+                pn.pane.Markdown(
+                    "*With an instrument loaded, **Download instrument** "
+                    "writes the whole assembly — every stage's CURRENT "
+                    "parameters (voltage, source and gas edits included) "
+                    "inline in one file, ready to reload or share.*"),
+                self._instr_dl_col,
+                name="Save", sizing_mode="stretch_width")
+        else:
+            self._save_col[1] = self.w_cfgname
+            self._save_col[2] = self.w_download
+        save_tab = self._save_col
 
         runs_tab = pn.Column(
             pn.pane.Markdown("#### stored runs (reloadable)"),
@@ -2101,10 +2239,40 @@ class SimApp:
         # Named Columns, not (name, obj) tuples: pn.Tabs stores tuple names in
         # a private `_names`, so the tab's own .name stays a generated id like
         # "Column02419" and nothing downstream can read it back.
-        self.w_cfgtabs = pn.Tabs(load_tab, save_tab, runs_tab, dynamic=False)
-        config_tab = pn.Column(
-            pn.pane.Markdown("### current configuration"),
-            self.w_name, self.w_notes,
+        # BUILD-ONCE Tabs (last link of the freeze chain): a fresh
+        # pn.Tabs here re-parented the persistent _save_col every
+        # rebuild. The Tabs object persists; children are reassigned in
+        # place — fresh tabs re-render, the persistent one keeps its
+        # parent.
+        if getattr(self, "w_cfgtabs", None) is None:
+            self.w_cfgtabs = pn.Tabs(load_tab, save_tab, runs_tab,
+                                     dynamic=False)
+        else:
+            self.w_cfgtabs[:] = [load_tab, save_tab, runs_tab]
+        # BUILD-ONCE (final link of the freeze chain to the root): the
+        # persistent w_cfgtabs re-parented while this wrapper was fresh.
+        # Direct children of self.tabs are stable (the Ion Source column
+        # proves it), so the chain ends here: build the Config column
+        # once, swap its fresh members (name/notes) in place.
+        self._ensure_machine_widgets()
+        _cfg_head = [pn.pane.Markdown("### current configuration"),
+                     self.w_name, self.w_notes]
+        if getattr(self, "_config_col", None) is not None:
+            for _i, _w in enumerate(_cfg_head):
+                self._config_col[_i] = _w
+            config_tab = self._config_col
+        else:
+            config_tab = self._config_col = pn.Column(
+            *_cfg_head,
+            pn.layout.Divider(),
+            # MACHINE RESOURCES (PI 2026-09-13): properties of this
+            # installation, not of the deck — they do not travel with a
+            # spec and do not change the physics. Same widget OBJECTS as
+            # before the move, so every reader (_on_start's n_workers,
+            # the record-volume quote) is unchanged.
+            pn.Card(pn.Row(self.w_workers, self.w_ram_budget),
+                    title="machine resources — this installation",
+                    collapsed=False, sizing_mode="stretch_width"),
             pn.layout.Divider(),
             self.w_cfgtabs,
             # Version note: read from the ONE authority,
@@ -2256,13 +2424,25 @@ class SimApp:
         # Their WRAPPERS are now built once; spec-dependent content
         # (the Source column) is swapped INSIDE the persistent wrapper,
         # so the persistent halves are never re-parented again.
-        # G1(a): immediate write-through — every value widget in the
-        # per-stage spec families gets the watcher (fresh widgets each
-        # build; old ones die with their watchers).
+        # G1(a): immediate write-through — wired IDEMPOTENTLY, per
+        # widget. The old per-build loop stacked a duplicate doc-write
+        # watcher on every PERSISTENT widget each rebuild (Advanced /
+        # Stations hold build-once columns), and a wire-once guard
+        # misses the spec-dependent widgets those columns swap in on a
+        # deck load. The rule that is true in both directions: a widget
+        # carries this watcher exactly once, checked on the widget
+        # itself.
+        def _wire_spec_widget(w):
+            for _lst in w.param.watchers.get("value", {}).values():
+                for _ws in _lst:
+                    if getattr(_ws, "fn", None) == \
+                            self._on_spec_widget_change:
+                        return
+            w.param.watch(self._on_spec_widget_change, "value")
         for _cont in (ionsrc_header, ionsrc_basic, ionsrc_adv,
                       ionsrc_stations, gas_tab, integ_tab, bounds_tab):
             for _wdg in self._walk_value_widgets(_cont):
-                _wdg.param.watch(self._on_spec_widget_change, "value")
+                _wire_spec_widget(_wdg)
         _ionsrc_children = [("Basic", ionsrc_basic),
                             ("Advanced", ionsrc_adv),
                             ("Stations", ionsrc_stations),
@@ -2362,6 +2542,41 @@ class SimApp:
             self._status_log_pane.object = "\n\n---\n\n".join(
                 self._status_log)
         self.status.param.watch(_log_status, "object")
+        self._ensure_machine_widgets()
+        self.workers_line = pn.pane.Markdown(
+            "_no flight this session_", sizing_mode="stretch_width")
+        self._status_col = pn.Column(
+            pn.pane.Markdown("#### current"),
+            self.status,
+            pn.layout.Divider(),
+            pn.pane.Markdown("#### workers"),
+            # The worker-count and record-RAM CONTROLS moved to the
+            # Config tab (PI 2026-09-13): they describe the MACHINE, not
+            # the instrument — they belong with the other
+            # per-installation settings rather than being re-decided
+            # beside every flight. The READOUT stays here, where the
+            # flight it describes is reported.
+            self.workers_line,
+            pn.layout.Divider(),
+            pn.pane.Markdown(
+                f"#### history *(this session, newest first, "
+                f"last {STATUS_LOG_MAX})*"),
+            self._status_log_pane,
+            width=CONTROL_COL_PX - 20)
+        return self._status_col
+
+    def _ensure_machine_widgets(self):
+        """Create the MACHINE-resource widgets (worker threads,
+        record RAM) exactly once.
+
+        They are displayed in the Config tab (PI 2026-09-13) but
+        were historically constructed by the status column, which
+        is built AFTER it — so Config referenced them before they
+        existed. Construction lives here, idempotent through
+        _persistent, and BOTH builders call it: whichever runs
+        first creates them, the other finds them. One owner, no
+        ordering dependency between two layout builders.
+        """
         # WORKERS block (the worker
         # queue variables are exposed in their own tab). The count is a
         # THROUGHPUT choice, not physics, so it lives here and never in
@@ -2403,22 +2618,6 @@ class SimApp:
                        else "undetectable on this platform")
                     + "). Storage only: rec_every changes what is kept, "
                       "never what is computed.")))
-        self.workers_line = pn.pane.Markdown(
-            "_no flight this session_", sizing_mode="stretch_width")
-        self._status_col = pn.Column(
-            pn.pane.Markdown("#### current"),
-            self.status,
-            pn.layout.Divider(),
-            pn.pane.Markdown("#### workers"),
-            pn.Row(self.w_workers, self.w_ram_budget),
-            self.workers_line,
-            pn.layout.Divider(),
-            pn.pane.Markdown(
-                f"#### history *(this session, newest first, "
-                f"last {STATUS_LOG_MAX})*"),
-            self._status_log_pane,
-            width=CONTROL_COL_PX - 20)
-        return self._status_col
 
     def _build_run_controls(self):
         self.start_btn = pn.widgets.Button(name="Fly",
@@ -2789,11 +2988,31 @@ class SimApp:
                 offset_v=float(self.w_tw_off.value),
                 prefix=prefix)
             self.w_json.value = self.spec.to_json()
-            self._suspend_live = True
-            try:
-                self._rebuild_for_new_spec()
-            finally:
-                self._suspend_live = False
+            # IN-PLACE editor refresh (2026-09-12, Brian: adjusting TW
+            # groups scrolled the UI to the top, and the retune controls
+            # went unresponsive until a tab switch). The old path called
+            # _rebuild_for_new_spec() — the full control-column rebuild —
+            # for a VALUE-only change: tabs[:] replacement re-rendered
+            # the whole column (scroll lost), left the on-screen widgets
+            # of the active tab stale until a tab switch forced a
+            # re-render (the L-192 class), and re-created the TW builder
+            # boxes at their hard-coded defaults, discarding what the
+            # user had just typed. A retune changes VALUES of existing
+            # groups, never structure, so the per-group editor widgets
+            # are updated in place; _rebuild_for_new_spec remains for
+            # the structural edits (build ladder, add/remove group,
+            # member reassignment).
+            for g in self.spec.geometry.rf_groups:
+                w = self._grp_widgets.get(g.name)
+                if w is None:
+                    raise RuntimeError(
+                        f"retune: group {g.name!r} has no editor row — "
+                        f"the group editors and the spec have diverged "
+                        f"structurally; reload the deck (refusing a "
+                        f"silent partial refresh)")
+                w["amp"].value = float(g.amplitude_v)
+                w["freq"].value = float(g.frequency_hz)
+                w["wave"].value = g.waveform
             self._refresh_spec_summary()
             self.status.object = (
                 f"**retuned {len(names)} TW phase groups** "
@@ -3021,6 +3240,11 @@ class SimApp:
                 f"(fix the box to match what you want flown)")
         if masses:
             ssrc.mz_list = masses         # keep old list if input empty
+        if getattr(self, "w_charge", None) is not None \
+                and self.w_charge.value is not None:
+            # written verbatim, INCLUDING 0 — the builders' charge=0
+            # refusal is the diagnostic; a silent 0->1 here would mask it
+            ssrc.charge = int(self.w_charge.value)
         for name, gw in self._grp_widgets.items():
             for grp in s.geometry.rf_groups:
                 if grp.name == name:
@@ -3044,6 +3268,16 @@ class SimApp:
                             grp.table_t_us = [0.0, max(_tv, 1e-6)]
                             grp.table_v = [0.0, 1.0]
                             grp.interp = "hold"
+        if self._v_widgets and (max(self._v_widgets)
+                                >= len(s.geometry.electrodes)):
+            raise RuntimeError(
+                f"_sync_spec: per-electrode editor has rows for "
+                f"{max(self._v_widgets) + 1} electrodes but the live "
+                f"spec has {len(s.geometry.electrodes)} — the editor "
+                f"is stale relative to the spec (a load rebuilt one "
+                f"but not the other). Reload the spec; if this "
+                f"recurs, the load path that got here skipped "
+                f"_rebuild_for_new_spec")
         for i, w in self._v_widgets.items():
             el = s.geometry.electrodes[i]
             gv = w["group"].value
@@ -3210,7 +3444,9 @@ class SimApp:
             # the PE options live on the PE Surface tab — read them from
             # there rather than keeping a second copy of the same controls
             pl, mm = self._pe_opts()
-            return pe_figure_3d(model, mz=mzq, plane=pl, metal_mode=mm,
+            return pe_figure_3d(model, mz=mzq,
+                                charge=int(self.spec.source.charge),
+                                plane=pl, metal_mode=mm,
                                 electrode_dc=(self._electrode_dc()
                                               if mm != "mask" else None),
                                 trust_cells=int(self._pe_tab.w_trust.value))
@@ -3987,12 +4223,23 @@ class SimApp:
         rather than re-running voxelize + the (heavy) channel compose. It
         must cover EVERY field-affecting input: geometry, resolution,
         mirror/symmetry, and the full drive (DC + rf groups). We derive it
-        from the spec's own JSON, which already serialises all of these —
-        so the signature can never drift from what the builder actually
-        reads (the failure mode of a hand-listed field set)."""
+        from the spec's own serialisation, which already carries all of
+        these — so the signature can never drift from what the builder
+        actually reads (the failure mode of a hand-listed field set).
+
+        STATIONS ARE EXCLUDED (2026-09-12): they are fly-time config,
+        not build input — the fly closure re-evaluates the kernel plane
+        list from the LIVE spec on every call (build_stl3d fly_fn ->
+        _plane_list(); 2-D routes apply them post-hoc), which the
+        station-edit probe demonstrated on the reuse branch (edited
+        splat honored by a REUSED fly_fn). Hashing them made every
+        station edit read as a drive change and re-ran the whole
+        channel compose — minutes on a 140-electrode deck — for an
+        edit the build never consumes.
+        """
         import hashlib
         try:
-            payload = spec.to_json()
+            d = spec.to_dict()
         except Exception as e:
             # if the spec cannot serialise, treat every call as a fresh
             # build (correct-but-slow) rather than reuse a stale field.
@@ -4000,7 +4247,9 @@ class SimApp:
             print(f"[sim_app] spec signature unavailable "
                   f"({type(e).__name__}: {e}) — treating as fresh build")
             return None
-        return hashlib.sha256(payload.encode()).hexdigest()
+        d.pop("stations", None)
+        return hashlib.sha256(
+            json.dumps(d, sort_keys=True).encode()).hexdigest()
 
     def _geom_sig(self, spec):
         """Signature of GEOMETRY ONLY — the inputs that force a re-SOLVE of
@@ -4631,10 +4880,7 @@ class SimApp:
         # per-result mass (contiguous blocks: ion i -> mz_list[i//n_ions])
         from ion_gym.physics.sim_build import mz_of
         mz_list = list(self.spec.source.mz_list)
-        _MZ_PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
-                       "#17becf", "#8c564b", "#e377c2"]
-        mz_color = {m: _MZ_PALETTE[k % len(_MZ_PALETTE)]
-                    for k, m in enumerate(sorted(set(mz_list)))}
+        mz_color = _mz_color_map(mz_list)
         _mz_fallbacks = [0]
         def _mz_of_result(i):
             try:
@@ -4867,7 +5113,7 @@ class SimApp:
                 "data": (_bank["base_data"]
                          + [_path_dict(g) for g in _groups.values()]
                          + [_fate_dict(c, *_fate_xy(c))
-                            for c in (0, 1, 2, 3)
+                            for c in sorted(_FATE_NAME)
                             if _fate_xy(c)[0].size]),
                 "layout": {**_bank["base_layout"],
                            "annotations": (_bank["base_anns"]
@@ -4888,7 +5134,12 @@ class SimApp:
                                    or []))
             for key, g in _groups.items():
                 _add_group(fig, g)
-            for code in (0, 1, 2, 3):
+            # EVERY known fate, from the single table — not a hardcoded
+            # (0,1,2,3). Station absorptions (5 impact plane, 6 detect)
+            # were being dropped here, so an ion stopped by a detector
+            # patch left no impact marker and the working splat looked
+            # like it had done nothing (2026-09-12).
+            for code in sorted(_FATE_NAME):
                 xs, ys = _fate_xy(code)
                 if xs.size:
                     _fate_trace(fig, code, xs, ys)
@@ -5400,8 +5651,19 @@ class SimApp:
         from ion_gym.io.fa_cache import DEFAULT_ROOT
         self._cache_root = os.path.expanduser(DEFAULT_ROOT)
         self._cache_loc = pn.pane.Markdown("")
-        self._cache_table = pn.pane.DataFrame(
-            index=False, sizing_mode="stretch_width", max_rows=200)
+        import pandas as _pd
+        # Tabulator, not a static DataFrame pane (ruled 2026-09-11):
+        # every column header click-sorts (date, size, name — the
+        # "rapid sort" ask), and clicking a row IS the selection —
+        # it drives the picker below and the export button's label.
+        self._cache_table = pn.widgets.Tabulator(
+            _pd.DataFrame(columns=["key", "produced_by", "descriptor",
+                                   "size_MB", "arrays", "shape",
+                                   "modified"]),
+            selectable=1, disabled=True, show_index=False,
+            pagination=None, height=300, sizing_mode="stretch_width")
+        self._cache_table.param.watch(self._on_cache_table_select,
+                                      "selection")
         self._cache_pick = pn.widgets.Select(
             name="entry to remove", options=["(refresh first)"], width=380)
         self._cache_refresh_btn = pn.widgets.Button(
@@ -5411,9 +5673,13 @@ class SimApp:
             name="✕ remove selected", button_type="warning", width=170)
         self._cache_remove_btn.on_click(self._on_cache_remove_one)
         self._cache_export_btn = pn.widgets.Button(
-            name="⇩ export selected (field + spec json)",
-            button_type="primary", width=270)
+            name="⇩ export — nothing selected", disabled=True,
+            button_type="primary", width=360)
         self._cache_export_btn.on_click(self._on_cache_export_one)
+        # the button NAMES what it will export (ruled 2026-09-11): a
+        # generic label on a destructive-adjacent action hides intent
+        self._cache_pick.param.watch(self._sync_cache_export_btn,
+                                     "value")
         self._cache_export_dir = pn.widgets.TextInput(
             name="export to", value=str(_default_export_dir()), width=380)
         self._cache_clear_btn = pn.widgets.Button(
@@ -5466,12 +5732,12 @@ class SimApp:
                      modified=_t.strftime("%Y-%m-%d %H:%M",
                                           _t.localtime(e["mtime"])))
                 for e in inv]
-        self._cache_table.object = (pd.DataFrame(rows) if rows
-                                     else pd.DataFrame(
-                                         columns=["key", "produced_by",
-                                                  "descriptor", "size_MB",
-                                                  "arrays", "shape",
-                                                  "modified"]))
+        self._cache_table.value = (pd.DataFrame(rows) if rows
+                                    else pd.DataFrame(
+                                        columns=["key", "produced_by",
+                                                 "descriptor", "size_MB",
+                                                 "arrays", "shape",
+                                                 "modified"]))
         def _pick_label(e):
             names = list(dict.fromkeys(e.get("produced_by") or []))
             who = names[0] + ("…" if len(names) > 1 else "") if names \
@@ -5483,11 +5749,41 @@ class SimApp:
         self._cache_pick.options = ([_pick_label(e) for e in inv]
                                     or ["(cache empty)"])
         self._cache_key_of = {_pick_label(e): e["key"] for e in inv}
+        self._cache_label_of_key12 = {e["key"][:12]: _pick_label(e)
+                                      for e in inv}
+        self._sync_cache_export_btn()
         header = ("**In-memory caches** (freed on 'clear ALL' or when the "
                   "app restarts):\n")
         self._cache_mem.object = header + "\n".join(
             self._mem_cache_lines())
         self._cache_status.object = "_inventory current_"
+
+    def _on_cache_table_select(self, event=None):
+        """A clicked table row selects that entry in the picker (and
+        therefore names it on the export button). Sorting the table
+        never desyncs this: the selected DATAFRAME row's key column is
+        matched, not a positional index."""
+        try:
+            df = self._cache_table.selected_dataframe
+        except (AttributeError, IndexError):
+            return
+        if df is None or not len(df):
+            return
+        lab = getattr(self, "_cache_label_of_key12", {}).get(
+            str(df.iloc[0]["key"]))
+        if lab:
+            self._cache_pick.value = lab
+
+    def _sync_cache_export_btn(self, event=None):
+        sel = self._cache_pick.value
+        key = getattr(self, "_cache_key_of", {}).get(sel)
+        if not key:
+            self._cache_export_btn.name = "⇩ export — nothing selected"
+            self._cache_export_btn.disabled = True
+            return
+        short = sel if len(sel) <= 46 else sel[:43] + "…"
+        self._cache_export_btn.name = f"⇩ export {short} (+ spec json)"
+        self._cache_export_btn.disabled = False
 
     def _on_cache_export_one(self, _=None):
         """Export the selected cache entry as a portable field bundle
@@ -6040,7 +6336,6 @@ class SimApp:
         mode = self.w_amode.value
         _alpha = float(self.w_an_alpha.value)
         _bm = (self._assembly_doc.get("beam") or {})
-        _q = int(_bm.get("charge", 1) or 1)
 
         def _end_chan(p, nm):
             if nm in ("x", "y", "z", "vx", "vy", "vz"):
@@ -6058,7 +6353,11 @@ class SimApp:
                 if s is None or mz is None:
                     return None
                 from ion_gym.physics.collision3d import E_CHG, KG_AMU
-                return (0.5 * float(mz) * _q * KG_AMU
+                # mz carries the ion MASS in Da (ruled convention,
+                # 2026-09-09); the former *charge factor here treated it
+                # as m/z and doubled the KE of a 2+ ion. KE[eV] = E_J/e
+                # regardless of charge — flight-summary parity (tracer3d).
+                return (0.5 * float(mz) * KG_AMU
                         * (s * 1e3) ** 2) / E_CHG
             return "__unknown__"
 
@@ -6662,10 +6961,26 @@ class SimApp:
                 # happened. Clear once the new spec exists, immediately
                 # before it is adopted.
                 self._clear_assembly_state()
+                _prev_spec = self.spec
                 self.spec = new_spec
-                self._rebuild_for_new_spec(solve=False)
+                try:
+                    self._rebuild_for_new_spec(solve=False)
+                except Exception:
+                    # NEVER leave the app torn (spec swapped, controls
+                    # stale): a later recompute would crash far from
+                    # the cause (IndexError in _sync_spec, Brian
+                    # 2026-09-11). Roll back to the working spec,
+                    # rebuild IT, and surface the real traceback on
+                    # the console as well as the status pane.
+                    import traceback as _tb
+                    _tb.print_exc()
+                    self.spec = _prev_spec
+                    self._rebuild_for_new_spec(solve=False)
+                    raise
             except Exception as e:
-                self.status.object = f"**couldn't load '{name}':** {e}"
+                self.status.object = (
+                    f"**couldn't load '{name}':** {e} — previous "
+                    f"spec restored; full traceback on the console")
                 return
 
     def _rebuild_for_new_spec(self, solve=False):
@@ -7771,14 +8086,16 @@ class SimApp:
         _mzs = sorted({h.get("mz") for h in hits
                        if h.get("mz") is not None})
         if len(_mzs) > 1:
-            _mzpal = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd",
-                      "#ff7f0e", "#17becf"]
+            # SAME convention as the trajectories, keyed off the
+            # DECLARED mz_list so a mass with no hits does not shift
+            # every other mass's colour between the two figures.
+            _mzmap = _mz_color_map(self.spec.source.mz_list)
             for _im, _mzv in enumerate(_mzs):
                 _sel = [h for h in hits if h.get("mz") == _mzv]
                 _cu = [float(h[_ax[a1]]) for h in _sel]
                 _cv = [float(h[_ax[a2]]) for h in _sel]
                 _ch = [float(h[_ax[hax]]) for h in _sel]
-                _col = _mzpal[_im % len(_mzpal)]
+                _col = _mzmap.get(_mzv, "#7f7f7f")
                 _lbl = f"m/z {_mzv:g} (n={len(_sel)})"
                 fig.add_trace(go.Scatter(
                     x=_cu, y=_cv, mode="markers",
@@ -7857,8 +8174,16 @@ class SimApp:
         self.w_stn_name = pn.widgets.TextInput(name="name", value="DETECTOR",
                                                width=130)
         self.w_stn_kind = pn.widgets.Select(name="kind",
-                                            options=["detect", "record"],
+                                            options=["detect",
+                                                     "impact_plane"],
                                             value="detect", width=90)
+        self.w_stn_onhit = pn.widgets.Select(
+            name="on hit (detect)", options=["pass", "splat"],
+            value="pass", width=110,
+            description="detect only: pass = log and continue; "
+                        "splat = absorbing detector (fate 6). An "
+                        "impact_plane ignores this (aperture "
+                        "passes, plate splats by definition).")
         self.w_stn_axis = pn.widgets.Select(name="axis",
                                             options=["x", "y", "z"],
                                             value="x", width=60)
@@ -7883,6 +8208,20 @@ class SimApp:
         self.w_stn_pick.param.watch(lambda *_: self._station_load(), "value")
         self.w_stn_axis.param.watch(lambda *_: self._station_axis_labels(),
                                     "value")
+        # G1(a) ONE REGIME, stations included (2026-09-12, Brian: "setting
+        # a detector station to splat doesn't register — defaults back to
+        # pass"): every OTHER spec widget writes through on change, so a
+        # flipped Select here that silently required Apply reverted on the
+        # next editor sync — the un-applied value looked applied and then
+        # vanished. A VALUE edit on an EXISTING picked station now writes
+        # through immediately; renaming and creating ('(new)') stay behind
+        # Apply, because a half-typed name must not rename or spawn a
+        # station per keystroke.
+        for _w in (self.w_stn_kind, self.w_stn_onhit, self.w_stn_axis,
+                   self.w_stn_pos, self.w_stn_w1_on, self.w_stn_w1_lo,
+                   self.w_stn_w1_hi, self.w_stn_w2_on, self.w_stn_w2_lo,
+                   self.w_stn_w2_hi):
+            _w.param.watch(self._on_station_field_change, "value")
         self.w_stn_apply.on_click(self._on_station_apply)
         self.w_stn_delete.on_click(self._on_station_delete)
         self._station_col = pn.Column(
@@ -7891,7 +8230,8 @@ class SimApp:
                              "other axes. `detect` absorbs at first "
                              "in-window crossing; `record` logs and lets "
                              "the ion continue."),
-            pn.Row(self.w_stn_pick, self.w_stn_name, self.w_stn_kind),
+            pn.Row(self.w_stn_pick, self.w_stn_name, self.w_stn_kind,
+                   self.w_stn_onhit),
             pn.Row(self.w_stn_axis, self.w_stn_pos),
             pn.Row(self.w_stn_w1_on, self.w_stn_w1_lo, self.w_stn_w1_hi),
             pn.Row(self.w_stn_w2_on, self.w_stn_w2_lo, self.w_stn_w2_hi),
@@ -7914,11 +8254,30 @@ class SimApp:
         stns = list(getattr(self.spec, "stations", None) or [])
         opts = [getattr(st, "name", f"station{i}")
                 for i, st in enumerate(stns)] + ["(new)"]
-        self.w_stn_pick.options = opts
-        self.w_stn_pick.value = opts[0]
-        self._station_load()
+        self._station_loading = True
+        try:
+            self.w_stn_pick.options = opts
+            self.w_stn_pick.value = opts[0]
+            self._station_load()
+        finally:
+            self._station_loading = False
 
     def _station_load(self):
+        """Populate the editor from the picked station (or defaults).
+
+        Programmatic: sets widget values from the spec, so it runs under
+        the _station_loading guard — a LOAD is not an edit, and the
+        write-through watchers must not re-write (or redraw) what was
+        just read.
+        """
+        _outer = getattr(self, "_station_loading", False)
+        self._station_loading = True
+        try:
+            self._station_load_inner()
+        finally:
+            self._station_loading = _outer
+
+    def _station_load_inner(self):
         """Populate the editor from the picked station (or defaults)."""
         nm = self.w_stn_pick.value
         stns = list(getattr(self.spec, "stations", None) or [])
@@ -7931,6 +8290,7 @@ class SimApp:
             # stale state in the editor's clothing.
             self.w_stn_name.value = "DETECTOR"
             self.w_stn_kind.value = "detect"
+            self.w_stn_onhit.value = "pass"
             self.w_stn_axis.value = "x"
             self.w_stn_pos.value = 0.0
             for w_ in (self.w_stn_w1_on, self.w_stn_w2_on):
@@ -7943,6 +8303,8 @@ class SimApp:
             return
         self.w_stn_name.value = st.name
         self.w_stn_kind.value = st.kind
+        if st.kind == "detect":
+            self.w_stn_onhit.value = st.on_hit or "pass"
         self.w_stn_axis.value = st.axis
         self.w_stn_pos.value = float(st.pos_mm)
         self._station_axis_labels()
@@ -7976,6 +8338,9 @@ class SimApp:
                              "are attributed and how this editor finds it "
                              "again")
         return StationSpec(name=nm, kind=self.w_stn_kind.value,
+                           on_hit=(self.w_stn_onhit.value
+                                   if self.w_stn_kind.value
+                                   == "detect" else None),
                            axis=self.w_stn_axis.value,
                            pos_mm=float(self.w_stn_pos.value), window=win)
 
@@ -8004,6 +8369,54 @@ class SimApp:
                         (getattr(self.spec, "stations", None) or [])]
                     break
 
+    def _on_station_field_change(self, _evt=None):
+        """G1(a) one regime, stations included: a VALUE edit (kind,
+        on_hit, axis, position, windows) on an EXISTING picked station
+        writes through immediately — spec, JSON box, and the retained
+        instrument document — exactly like every other spec widget.
+        Before this, the editor was Apply-gated while the rest of the
+        app wrote through on change, so a flipped on_hit Select looked
+        applied and then silently reverted to the spec's old value on
+        the next editor sync ("setting a detector station to splat
+        doesn't register — defaults back to pass", 2026-09-12).
+
+        Renaming and creating ('(new)') stay behind Apply: a half-typed
+        name must not rename or spawn a station per keystroke. A
+        mid-edit INVALID state (window lo >= hi while typing) is
+        REPORTED and not written — the next valid change writes.
+        No-ops during programmatic loads (a load is not an edit)."""
+        if getattr(self, "_station_loading", False):
+            return
+        nm = self.w_stn_pick.value
+        stns = list(getattr(self.spec, "stations", None) or [])
+        if nm == "(new)" or all(getattr(s_, "name", "") != nm
+                                for s_ in stns):
+            return              # creation is an explicit Apply action
+        try:
+            new = self._station_from_editor()
+        except ValueError as e:
+            self.w_stn_msg.object = (
+                f"**not written:** {e} — the station keeps its last "
+                f"valid value until this is fixed.")
+            return
+        if new.name != nm:
+            return              # rename in progress: Apply territory
+        # ORDER-PRESERVING in-place replace: station order is deck
+        # content; an edit must not shuffle it.
+        self.spec.stations = [new if getattr(s_, "name", "") == nm
+                              else s_ for s_ in stns]
+        self._station_writeback()
+        self._mark_doc_modified("station edit")
+        self.w_stn_msg.object = (
+            f"**station `{nm}` updated** — in the spec, the JSON box, "
+            f"and the instrument document (write-through; Apply is only "
+            f"needed to rename or create). Re-fly to see it in Impact "
+            f"Analysis.")
+        # Redraw so the View overlay tracks the committed spec. With
+        # stations excluded from _build_sig this is a sig-match REUSE:
+        # no solve, no compose — just the overlay.
+        self._redraw_subject()
+
     def _on_station_apply(self, _=None):
         try:
             new = self._station_from_editor()
@@ -8011,8 +8424,14 @@ class SimApp:
             self.w_stn_msg.object = f"**refused:** {e}"
             return
         stns = list(getattr(self.spec, "stations", None) or [])
-        stns = [s_ for s_ in stns if getattr(s_, "name", "") != new.name]
-        stns.append(new)
+        if any(getattr(s_, "name", "") == new.name for s_ in stns):
+            # ORDER-PRESERVING for an existing name (matches the
+            # write-through path — an edit must not shuffle deck order);
+            # only a genuinely NEW station appends.
+            stns = [new if getattr(s_, "name", "") == new.name else s_
+                    for s_ in stns]
+        else:
+            stns = stns + [new]
         self.spec.stations = stns
         self._station_writeback()
         self._station_sync_pick()
@@ -8136,8 +8555,9 @@ class SimApp:
             # per-ion masses this tap cannot attribute — m stays None
             # and the KE scheme refuses by name downstream.
             _mz = list(getattr(self.spec.source, "mz_list", []) or [])
-            _q = int(getattr(self.spec.source, "charge", 1) or 1)
-            _m = float(_mz[0]) * _q if len(_mz) == 1 else None
+            # mz_list carries MASSES (ruled convention 2026-09-09);
+            # the former *charge factor published a doubled mass at z=2
+            _m = float(_mz[0]) if len(_mz) == 1 else None
             rec = last_flight.publish(
                 site=site,
                 subject={"kind": "single", "spec": self.spec.to_dict()},
@@ -8182,7 +8602,7 @@ class SimApp:
                               "label": f"ion {t.get('i', '?')} "
                                        f"[{t.get('fate', '?')}]"})
             _b = (self._assembly_doc or {}).get("beam", {}) or {}
-            _m = (float(_b["mz"]) * int(_b.get("charge", 1) or 1)
+            _m = (float(_b["mz"])              # beam mz carries MASS (Da)
                   if isinstance(_b.get("mz"), (int, float)) else None)
             _det = [(float(p["x"]), float(p.get("y", 0.0)),
                      float(p.get("z", 0.0)))
@@ -8235,7 +8655,9 @@ class SimApp:
                           if h.get("in_window")]
                     if not hs:
                         continue
-                    take = hs[:1] if st.kind == "detect" else hs
+                    take = (hs[:1] if (st.kind == "detect" and
+                                       getattr(st, "on_hit", None)
+                                       == "splat") else hs)
                     for h in take:
                         hits.append(dict(station=st.name, x=h.get("x"),
                                          y=h.get("y"), z=h.get("z"),
@@ -9855,13 +10277,65 @@ class SimApp:
             self.status.object = f"**resolution error:** {e}"
 
     def _on_upload(self, event):
+        """Load a spec .json -- plus, for an STL deck, the .stl files it
+        references, selected in the same shot. See the widget comment:
+        the upload carries bytes, not the folder they sit in, so the
+        meshes travel WITH the spec or the deck cannot resolve them."""
+        if not event.new:
+            return
         self._clear_raster()
-        if event.new:
-            try:
-                self.w_json.value = event.new.decode()
-                self._on_apply_json()
-            except Exception as e:
-                self.status.object = f"**upload error:** {e}"
+        try:
+            # multiple=True yields lists; a lone value (programmatic
+            # caller, older widget) is the same payload with one entry,
+            # normalized here so nothing downstream special-cases it.
+            blobs = event.new if isinstance(event.new, list) else [event.new]
+            names = self.w_upload.filename
+            if not isinstance(names, list):
+                names = [names] if names else []
+            if len(names) != len(blobs):
+                raise ValueError(
+                    f"upload returned {len(blobs)} file(s) but "
+                    f"{len(names)} filename(s) -- cannot pair them, so "
+                    f"nothing was loaded")
+            pairs = list(zip(names, blobs))
+            jsons = {n: b for n, b in pairs if str(n).lower().endswith(".json")}
+            stls = {n: b for n, b in pairs if str(n).lower().endswith(".stl")}
+            other = [str(n) for n, _ in pairs
+                     if not str(n).lower().endswith((".json", ".stl"))]
+            if len(jsons) != 1:
+                raise ValueError(
+                    f"select exactly ONE spec .json (plus its .stl files "
+                    f"for an STL deck); got {len(jsons)}: "
+                    f"{sorted(jsons) if jsons else '(none)'}")
+            import json as _json
+            from ion_gym.io.paths import repo_root
+            from ion_gym.io.stl_resolve import install_stl_payload
+            text = next(iter(jsons.values())).decode()
+            doc = _json.loads(text)
+            # Install BEFORE apply: _on_apply_json builds and draws, and a
+            # draw against an unresolvable stl_dir is exactly the refusal
+            # this door exists to prevent.
+            where, notes = install_stl_payload(
+                doc, stls, repo_root() / "uploads" / "decks")
+            if where is not None:
+                text = _json.dumps(doc, indent=1)
+            self.w_json.value = text
+            self._on_apply_json()
+            if other:
+                notes = list(notes) + [
+                    f"**ignored {len(other)} non-spec file(s):** "
+                    f"{', '.join(other)}"]
+            done = str(self.status.object)
+            if notes:
+                done = done + "\n\n" + "\n\n".join(notes)
+                self.status.object = done
+            # the pane BESIDE the widget carries the outcome; the status
+            # pane alone is invisible from the Load tab
+            self.w_load_msg.object = done
+        except Exception as e:
+            msg = self._err_status("upload", e)
+            self.status.object = msg
+            self.w_load_msg.object = msg
 
     def _on_load_drive_template(self, event):
         """Pull ONLY the rf/dc drive groups from an uploaded json into the
@@ -9907,7 +10381,19 @@ class SimApp:
 
     def _spec_bytes(self):
         self._sync_spec()
-        return io.BytesIO(self.spec.to_json().encode())
+        # SAVED copy is normalized for portability: a cache-absolute
+        # stl_dir (from the upload door's mesh install) becomes "." in
+        # the file. The LIVE spec keeps its absolute dir -- the session
+        # must keep resolving; only the download is rewritten, and the
+        # rewrite is stated on the status line, never silent.
+        import json as _json
+        from ion_gym.io.paths import repo_root
+        from ion_gym.io.stl_resolve import portable_stl_dir
+        doc = _json.loads(self.spec.to_json())
+        note = portable_stl_dir(doc, repo_root() / "uploads" / "decks")
+        if note:
+            self.status.object = f"**saved spec:** {note}"
+        return io.BytesIO(_json.dumps(doc, indent=1).encode())
 
     def _on_reload_run(self, _=None):
         name = self.w_runsel.value

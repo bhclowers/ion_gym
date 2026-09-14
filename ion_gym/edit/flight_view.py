@@ -37,6 +37,7 @@ from typing import List, Optional
 import numpy as np
 import panel as pn
 
+from ion_gym.edit.policy import EditRefusal
 from ion_gym.ui import last_flight
 
 DEFAULT_SHOW = 50          # matches assembly_overview's default path count
@@ -56,14 +57,24 @@ def _route_of(spec_dict: dict) -> str:
 
 def _stage_prims(spec_dict: dict, name: str, offset):
     """One stage's render primitives, pose-offset into the world frame.
-    In-plane outlines shift by (dx, dy); extrude ranges by dz. Returns
-    (electrodes, reported) — a refusal is reported, never silent."""
+
+    The WORLD offset components are routed through the stage's extrude
+    cycle (viewer_axis_indices): outlines live in the stage's in-plane
+    world coordinates and shift by THOSE offset components; the extrude
+    range lives along the extrude axis and shifts by that component.
+    For a z-extruded stage this is byte-identical to the old
+    (dx, dy, dz) application; for an x/y-extruded stage the old code
+    shifted the wrong components (found 2026-09-12). A refusal is
+    reported by the caller, never silent."""
     from ion_gym.edit.session import EditSession
     from ion_gym.edit.outline import render_primitives
-    dx, dy, dz = (list(offset) + [0.0, 0.0, 0.0])[:3]
+    from ion_gym.edit.policy import viewer_axis_indices
+    off3 = (list(offset) + [0.0, 0.0, 0.0])[:3]
     sess = EditSession(json.dumps(spec_dict).encode(),
                        name=f"stage:{name}")
     prims = render_primitives(sess)
+    i0, i1, i2 = viewer_axis_indices(prims["frame"]["extrude_axis"])
+    dx, dy, dz = off3[i0], off3[i1], off3[i2]
     for el in prims["electrodes"]:
         el["name"] = f"{name}:{el['name']}"
         for entry in el.get("solids", []) + el.get("ghosts", []):
@@ -73,6 +84,9 @@ def _stage_prims(spec_dict: dict, name: str, offset):
                               for h in entry.get("holes", [])]
             if entry.get("extrude"):
                 entry["extrude"] = {
+                    "axis": entry["extrude"]["axis"],   # keep the axis:
+                    # dropping it here silently re-framed every staged
+                    # deck as z (found 2026-09-12 in the x-extrusion fix)
                     "lo_mm": entry["extrude"]["lo_mm"] + dz,
                     "hi_mm": entry["extrude"]["hi_mm"] + dz}
     return prims["electrodes"]
@@ -172,7 +186,9 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                 for el in els_p:
                     ghosts = el.get("ghosts", [])
                     for en in el.get("solids", []):
-                        en["extrude"] = {"lo_mm": _dz - 0.5 * _t,
+                        en["extrude"] = {"axis": "z",   # display slab:
+                                         # z by construction
+                                         "lo_mm": _dz - 0.5 * _t,
                                          "hi_mm": _dz + 0.5 * _t}
                         ghosts.append(en)
                     el["ghosts"] = ghosts
@@ -235,7 +251,9 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                                     _t3[1] + _ri * float(_np.sin(a))]
                                    for a in _th]] if _ri > 0 else [])
                         _solids.append({"outline": _outl, "holes": _hole,
-                                        "extrude": {"lo_mm": _lo,
+                                        "extrude": {"axis": "z",  # posed
+                                                    # axial-on-world-z
+                                                    "lo_mm": _lo,
                                                     "hi_mm": _hi}})
                     if _solids:
                         electrodes.append({
@@ -317,8 +335,18 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
         scene = {"schema": 1, "document": doc.get("name", "assembly"),
                  "route": "assembly", "out_of_plane": {},
                  "policy": {"viewports": ["persp", "xy", "xz", "yz"]}}
+        # ONE frame for the whole assembly, from the entries actually
+        # drawn (every entry now names its extrude axis; the synthetic
+        # planar slabs and r-z annuli are z by construction, and an
+        # extrude-less entry counts as z — the flat-at-z=0 fallback).
+        # Stages with different axes cannot share a viewer frame and
+        # refuse by name, exactly as a single mixed deck does.
+        from ion_gym.edit.policy import deck_extrude_axis, viewer_frame
+        _axis = deck_extrude_axis(
+            (el["name"], el.get("solids", []) + el.get("ghosts", []))
+            for el in electrodes)
         prims = {"electrodes": electrodes, "bbox2d": bbox,
-                 "pitch_mm": 0.0}
+                 "pitch_mm": 0.0, "frame": viewer_frame(_axis)}
 
     # DISPLAY-ONLY ELECTRODE FLAGS, both subject kinds:
     # ghost + quarter are independent checkboxes, combinable; the old
@@ -356,6 +384,16 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                 "reported": ["quarter cutaway requested but this record "
                              "has no drawable electrode geometry — "
                              "nothing was cut"]})
+
+    # WORLD -> VIEWER permutation for everything world-framed in the
+    # trajs block (paths, detections). The geometry needed none: its
+    # outlines are stored in the extrude axis's in-plane coordinates
+    # already (the ShapeSpec convention), which is the whole reason the
+    # frame fix is a relabeling. Identity for z decks — the pts arrays
+    # then pass through untouched, byte-identical to before.
+    from ion_gym.edit.policy import viewer_axis_indices
+    _perm = viewer_axis_indices(prims["frame"]["extrude_axis"])
+    _permute = _perm != (0, 1, 2)
 
     # trajectories: evenly strided ion subset (spans
     # the retained set, not its head), per-path record decimation, and
@@ -418,6 +456,11 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
     out_paths = []
     for _pi, p in enumerate(shown):
         pts = p["pts"]
+        if _permute:
+            # per-point world (x,y,z) -> viewer columns. Speed/time
+            # coloring needs no touch: speed is a segment NORM
+            # (permutation-invariant) and time is not spatial.
+            pts = np.asarray(pts, float)[:, list(_perm)]
         vals = _raw_vals[_pi] if _want_param else None
         if len(pts) > MAX_PTS_PER_PATH:
             stride = int(np.ceil(len(pts) / MAX_PTS_PER_PATH))
@@ -450,7 +493,9 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                    f"(station is pass-through)")
     payload_trajs = {"paths": out_paths, "legend": legend}
     if _det:
-        payload_trajs["detections"] = [list(d) for d in _det]
+        payload_trajs["detections"] = (
+            [[d[_perm[0]], d[_perm[1]], d[_perm[2]]] for d in _det]
+            if _permute else [list(d) for d in _det])
     if style:
         payload_trajs["style"] = dict(style)
     return {"scene": scene, "prims": prims, "trajs": payload_trajs}, None
@@ -556,12 +601,21 @@ def flight_page(title: str = "3D Flight Viewer") -> pn.Column:
             w_fa.options = _fas
             if w_fa.value not in _fas:
                 w_fa.value = _fas[0]
-        payload, refusal = _compose(rec, w_n.value or DEFAULT_SHOW,
-                                    style=_style(),
-                                    electrode_colors=w_ecolor.value,
-                                    quarter=w_quarter.value,
-                                    ghost=w_ghost.value,
-                                    fa_colors=fa_colors)
+        try:
+            payload, refusal = _compose(rec, w_n.value or DEFAULT_SHOW,
+                                        style=_style(),
+                                        electrode_colors=w_ecolor.value,
+                                        quarter=w_quarter.value,
+                                        ghost=w_ghost.value,
+                                        fa_colors=fa_colors)
+        except EditRefusal as e:
+            # a refusal is a displayable outcome (e.g. mixed extrude
+            # axes: no single viewer frame). Genuine malfunctions
+            # still raise — only the NAMED policy refusal is caught.
+            holder[:] = []
+            status.object = (f"**record #{rec['stamp']} "
+                             f"({rec['site']}, {rec['when']}): {e}**")
+            return
         if refusal is not None:
             holder[:] = []
             status.object = (f"**record #{rec['stamp']} "

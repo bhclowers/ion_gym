@@ -12,6 +12,18 @@ the 3-D channel kernel (662x) — roll-over sweeps and optimizer loops need
 the 2-D kernel. A stepped multi-phase SQUARE wave cannot fold into one
 quadrature pair, so each group is its own channel here.
 
+RE-STAMP (2026-09-09, v510, like-for-like on the Gate D/E duct with
+identical dynamics certified by those gates; container timings, ratios
+portable): 3-D/tw2d = 2.3x vacuum, 1.7x HS — the v83 662x does NOT
+reproduce on the current tree for this case (the 3-D kernel has been
+heavily optimized since v83; whether production-scale decks widen the
+ratio is unmeasured). planar/tw2d = 0.78x vacuum, 0.84x HS: the
+spec-routed planar (Verlet) route is ~20% FASTER than this kernel on
+the identical case. tw2d's remaining distinct value: RK4 bit-parity
+with the 3-D kernel (Gates D/E) and the lean direct-call API.
+Numbers + operating point: internal/studies/rf_arrival_time/
+bench_kernels_results.json. Supersession is a PI ruling (L-427).
+
 Conventions (from the contract):
   * RFGroupSpec.frequency_hz is the WAVEFORM frequency f_waveform;
     v_wave = N_PHASE * PITCH_MM * f_waveform.
@@ -74,7 +86,7 @@ def _in_metal_2d(ele, x, y, nx, ny):
 
 # ------------------------------------------------------------- njit core
 @njit(cache=True, fastmath=False, nogil=True)
-def _fly_tw2d(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
+def _fly_tw2d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
               EAx, EAy, ExK, EyK,
               ch_kind, ch_om, ch_ph, ch_amp, ch_off, ch_duty, tab_t, tab_v, tab_off,
               ele, h_mm, xs, ys, zs, ts, vxs, vys, vzs, record_every,
@@ -85,7 +97,9 @@ def _fly_tw2d(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
     nx, ny = EAx.shape
     inv_h = 1.0 / h_mm
     K = ch_kind.shape[0]
-    m_ion_amu = (E_CHG / qm) / AMU
+    # m_ion_amu (true ion mass, Da) is a PARAMETER — formerly
+    # back-derived as (E_CHG/qm)/AMU, correct only at charge=1
+    # (issues.md 2026-09-09; mirrors the tracer3d fix).
     ncol = 0
     if collide_on:
         np.random.seed(seed)
@@ -215,6 +229,25 @@ def _fly_tw2d(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
 
 
 # ------------------------------------------------------------- field pack
+def fly_tw2d_ion(spec, fields, i, **kw):
+    """Spec-authority front door for fly_tw2d (charter conformance,
+    2026-09-09): the ion's MASS comes from sim_build.mz_of(spec, i) and
+    its CHARGE from spec.source.charge — the same single authorities
+    every spec-routed builder uses — instead of free-floating direct
+    arguments. All other fly_tw2d keywords pass through unchanged.
+    tw2d remains a direct-call kernel for hot loops; THIS is the entry
+    that spec-driven callers and the route-conformance gate use, so a
+    mass or charge desync between routes goes red mechanically."""
+    from ion_gym.physics.sim_build import mz_of
+    if "mz_Da" in kw or "charge" in kw:
+        raise TypeError(
+            "fly_tw2d_ion draws mz_Da and charge from the spec (mz_of / "
+            "source.charge); passing them directly defeats the single "
+            "authority — call fly_tw2d for direct-argument flight")
+    return fly_tw2d(fields, mz_of(spec, i),
+                    charge=int(spec.source.charge), **kw)
+
+
 def build_tw2d_fields(bases, groups, assign, dc, h_mm, ele=None):
     """{idx: (nx,ny) unit basis /V} + RFGroupSpec drive -> fields dict.
 
@@ -270,11 +303,16 @@ def build_tw2d_fields(bases, groups, assign, dc, h_mm, ele=None):
 # ------------------------------------------------------------- wrapper
 def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
              t_max_us=50.0, record_every=10, max_records=400000,
-             collisions=None, seed=1, ion_label=""):
+             collisions=None, seed=1, ion_label="", charge=1):
     """fly3d-compatible flight in the 2-D field plane. Returns the same
     dict keys: x, y, z, vx, vy, vz (mm/us), t_us, tof_us, kind, n_col.
     `ion_label`: names the ion in the birth-in-metal refusal (parity
-    with fly3d)."""
+    with fly3d).
+    `charge`: signed integer charge state, default 1 (the SimSpec
+    default). mz_Da carries the ion MASS in Da (same convention as the
+    3-D, r-z, and SDS routes); q/m = charge*e/(mass*amu). This route
+    formerly HARD-CODED q = +1e — the same defect the 3-D kernel's
+    charge-state note records as fixed there (issues.md 2026-09-09)."""
     # birth-in-metal refusal, THIS route's impact predicate (the 4-corner
     # cell rule) so the refusal boundary equals the impact boundary.
     # build_tw2d_fields normalizes a missing mask to all-False, in which
@@ -289,7 +327,12 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
             f"y={float(r0_mm[1]):.3f}) mm (local frame) lies inside "
             f"the effective metal (all-four-corner cell rule, node "
             f"pitch {_h} mm): move the source or shrink its extent")
-    qm = E_CHG / (mz_Da * AMU)
+    if int(charge) == 0:
+        raise ValueError(
+            "charge = 0: an uncharged ion has no electric acceleration. "
+            "State the charge state (source.charge) rather than flying a "
+            "neutral through an electrostatic field.")
+    qm = int(charge) * E_CHG / (mz_Da * AMU)
     on = collisions is not None and (
         collisions.get("enabled", True) if isinstance(collisions, dict)
         else getattr(collisions, "enabled", True))
@@ -318,7 +361,7 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
     ts = np.empty(nmax)
     vxs = np.empty(nmax); vys = np.empty(nmax); vzs = np.empty(nmax)
     nrec, kind, ncol = _fly_tw2d(
-        qm, float(r0_mm[0]), float(r0_mm[1]),
+        qm, float(mz_Da), float(r0_mm[0]), float(r0_mm[1]),
         float(r0_mm[2]) if len(r0_mm) > 2 else 0.0,
         float(v0_mm_us[0]) * 1e3, float(v0_mm_us[1]) * 1e3,
         (float(v0_mm_us[2]) if len(v0_mm_us) > 2 else 0.0) * 1e3,

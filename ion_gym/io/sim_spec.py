@@ -205,6 +205,17 @@ class _StrictAttrs:
         super().__setattr__(name, value)
 
 
+# The ShapeSpec extrusion convention, as ONE named authority (it was
+# previously restated as a private literal in viz_core and implied by
+# the edit viewer): the cross-section plane of an extrude along `axis`
+# is the two remaining axes in CYCLIC order, and the shape's own
+# x/y params read as the (first, second) in-plane coordinate.
+#   origin: this module's ShapeSpec extrude docstring (below);
+#   consumers: viz_core._CYCLIC (aliased), ion_gym.edit (viewer frame).
+EXTRUDE_INPLANE_AXES = {"x": ("y", "z"), "y": ("z", "x"),
+                        "z": ("x", "y")}
+
+
 @dataclass
 class ShapeSpec(_StrictAttrs):
     """A geometry primitive in mm-space. type in
@@ -1251,11 +1262,29 @@ class StationSpec(_StrictAttrs):
     represent a detector; a station is a plane at `axis` = `pos_mm`
     with optional WINDOWS over the other axes).
 
-    kind:
-      "detect" -- absorbing within the window: an ion's FIRST window
-                  crossing is its detection event; later motion is
-                  nonphysical and must be ignored by consumers.
-      "record" -- transparent: crossings are logged, the ion continues.
+    kind (ruled 2026-09-12 — record/detect was "a distinction
+    without a difference"; the meaningful axis is what happens ON
+    a hit, so it is explicit):
+      "detect" -- a measuring plane; `on_hit` REQUIRED:
+          on_hit="pass"  -- transparent: crossings logged post-hoc,
+                            the ion continues (the old "record").
+          on_hit="splat" -- detector patch: a crossing INSIDE the
+                            window ABSORBS the ion at the exact
+                            interpolated crossing (fate 6, "station
+                            detect" — the detection event); outside
+                            passes; empty window = full-plane
+                            detector.
+      "impact_plane" -- PHYSICAL plate, the other kind that alters
+                  flight: the kernel terminates an ion crossing the
+                  plane OUTSIDE the window at the exact interpolated
+                  crossing (fate 5, "station impact plane"); inside
+                  the window it passes. Both crossing directions
+                  count (a plate has two faces). An EMPTY window is
+                  a wall: every crossing splats. This is the "splat
+                  window" bounds cannot express (bounding planes are
+                  whole-plane absolute kills). (Renamed from
+                  "aperture" 2026-09-11, Brian: an aperture is the
+                  OPENING; this kind is the plate.)
 
     Stations are configuration-agnostic: any axis in the run's
     channel set is legal, windows may cover any subset of the other
@@ -1265,6 +1294,7 @@ class StationSpec(_StrictAttrs):
     """
     name: str = "station"
     kind: str = "detect"
+    on_hit: Optional[str] = None  # detect only: 'pass' | 'splat' (REQUIRED)
     axis: str = "x"
     pos_mm: float = 0.0
     window: Dict[str, List[float]] = field(default_factory=dict)
@@ -1278,9 +1308,36 @@ class StationSpec(_StrictAttrs):
 
     def validate(self, prefix=""):
         errs = []
-        if self.kind not in ("detect", "record"):
+        if self.kind == "aperture":
+            errs.append(f"{prefix}station {self.name!r}: kind "
+                        f"'aperture' was RENAMED 'impact_plane' "
+                        f"(2026-09-11 — an aperture is the opening; "
+                        f"this kind is the plate). Update the deck.")
+        elif self.kind == "record":
+            errs.append(f"{prefix}station {self.name!r}: kind "
+                        f"'record' was RETIRED (2026-09-12 — "
+                        f"record vs detect was a distinction "
+                        f"without a difference). Use kind='detect' "
+                        f"with on_hit='pass'.")
+        elif self.kind == "detect":
+            if self.on_hit not in ("pass", "splat"):
+                errs.append(f"{prefix}station {self.name!r}: "
+                            f"kind='detect' requires on_hit='pass' "
+                            f"(log, ion continues) or "
+                            f"on_hit='splat' (absorbing detector, "
+                            f"fate 6), got {self.on_hit!r} — the "
+                            f"hit behavior is the whole "
+                            f"distinction, so it is explicit")
+        elif self.kind == "impact_plane":
+            if self.on_hit is not None:
+                errs.append(f"{prefix}station {self.name!r}: "
+                            f"on_hit={self.on_hit!r} on an "
+                            f"impact_plane — the plate's behavior "
+                            f"is fixed (aperture passes, plate "
+                            f"splats); on_hit is detect-only")
+        else:
             errs.append(f"{prefix}station {self.name!r}: unknown kind "
-                        f"{self.kind!r} (detect|record)")
+                        f"{self.kind!r} (detect|impact_plane)")
         if self.axis not in ("x", "y", "z"):
             errs.append(f"{prefix}station {self.name!r}: unknown axis "
                         f"{self.axis!r}")
@@ -1563,14 +1620,37 @@ class SimSpec(_StrictAttrs):
                 for e in mem:
                     e.dc = float(grp.v_in)
                 continue
+            if grp.interp == "weights":
+                # weights mode: dc_weight IS the tap position;
+                # dc_index is not consulted (it may be None). A
+                # member without a weight is REFUSED by name — the
+                # old silent default of 0.0 parked it at v_in, a
+                # hidden branch (caught 2026-09-12 when per-plate
+                # weighted ladders first exercised this path with
+                # index-free members).
+                _now = [e.name for e in mem if e.dc_weight is None]
+                if _now:
+                    raise ValueError(
+                        f"dc_group {grp.name!r} (interp='weights'): "
+                        f"member(s) {_now} have no dc_weight — a "
+                        f"weighted ladder needs every tap placed")
+                for e in mem:
+                    f = float(e.dc_weight)
+                    e.dc = float(grp.v_in) + (float(grp.v_out)
+                                              - float(grp.v_in)) * f
+                continue
             idx = [e.dc_index for e in mem]
+            _noi = [e.name for e in mem if e.dc_index is None]
+            if _noi:
+                raise ValueError(
+                    f"dc_group {grp.name!r} (interp="
+                    f"{grp.interp!r}): member(s) {_noi} have no "
+                    f"dc_index — an indexed ladder needs every "
+                    f"rung numbered")
             lo, hi = min(idx), max(idx)
             span = (hi - lo) or 1
             for e in mem:
-                if grp.interp == "weights":
-                    f = float(e.dc_weight if e.dc_weight is not None else 0.0)
-                else:
-                    f = (e.dc_index - lo) / span
+                f = (e.dc_index - lo) / span
                 e.dc = float(grp.v_in) + (float(grp.v_out)
                                           - float(grp.v_in)) * f
         return self
@@ -1595,6 +1675,46 @@ class SimSpec(_StrictAttrs):
                     "carries an stl -- the offset places MESHES; parametric "
                     "shapes declare their own positions, so this "
                     "declaration would silently do nothing")
+        # source.direction is a 3-VECTOR (List[float]; `axis` is a
+        # separate field). A scalar (+1) built fine, validated clean,
+        # and travelled until the FIRST consumer that iterates it —
+        # the UI's direction widgets, an IndexError-adjacent crash on
+        # Brian's machine (2026-09-11). Refuse it here, by name, with
+        # the fix in the message.
+        _d = self.source.direction
+        try:
+            _dv = [float(v) for v in _d]
+            _shape_ok = (len(_dv) == 3
+                         and all(math.isfinite(v) for v in _dv))
+        except TypeError:
+            _dv, _shape_ok = None, False
+        if not _shape_ok:
+            errs.append(
+                f"source.direction must be a 3-vector of finite "
+                f"floats, got {_d!r} — e.g. [1.0, 0.0, 0.0] for +x "
+                f"(a scalar sign is not the contract; `axis` is a "
+                f"separate field)")
+        elif not any(v != 0.0 for v in _dv):
+            # ZERO NORM is legitimate ONLY as "no directed beam".
+            # Combined with a declared kinetic energy it is a
+            # CONTRADICTION that used to resolve silently: births
+            # normalises with `d / (norm(d) or 1.0)`, so a zero vector
+            # left the directed term at zero and threw ke_lo..ke_hi
+            # away — the deck declared an energy the solver never
+            # received. Refuse THAT, by name, and say which of the two
+            # declarations to change; a zero direction with no energy
+            # declared stays valid and means exactly what it says.
+            if self.source.ke_lo > 0 or self.source.ke_hi > 0:
+                errs.append(
+                    f"source.direction is the zero vector while "
+                    f"ke_lo..ke_hi = {self.source.ke_lo}.."
+                    f"{self.source.ke_hi} eV declares a directed beam — "
+                    f"the energy has nowhere to point and would be "
+                    f"silently discarded (ions born exactly at rest). "
+                    f"Either give the beam its direction (e.g. "
+                    f"[1.0, 0.0, 0.0] for +x) or declare ke_lo = "
+                    f"ke_hi = 0 to mean births at rest; for a random "
+                    f"thermal spread use temperature_k.")
         for st in self.stations:
             errs += st.validate(prefix="stations: ")
         # A None pressure with collisions ON passed validation and then died
