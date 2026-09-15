@@ -1,0 +1,393 @@
+{
+ "schema_version": 1,
+ "name": "CDMS ELIT",
+ "notes": "Electrostatic linear ion trap for CDMS, r-z symmetry, built from J. A. Hogan & M. F. Jarrold, J. Am. Soc. Mass Spectrom. 29, 2086-2095 (2018), DOI 10.1007/s13361-018-2007-x (cylindrical trap): mirror electrodes l=4.57 mm, ID=13.97 mm, spacing delta=0.127 mm; grounded shields 3.81 mm thick with EXACT beveled bore 13.97 -> 3.3 mm (polygon); field-free 50.8 mm holding the 50.04 x 6.35 mm-ID charge-detection tube; endcap aperture r=1.5 mm. VOLTAGES ARE BRIAN'S SLIDE (2026-08-12), TRAPPED STATE: E1 133.4, E2 140.1, E3+endcaps 217.1 V, shields/tube 0 V, both mirrors symmetric. TRANSMISSION ('red') state, entrance mirror only: E3_L+endcap_L -> 0.0 V, E2_L -> 105.0 V (gate open; back mirror already trapping) \u2014 encode with two table-waveform step groups when gating is simulated, exactly as the oa-TOF time-lag example does. Paper's own tune for reference: E1 135, E2 95/125, E3 0/190 V at 130 eV/z. MODELING ASSUMPTIONS (not in the paper): endcap = aperture plate 1.52 mm thick at the E3 potential (slide shows an L-shaped endcap); electrode outer radius 12.0 mm; detector tube wall 0.8 mm; upstream segmented quadrupole/hexapole beamline NOT modeled \u2014 the source stands in for it: ions born on axis at trap center, 130.0 eV/z along +x (the paper's own simulation initial condition). Cell 0.0635 mm/gu = 2 cells per delta gap. TUNED 2026-08-12 (Fig 3c reproduction, within 's +-10 V wiggle around the slide): E1 133.4 -> 124.4, E2 140.1 -> 148.1, E3+endcaps 217.1 unchanged. Axial energy-isochronism slope at 130 eV/z, m/z 50000 (quadrature on the solved axis potential, validated by flight): slide tune +0.8094 %f/%E -> tuned -0.0078 %f/%E (paper cylindrical -0.0899, conical -0.903). f(130 eV) = 4.099 kHz, period 244 us -- the long period is PHYSICAL for 50 kDa at 130 eV/z (field-free transit alone is 143 us/round trip); it is why short flights show few oscillations. Radial stability at the tuned point NOT yet characterized (Fig 2 stability map is the natural next study). COLLISIONS OFF (2026-08-12): the first cut authored collisions:{model:'none'}, which set the MODEL string while `enabled` defaulted TRUE at 1 Torr N2 -- the trap was flying in a Torr of gas, which read as mysterious axial drag + radial diffusion to the tube wall. Paper operating pressure is 2e-9 Torr; vacuum (enabled:false) is the correct model.",
+ "geometry": {
+  "width_mm": 94.0435,
+  "height_mm": 14.986,
+  "depth_mm": 0.0,
+  "axial_extent_mm": null,
+  "mm_per_gu": 0.0635,
+  "symmetry": {
+   "coords": "rz",
+   "planes": {
+    "x": "none",
+    "y": "none",
+    "z": "none"
+   }
+  },
+  "stl_dir": null,
+  "stl_manifest": null,
+  "electrodes": [
+   {
+    "name": "endcap_L",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 2.0,
+      "y_mm": 1.5,
+      "width_mm": 1.52,
+      "height_mm": 10.5
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 217.1,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": "#b22222",
+    "basis": null
+   },
+   {
+    "name": "E3_L",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 3.647,
+      "y_mm": 6.985,
+      "width_mm": 4.57,
+      "height_mm": 5.015
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 217.1,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "E2_L",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 8.344,
+      "y_mm": 6.985,
+      "width_mm": 4.57,
+      "height_mm": 5.015
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 148.1,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "E1_L",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 13.041,
+      "y_mm": 6.985,
+      "width_mm": 4.57,
+      "height_mm": 5.015
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 124.4,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "GS_L",
+    "shapes": [
+     {
+      "type": "polygon",
+      "points_mm": [
+       [
+        17.738,
+        6.985
+       ],
+       [
+        21.548,
+        1.65
+       ],
+       [
+        21.548,
+        12.0
+       ],
+       [
+        17.738,
+        12.0
+       ]
+      ]
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": "#8a5a2b",
+    "basis": null
+   },
+   {
+    "name": "detector_tube",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 21.928,
+      "y_mm": 3.175,
+      "width_mm": 50.04,
+      "height_mm": 0.8
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": "#666666",
+    "basis": null
+   },
+   {
+    "name": "GS_R",
+    "shapes": [
+     {
+      "type": "polygon",
+      "points_mm": [
+       [
+        72.348,
+        1.65
+       ],
+       [
+        76.158,
+        6.985
+       ],
+       [
+        76.158,
+        12.0
+       ],
+       [
+        72.348,
+        12.0
+       ]
+      ]
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": "#8a5a2b",
+    "basis": null
+   },
+   {
+    "name": "E1_R",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 76.285,
+      "y_mm": 6.985,
+      "width_mm": 4.57,
+      "height_mm": 5.015
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 124.4,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "E2_R",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 80.982,
+      "y_mm": 6.985,
+      "width_mm": 4.57,
+      "height_mm": 5.015
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 148.1,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "E3_R",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 85.679,
+      "y_mm": 6.985,
+      "width_mm": 4.57,
+      "height_mm": 5.015
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 217.1,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "endcap_R",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 90.376,
+      "y_mm": 1.5,
+      "width_mm": 1.52,
+      "height_mm": 10.5
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 217.1,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": "#b22222",
+    "basis": null
+   }
+  ],
+  "rf_groups": [],
+  "dc_groups": []
+ },
+ "source": {
+  "n_ions": 6,
+  "distribution": "disc",
+  "x0_mm": 46.948,
+  "y0_mm": 0.25,
+  "z0_mm": 0.25,
+  "r_mm": 1,
+  "len_mm": 0.0,
+  "box_mm": [
+   0.5,
+   0.2,
+   0.0
+  ],
+  "axis": "x",
+  "direction": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "ke_lo": 130.0,
+  "ke_hi": 130.0,
+  "temperature_k": 0.0,
+  "mz_list": [
+   50000.0
+  ],
+  "charge": 1,
+  "tob_span_us": 2.0,
+  "births_file": null,
+  "seed": null
+ },
+ "collisions": {
+  "enabled": false,
+  "gas": "N2",
+  "T_k": 273.0,
+  "P_torr": 1.0,
+  "P_pa": 133.32236842105263,
+  "sigma_m2": 2.27e-18,
+  "model": "hs1",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "dt_ns": 4.0,
+  "t_max_us": 2000,
+  "rec_every": 20,
+  "max_records": 200000,
+  "record_channels": [
+   "speed",
+   "ke_ev",
+   "e_field"
+  ]
+ },
+ "bounds": {
+  "x_min_on": false,
+  "x_max_on": false,
+  "y_min_on": false,
+  "y_max_on": false,
+  "z_min_on": false,
+  "z_max_on": false,
+  "x_min": 0.0,
+  "x_max": 94.023,
+  "y_min": -15.0,
+  "y_max": 15.0,
+  "z_min": -15.0,
+  "z_max": 15.0
+ },
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xy"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "index",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null,
+ "_display_name": "CDMS ELIT"
+}

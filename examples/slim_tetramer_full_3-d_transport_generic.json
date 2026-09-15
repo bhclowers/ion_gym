@@ -1,0 +1,2768 @@
+{
+ "schema_version": 1,
+ "name": "SLIM 3D",
+ "notes": "SLIM tetramer, full 3-D, authored natively as inline extruded shapes (no geometry files). Axes: x = transport (37 mm), y = board gap (mirror axis; half-domain 0..2.05 mm with grid.mirror='y' giving two boards and a 2.75 mm gap between inner faces at y = \u00b11.375 mm), z = board width (13 mm, five rungs). RF rails confine across the gap; travelling DC rungs carry ions along x. | 2026-09-15 (L-448): rec_every 20 -> 37. At dt_ns=1 over t_max_us=3600 this wanted 180,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- so this deck was recording only the first 2,000 us of the flight. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 180,002 records per ion.",
+ "geometry": {
+  "width_mm": 37.050000000000004,
+  "height_mm": 12.350000000000001,
+  "depth_mm": 1.6,
+  "axial_extent_mm": null,
+  "mm_per_gu": 0.05,
+  "symmetry": {
+   "coords": "xyz",
+   "planes": {
+    "z": "mirror"
+   }
+  },
+  "stl_dir": null,
+  "stl_manifest": null,
+  "field_method": "plain_gradient",
+  "channel_dtype": "float32",
+  "electrodes": [
+   {
+    "name": "TW1",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 0.064,
+      "y_mm": 3.81,
+      "width_mm": 1.015,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.064,
+      "y_mm": 4.877,
+      "width_mm": 1.015,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.064,
+      "y_mm": 5.944,
+      "width_mm": 1.015,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.064,
+      "y_mm": 7.01,
+      "width_mm": 1.015,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.064,
+      "y_mm": 8.077,
+      "width_mm": 1.015,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.207,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.207,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.207,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.207,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.207,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.351,
+      "y_mm": 3.81,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.351,
+      "y_mm": 4.877,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.351,
+      "y_mm": 5.944,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.351,
+      "y_mm": 7.01,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.351,
+      "y_mm": 8.077,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.495,
+      "y_mm": 3.81,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.495,
+      "y_mm": 4.877,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.495,
+      "y_mm": 5.944,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.495,
+      "y_mm": 7.01,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.495,
+      "y_mm": 8.077,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "TW1"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "TW2",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 1.206,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 1.206,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 1.206,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 1.206,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 1.206,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 10.351,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 10.351,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 10.351,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 10.351,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 10.351,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 19.494,
+      "y_mm": 3.81,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 19.494,
+      "y_mm": 4.877,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 19.494,
+      "y_mm": 5.944,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 19.494,
+      "y_mm": 7.01,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 19.494,
+      "y_mm": 8.077,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 28.639,
+      "y_mm": 3.81,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 28.639,
+      "y_mm": 4.877,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 28.639,
+      "y_mm": 5.944,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 28.639,
+      "y_mm": 7.01,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 28.639,
+      "y_mm": 8.077,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "TW2"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "TW3",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 2.349,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 2.349,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 2.349,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 2.349,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 2.349,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 11.493,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 11.493,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 11.493,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 11.493,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 11.493,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 20.637,
+      "y_mm": 3.81,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 20.637,
+      "y_mm": 4.877,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 20.637,
+      "y_mm": 5.944,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 20.637,
+      "y_mm": 7.01,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 20.637,
+      "y_mm": 8.077,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 29.781,
+      "y_mm": 3.81,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 29.781,
+      "y_mm": 4.877,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 29.781,
+      "y_mm": 5.944,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 29.781,
+      "y_mm": 7.01,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 29.781,
+      "y_mm": 8.077,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "TW3"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "TW4",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 3.492,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 3.492,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 3.492,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 3.492,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 3.492,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 12.636,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 12.636,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 12.636,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 12.636,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 12.636,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 21.78,
+      "y_mm": 3.81,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 21.78,
+      "y_mm": 4.877,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 21.78,
+      "y_mm": 5.944,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 21.78,
+      "y_mm": 7.01,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 21.78,
+      "y_mm": 8.077,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 30.924,
+      "y_mm": 3.81,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 30.924,
+      "y_mm": 4.877,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 30.924,
+      "y_mm": 5.944,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 30.924,
+      "y_mm": 7.01,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 30.924,
+      "y_mm": 8.077,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "TW4"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "TW5",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 4.635,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 4.635,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 4.635,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 4.635,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 4.635,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 13.779,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 13.779,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 13.779,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 13.779,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 13.779,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 22.924,
+      "y_mm": 3.81,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 22.924,
+      "y_mm": 4.877,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 22.924,
+      "y_mm": 5.944,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 22.924,
+      "y_mm": 7.01,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 22.924,
+      "y_mm": 8.077,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 32.067,
+      "y_mm": 3.81,
+      "width_mm": 1.017000000000003,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 32.067,
+      "y_mm": 4.877,
+      "width_mm": 1.017000000000003,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 32.067,
+      "y_mm": 5.944,
+      "width_mm": 1.017000000000003,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 32.067,
+      "y_mm": 7.01,
+      "width_mm": 1.017000000000003,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 32.067,
+      "y_mm": 8.077,
+      "width_mm": 1.017000000000003,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "TW5"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "TW6",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 5.779,
+      "y_mm": 3.81,
+      "width_mm": 1.0149999999999997,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 5.779,
+      "y_mm": 4.877,
+      "width_mm": 1.0149999999999997,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 5.779,
+      "y_mm": 5.944,
+      "width_mm": 1.0149999999999997,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 5.779,
+      "y_mm": 7.01,
+      "width_mm": 1.0149999999999997,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 5.779,
+      "y_mm": 8.077,
+      "width_mm": 1.0149999999999997,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 14.922,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 14.922,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 14.922,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 14.922,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 14.922,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 24.066,
+      "y_mm": 3.81,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 24.066,
+      "y_mm": 4.877,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 24.066,
+      "y_mm": 5.944,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 24.066,
+      "y_mm": 7.01,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 24.066,
+      "y_mm": 8.077,
+      "width_mm": 1.0160000000000018,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 33.21,
+      "y_mm": 3.81,
+      "width_mm": 1.016999999999996,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 33.21,
+      "y_mm": 4.877,
+      "width_mm": 1.016999999999996,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 33.21,
+      "y_mm": 5.944,
+      "width_mm": 1.016999999999996,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 33.21,
+      "y_mm": 7.01,
+      "width_mm": 1.016999999999996,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 33.21,
+      "y_mm": 8.077,
+      "width_mm": 1.016999999999996,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "TW6"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "TW7",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 6.921,
+      "y_mm": 3.81,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 6.921,
+      "y_mm": 4.877,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 6.921,
+      "y_mm": 5.944,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 6.921,
+      "y_mm": 7.01,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 6.921,
+      "y_mm": 8.077,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 16.066,
+      "y_mm": 3.81,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 16.066,
+      "y_mm": 4.877,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 16.066,
+      "y_mm": 5.944,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 16.066,
+      "y_mm": 7.01,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 16.066,
+      "y_mm": 8.077,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 25.209,
+      "y_mm": 3.81,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 25.209,
+      "y_mm": 4.877,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 25.209,
+      "y_mm": 5.944,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 25.209,
+      "y_mm": 7.01,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 25.209,
+      "y_mm": 8.077,
+      "width_mm": 1.0169999999999995,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 34.353,
+      "y_mm": 3.81,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 34.353,
+      "y_mm": 4.877,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 34.353,
+      "y_mm": 5.944,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 34.353,
+      "y_mm": 7.01,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 34.353,
+      "y_mm": 8.077,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "TW7"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "TW8",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 8.064,
+      "y_mm": 3.81,
+      "width_mm": 1.016,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 8.064,
+      "y_mm": 4.877,
+      "width_mm": 1.016,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 8.064,
+      "y_mm": 5.944,
+      "width_mm": 1.016,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 8.064,
+      "y_mm": 7.01,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 8.064,
+      "y_mm": 8.077,
+      "width_mm": 1.016,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 17.209,
+      "y_mm": 3.81,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 17.209,
+      "y_mm": 4.877,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 17.209,
+      "y_mm": 5.944,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 17.209,
+      "y_mm": 7.01,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 17.209,
+      "y_mm": 8.077,
+      "width_mm": 1.0150000000000006,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 26.352,
+      "y_mm": 3.81,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 26.352,
+      "y_mm": 4.877,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 26.352,
+      "y_mm": 5.944,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 26.352,
+      "y_mm": 7.01,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 26.352,
+      "y_mm": 8.077,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 35.496,
+      "y_mm": 3.81,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40600000000000014,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 35.496,
+      "y_mm": 4.877,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 35.496,
+      "y_mm": 5.944,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 35.496,
+      "y_mm": 7.01,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 35.496,
+      "y_mm": 8.077,
+      "width_mm": 1.0159999999999982,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "TW8"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "RF_A",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 0.0,
+      "y_mm": 3.277,
+      "width_mm": 9.144,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.0,
+      "y_mm": 5.41,
+      "width_mm": 9.144,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.0,
+      "y_mm": 7.544,
+      "width_mm": 9.144,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.144,
+      "y_mm": 3.277,
+      "width_mm": 9.144,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.144,
+      "y_mm": 5.41,
+      "width_mm": 9.144,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.144,
+      "y_mm": 7.544,
+      "width_mm": 9.144,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.288,
+      "y_mm": 3.277,
+      "width_mm": 9.143999999999998,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.288,
+      "y_mm": 5.41,
+      "width_mm": 9.143999999999998,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.288,
+      "y_mm": 7.544,
+      "width_mm": 9.143999999999998,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.432,
+      "y_mm": 3.277,
+      "width_mm": 9.144000000000002,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.432,
+      "y_mm": 5.41,
+      "width_mm": 9.144000000000002,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.432,
+      "y_mm": 7.544,
+      "width_mm": 9.144000000000002,
+      "height_mm": 0.4060000000000006,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RF1"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "RF_B",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 0.0,
+      "y_mm": 4.343,
+      "width_mm": 9.144,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.0,
+      "y_mm": 6.477,
+      "width_mm": 9.144,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.0,
+      "y_mm": 8.611,
+      "width_mm": 9.144,
+      "height_mm": 0.4059999999999988,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.144,
+      "y_mm": 4.343,
+      "width_mm": 9.144,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.144,
+      "y_mm": 6.477,
+      "width_mm": 9.144,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.144,
+      "y_mm": 8.611,
+      "width_mm": 9.144,
+      "height_mm": 0.4059999999999988,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.288,
+      "y_mm": 4.343,
+      "width_mm": 9.143999999999998,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.288,
+      "y_mm": 6.477,
+      "width_mm": 9.143999999999998,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.288,
+      "y_mm": 8.611,
+      "width_mm": 9.143999999999998,
+      "height_mm": 0.4059999999999988,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.432,
+      "y_mm": 4.343,
+      "width_mm": 9.144000000000002,
+      "height_mm": 0.40700000000000003,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.432,
+      "y_mm": 6.477,
+      "width_mm": 9.144000000000002,
+      "height_mm": 0.4059999999999997,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.432,
+      "y_mm": 8.611,
+      "width_mm": 9.144000000000002,
+      "height_mm": 0.4059999999999988,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RF2"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "guard",
+    "shapes": [
+     {
+      "type": "rect",
+      "x_mm": 0.0,
+      "y_mm": 0.0,
+      "width_mm": 9.144,
+      "height_mm": 3.15,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 0.0,
+      "y_mm": 9.144,
+      "width_mm": 9.144,
+      "height_mm": 3.1500000000000004,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.144,
+      "y_mm": 0.0,
+      "width_mm": 9.144,
+      "height_mm": 3.15,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 9.144,
+      "y_mm": 9.144,
+      "width_mm": 9.144,
+      "height_mm": 3.1500000000000004,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.288,
+      "y_mm": 0.0,
+      "width_mm": 9.143999999999998,
+      "height_mm": 3.15,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 18.288,
+      "y_mm": 9.144,
+      "width_mm": 9.143999999999998,
+      "height_mm": 3.1500000000000004,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.432,
+      "y_mm": 0.0,
+      "width_mm": 9.144000000000002,
+      "height_mm": 3.15,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     },
+     {
+      "type": "rect",
+      "x_mm": 27.432,
+      "y_mm": 9.144,
+      "width_mm": 9.144000000000002,
+      "height_mm": 3.1500000000000004,
+      "extrude": {
+       "axis": "z",
+       "lo_mm": 1.375,
+       "hi_mm": 1.575
+      }
+     }
+    ],
+    "stl": null,
+    "is_grid": false,
+    "dc": 4,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   }
+  ],
+  "rf_groups": [
+   {
+    "name": "RF1",
+    "frequency_hz": 800000.0,
+    "amplitude_v": 100.0,
+    "phase_deg": 0.0,
+    "duty": 0.5,
+    "offset_v": 0.0,
+    "waveform": "sin",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "RF2",
+    "frequency_hz": 800000.0,
+    "amplitude_v": 100.0,
+    "phase_deg": 180.0,
+    "duty": 0.5,
+    "offset_v": 0.0,
+    "waveform": "sin",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "TW1",
+    "frequency_hz": 6250.0,
+    "amplitude_v": 5.0,
+    "phase_deg": 157.5,
+    "duty": 0.5,
+    "offset_v": 2.5,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "TW2",
+    "frequency_hz": 6250.0,
+    "amplitude_v": 5.0,
+    "phase_deg": 112.5,
+    "duty": 0.5,
+    "offset_v": 2.5,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "TW3",
+    "frequency_hz": 6250.0,
+    "amplitude_v": 5.0,
+    "phase_deg": 67.5,
+    "duty": 0.5,
+    "offset_v": 2.5,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "TW4",
+    "frequency_hz": 6250.0,
+    "amplitude_v": 5.0,
+    "phase_deg": 22.5,
+    "duty": 0.5,
+    "offset_v": 2.5,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "TW5",
+    "frequency_hz": 6250.0,
+    "amplitude_v": 5.0,
+    "phase_deg": -22.5,
+    "duty": 0.5,
+    "offset_v": 2.5,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "TW6",
+    "frequency_hz": 6250.0,
+    "amplitude_v": 5.0,
+    "phase_deg": -67.5,
+    "duty": 0.5,
+    "offset_v": 2.5,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "TW7",
+    "frequency_hz": 6250.0,
+    "amplitude_v": 5.0,
+    "phase_deg": -112.5,
+    "duty": 0.5,
+    "offset_v": 2.5,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "TW8",
+    "frequency_hz": 6250.0,
+    "amplitude_v": 5.0,
+    "phase_deg": -157.5,
+    "duty": 0.5,
+    "offset_v": 2.5,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   }
+  ],
+  "dc_groups": []
+ },
+ "source": {
+  "n_ions": 20,
+  "distribution": "box",
+  "x0_mm": 2.0,
+  "y0_mm": 6.147,
+  "z0_mm": 0.0,
+  "r_mm": 0.5,
+  "len_mm": 0.0,
+  "box_mm": [
+   0.5,
+   0.5,
+   0.5
+  ],
+  "axis": "x",
+  "direction": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "ke_lo": 0.02,
+  "ke_hi": 0.05,
+  "temperature_k": 0.0,
+  "mz_list": [
+   322.0,
+   622.0
+  ],
+  "charge": 1,
+  "tob_span_us": 160.0,
+  "births_file": null,
+  "seed": null
+ },
+ "collisions": {
+  "enabled": true,
+  "gas": "N2",
+  "T_k": 298.15,
+  "P_torr": 2.5,
+  "P_pa": 333.30592105263156,
+  "sigma_m2": 2.27e-18,
+  "model": "hs",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "dt_ns": 1.0,
+  "t_max_us": 3600,
+  "rec_every": 37,
+  "record_channels": [
+   "speed",
+   "ke_ev",
+   "e_field",
+   "ke_x",
+   "ke_y",
+   "ke_z"
+  ]
+ },
+ "bounds": {
+  "x_min_on": false,
+  "x_max_on": false,
+  "y_min_on": false,
+  "y_max_on": false,
+  "z_min_on": false,
+  "z_max_on": false,
+  "x_min": 0.0,
+  "x_max": 100.0,
+  "y_min": -50.0,
+  "y_max": 50.0,
+  "z_min": -50.0,
+  "z_max": 50.0
+ },
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xy",
+   "xz",
+   "yz"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null,
+ "_display_name": "SLIM (3D)"
+}

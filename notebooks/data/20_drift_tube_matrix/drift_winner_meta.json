@@ -1,0 +1,13 @@
+{
+ "winner": {
+  "w_c": 0.5,
+  "w_s": 1.6,
+  "p": 2.1,
+  "r_in": 10.0,
+  "gamma_eff": 0.95,
+  "r_out": 15.0,
+  "n_rings": 40
+ },
+ "recess_spec_mm": 3.5,
+ "recess_condition": "board annulus d = 10 mm (free in stacked architecture; r_out 20 mm = R_OUT_MAX); at the matrix's d = 5 mm the attenuation floors at 1.3e-3 (dr 2.5) \u2014 the ring band must be >= ~2x the recess for the slot mode to reach 1e-4"
+}
