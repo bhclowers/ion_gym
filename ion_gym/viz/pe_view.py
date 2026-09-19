@@ -159,19 +159,28 @@ def model_instant_drives(model):
 
 
 def model_has_rf(model):
-    """True if the model carries any drive: a planar/r-z `drives` list, a
-    3-D channel-group list, a sin Bk list, or the 3-D display pair's
-    rf_V. The old rf_V-only fallback was a hidden branch: a SQUARE-only
-    r-z deck (sin Bk empty, scalar rf_V removed in L-455) read as
-    drive-free."""
-    if getattr(model, "drives", None) or getattr(model, "chan_groups", None):
-        return True
-    if getattr(model, "Bk", None):
-        return True
-    om = getattr(model, "om_rad_us", None)
-    if om is None:
-        om = getattr(model, "rf_om", 0.0)
-    return getattr(model, "rf_V", 0.0) != 0.0 and (om or 0.0) > 0.0
+    """True if the model carries any time-dependent drive. The ONE
+    authority for that question: the PE tab and sim_app's PE caption both
+    ask here.
+
+    The model DECLARES the answer (has_drive(), computed from its own
+    data) and this reads it, refusing a model that does not declare --
+    the same pattern as viz_core.model_planes and peak_potential_image
+    (2026-09-18). Before that, this function and a second copy in
+    sim_app each SNIFFED attributes (drives / chan_groups / Bk / rf_V +
+    frequency) and the two copies had already drifted apart. Sniffing is
+    how the rf_V-only version read a square-only r-z deck as drive-free
+    (L-455), and how the peak-snapshot dispatch broke the RF planar field
+    view (L-499)."""
+    fn = getattr(model, "has_drive", None)
+    if fn is None:
+        raise V.VizError(
+            f"{type(model).__name__} does not declare has_drive(). Every "
+            f"model the PE view reads must say from its own data whether it "
+            f"carries a drive -- sniffing attributes from outside is what "
+            f"misclassified square-only r-z decks and broke the RF planar "
+            f"field view. Add the method.")
+    return bool(fn())
 
 
 def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,

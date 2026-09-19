@@ -3515,37 +3515,36 @@ class SimApp:
                                 electrode_dc=(self._electrode_dc()
                                               if mm != "mask" else None),
                                 trust_cells=int(self._pe_tab.w_trust.value))
-        # For an RF device (Stl3DModel carries rf_V) the DC potential is ~0,
-        # so snapshot the field at RF PEAK phase — the quad saddle and its
-        # contours become visible instead of a blank DC map. Models without
-        # rf_V (planar/SLIM, which fold RF differently) are unchanged.
+        # For an RF device the DC potential is ~0, so the view shows the
+        # field at the drive PEAK — the quad saddle and its contours become
+        # visible instead of a blank DC map.
         #
         # This USED to be an `except TypeError` sniff around the rf_phase
         # kwarg — the SAME capability-probe-by-exception D1 killed three
         # times in pe_view: a TypeError raised INSIDE potential_image (a real
         # bug) was swallowed and re-run WITHOUT the phase, silently showing a
-        # blank DC map for an RF device. The contract is now uniform: every
-        # model accepts `rf_phase`, and PlanarModel REFUSES a non-None one
-        # with a diagnostic rather than being probed.
+        # blank DC map for an RF device. The SIGNATURE is uniform (every
+        # model accepts `rf_phase`) but the MEANING is not: a no-argument
+        # call is the PEAK on PlanarModel and DC on RZModel / Stl3DModel, and
+        # PlanarModel refuses a phase. That mismatch is why the peak is
+        # fetched through a declaration below, not a guess.
         # RF-PEAK is the one phase convention for EVERY view (as
         # exposed by an identity check: this fetch was gated on
         # the xy view, so the xz view of the SAME r-z plane shaded and
         # contoured the phase-0 image while xy showed the peak — two
         # pictures of one plane). field_slice_3d already documents peak
         # phase; now the 2-D image follows the physics, not the view.
-        # CAPABILITY marker for the peak snapshot: the model's own drive
-        # channels (chan_phi -- r-z and runner-built 3-D), or the 3-D
-        # display pair's rf_V. The old marker was getattr(model, "rf_V",
-        # 0) ALONE -- a hidden branch that broke silently when L-455
-        # removed the r-z scalar: every RF r-z deck fell to the DC call
-        # and the funnel contours read "DC only" (PI report, L-463).
-        # PlanarModel has neither marker and keeps the no-phase call its
-        # potential_image requires.
-        if (getattr(model, "chan_phi", None)
-                or getattr(model, "rf_V", 0)):
-            z, r_full, img, em = model.potential_image(rf_phase=np.pi / 2)
-        else:
-            z, r_full, img, em = model.potential_image()
+        # PEAK SNAPSHOT, by DECLARATION (2026-09-18). This used to pick the
+        # call by sniffing a marker: first getattr(model, "rf_V", 0), which
+        # broke silently when L-455 removed the r-z scalar (funnel contours
+        # read "DC only", L-463); then getattr(model, "chan_phi", None),
+        # under the assumption "PlanarModel has neither marker". It does
+        # carry chan_phi, so every RF PLANAR deck was sent the rf_phase
+        # PlanarModel refuses -- a broken field view on Quadrupole 2D and
+        # SLIM 2D, and three red gates. The models now DECLARE what their
+        # no-argument potential_image returns; the reader lives beside
+        # model_planes and refuses an undeclared model by name.
+        z, r_full, img, em = V.peak_potential_image(model)
         if field_plane:
             if self.w_showfield.value:
                 pe_mode = (self.w_fieldmode.value.startswith("PE")
@@ -3567,14 +3566,16 @@ class SimApp:
                     # Quick Start) was labelled as carrying a
                     # pseudopotential term it does not have -- the
                     # Dehmelt sum is empty with no drives, and the map is
-                    # plain electrostatic potential energy. Derived from
-                    # the model rather than from the route, so every
-                    # model type answers for itself: planar AND r-z
-                    # carry `drives` (L-455), 3-D carries chan_groups
-                    # and the display rf_V.
-                    _has_rf = (bool(getattr(model, "rf_V", 0))
-                               or bool(getattr(model, "drives", ()))
-                               or bool(getattr(model, "chan_groups", ())))
+                    # plain electrostatic potential energy. The model
+                    # DECLARES whether it carries a drive (has_drive(),
+                    # from its own data) and pe_view.model_has_rf is the
+                    # ONE reader -- the PE tab asks the same function.
+                    # This used to be a second, SNIFFED copy of that
+                    # logic (rf_V / drives / chan_groups) that had already
+                    # drifted from pe_view's own copy (2026-09-18, L-499
+                    # follow-up).
+                    from ion_gym.viz.pe_view import model_has_rf
+                    _has_rf = model_has_rf(model)
                     _pe_txt = (
                         f"effective RF pseudopotential (adiabatic "
                         f"approximation), m/z {mzq:g}" if _has_rf else

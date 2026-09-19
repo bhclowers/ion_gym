@@ -83,6 +83,10 @@ class RZModel:
     # Which principal planes this model HAS.  Declared, never sniffed.
     # An r-z model's plane is r-z.  It is NOT xy -- saying so was the bug.
     PLANES = ('rz',)
+    # What potential_image() returns with NO argument: the DC potential.
+    # The drive peak is rf_phase=pi/2 (each channel's own waveform at that
+    # phase). Declared, never sniffed -- viz_core.peak_potential_image.
+    POTENTIAL_IMAGE_DEFAULT = "dc"
 
     def __init__(self, A, ele, EzA, EuA, EzK, EuK, ch_kind, ch_om,
                  ch_ph, ch_duty, drives, u0, mm,
@@ -139,6 +143,12 @@ class RZModel:
     def extent(self):
         nz, nr = self.A.shape
         return np.arange(nz) * self.mm_per_gu, np.arange(nr) * self.mm_per_gu
+
+    def has_drive(self):
+        """True if this model carries any time-dependent drive. Declared
+        by the model from its OWN data (`drives`, always set in __init__),
+        read by pe_view.model_has_rf -- never sniffed (2026-09-18)."""
+        return bool(self.drives)
 
     def potential_image(self, rf_phase=None):
         """DC potential (rf_phase=None), or the drive snapshot with every

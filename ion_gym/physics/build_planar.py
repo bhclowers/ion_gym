@@ -113,6 +113,14 @@ class PlanarModel:
     # Which principal planes this model HAS.  Declared, never sniffed.
     # A planar solve has NO z: xz/yz would be a fabricated third dimension.
     PLANES = ('xy',)
+    # What potential_image() returns with NO argument. Declared, never
+    # sniffed (viz_core.peak_potential_image reads it). This model's image
+    # is ALREADY the static field plus every drive at its peak, so the
+    # peak is the no-argument call and a phase is refused. NOTE: this model
+    # DOES carry chan_phi (its drive-channel list) -- sniffing chan_phi as
+    # an "accepts a snapshot phase" marker is exactly what broke the RF
+    # planar field view (2026-09-18).
+    POTENTIAL_IMAGE_DEFAULT = "peak"
 
     def __init__(self, A, Bk, ele, Ex, Ey, mm_per_gu, spec, el_bands=None,
                  drives=None, bases=None, anchor_mm=(0.0, 0.0)):
@@ -339,6 +347,14 @@ class PlanarModel:
                 pe = pe + charge * _dehmelt(Beff, None, f0,
                                             factor=math.pi ** 2 / 6.0)
         return x, y, pe, self.ele
+
+    def has_drive(self):
+        """True if this model carries any time-dependent drive. Declared
+        by the model from its OWN data, read by pe_view.model_has_rf --
+        never sniffed from outside (2026-09-18). `drives` is always set:
+        __init__ synthesizes it from Bk when only Bk is passed, so it is
+        the complete answer (a separate Bk check would be redundant)."""
+        return bool(self.drives)
 
     def potential_image(self, rf_phase=None):
         # UNIFORM CONTRACT (all three models accept `rf_phase`).  This model's

@@ -27,4 +27,4 @@ imported explicitly by their absolute dotted paths.
 # TIME so the Config tab (which reads this live) always matches the
 # artifact the user downloaded. A tree whose version trails its zip
 # name reads as "did my upload take?" in the browser.
-__version__ = "542"
+__version__ = "543"

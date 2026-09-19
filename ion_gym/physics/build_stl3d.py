@@ -44,6 +44,10 @@ class Stl3DModel:
     # Which principal planes this model HAS.  Declared, never sniffed.
     # A true 3-D solve: all three principal planes are real.
     PLANES = ('xy', 'xz', 'yz')
+    # What potential_image() returns with NO argument: the DC mid-z slice
+    # (sin(None) -> 0). The drive peak is rf_phase=pi/2. Declared, never
+    # sniffed -- viz_core.peak_potential_image.
+    POTENTIAL_IMAGE_DEFAULT = "dc"
 
     def __init__(self, A, B, ele, h_mm, rf_V, om_rad_us, off_mm,
                  anchor_mm=(0.0, 0.0)):
@@ -77,6 +81,24 @@ class Stl3DModel:
 
     def _mid(self):
         return self.A.shape[2] // 2
+
+    def has_drive(self):
+        """True if this model carries any time-dependent drive. Declared
+        by the model, read by pe_view.model_has_rf -- never sniffed
+        (2026-09-18). The authority is `chan_groups`, the channel-aligned
+        group list build_stl3d_run attaches: every flown drive channel
+        appears there, so it subsumes the display pair's rf_V (a nonzero
+        rf_V needs an amplitude-bearing sin group, which is a channel).
+        A model built by hand without it is REFUSED, the same condition
+        pe_surface refuses -- guessing 'no drive' would caption an RF
+        device as plain electrostatics."""
+        grps = getattr(self, "chan_groups", None)
+        if grps is None:
+            raise ValueError(
+                "Stl3DModel.has_drive needs the chan_groups the runner "
+                "attaches; this model was constructed without them -- "
+                "build it through build_stl3d_run, not by hand")
+        return bool(grps)
 
     def potential_image(self, rf_phase=None):
         k = self._mid()

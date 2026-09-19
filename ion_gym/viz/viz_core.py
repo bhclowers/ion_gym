@@ -370,6 +370,69 @@ def model_planes(model) -> tuple:
     return pl
 
 
+# What a model's NO-ARGUMENT potential_image() returns. Declared by each
+# model class, never sniffed -- see peak_potential_image for why.
+POTENTIAL_IMAGE_MODES = ("peak", "dc")
+
+
+def peak_potential_image(model):
+    """The drive-PEAK snapshot of `model`'s potential, for ANY model:
+    (x, y, img, ele) exactly as that model's potential_image returns.
+
+    Why this exists (2026-09-18, fix A of the planar field-view defect).
+    The three model classes share the signature potential_image(rf_phase=
+    None) but NOT its meaning:
+
+        PlanarModel  None -> static field + every drive at PEAK; a phase
+                             is REFUSED (it already folds the drives)
+        RZModel      None -> DC only;  rf_phase=pi/2 -> peak snapshot
+        Stl3DModel   None -> DC only;  rf_phase=pi/2 -> peak snapshot
+
+    So "give me the peak" needs a different call per model, and sim_app
+    used to decide which by SNIFFING an attribute -- first
+    getattr(model, "rf_V", 0), which broke silently when L-455 removed the
+    r-z scalar (funnel contours read DC-only); then, from L-463,
+    getattr(model, "chan_phi", None), on the stated assumption that
+    PlanarModel carries neither marker. It does carry chan_phi -- it is
+    the planar drive-channel list -- so every RF PLANAR deck (Quadrupole
+    2D, SLIM 2D, any RF stl2d deck) was routed into the call PlanarModel
+    refuses, breaking its field view and three gates. Two sniffed markers,
+    two silent breaks: the marker was never the defect, the sniff was.
+
+    The model DECLARES what its no-argument call returns
+    (POTENTIAL_IMAGE_DEFAULT, one of POTENTIAL_IMAGE_MODES) and this reads
+    the declaration, exactly as model_planes reads PLANES. An undeclared
+    or unrecognized value is REFUSED by name -- the alternative is to
+    guess, which is what broke twice.
+
+    Asking a 'dc' model for pi/2 is safe with no drives at all: RZModel
+    loops an empty chan_phi and returns A; Stl3DModel evaluates A + 0*B
+    (rf_V = 0, B = zeros) -- the same expression its no-argument call
+    evaluates, so the result is bit-identical. The peak snapshot of a
+    drive-less device IS its DC field.
+    """
+    mode = getattr(model, "POTENTIAL_IMAGE_DEFAULT", None)
+    if mode is None:
+        raise VizError(
+            f"{type(model).__name__} does not declare POTENTIAL_IMAGE_DEFAULT. "
+            f"Every model with a potential_image must state what its "
+            f"no-argument call returns, one of {POTENTIAL_IMAGE_MODES} -- "
+            f"sniffing an attribute instead is what broke the r-z and then "
+            f"the planar field view. Add the class attribute.")
+    if mode == "peak":
+        # the model already folds every drive at its peak; a phase would
+        # be refused, and none is needed
+        return model.potential_image()
+    elif mode == "dc":
+        # the no-argument call is DC only; pi/2 is the reference peak
+        # instant (w t = pi/2), the convention every route documents
+        return model.potential_image(rf_phase=math.pi / 2)
+    else:
+        raise VizError(
+            f"{type(model).__name__}.POTENTIAL_IMAGE_DEFAULT = {mode!r} is "
+            f"not one of {POTENTIAL_IMAGE_MODES}")
+
+
 def extrude(poly2d, a0, a1, axis: int = 2) -> list:
     """Cross-section -> prism: the two end caps AND the side quads.
 
