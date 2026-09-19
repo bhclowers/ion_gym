@@ -11,6 +11,7 @@ Uses the r-z einzel (the honest rotationally-symmetric lens). Asserts:
     the cache and prompts recompute,
   * component reduction: for a DC-only device effective == DC.
 """
+from ion_gym.viz import viz_core as V
 import _bootstrap  # noqa: F401  -- repo root on sys.path
 import sys
 
@@ -98,7 +99,7 @@ def main():
 
     # scaling mode change also invalidates; title reflects device+component
     pe.compute()
-    assert pe._fig.layout.title.text and "PE surface" in pe._fig.layout.title.text
+    assert "PE surface" in V.plotly_title(pe._fig)   # title lives in meta (L-462 layout)
     # DC einzel: no RF caveat
     assert not any("Mathieu" in (a.text or "")
                    for a in pe._fig.layout.annotations)

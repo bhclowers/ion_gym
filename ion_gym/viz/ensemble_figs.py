@@ -878,3 +878,233 @@ def cumulant_scaling_figure(runs, *, operating_point,
     table["exponents"] = dict(kappa2=e2, kappa3=e3, fano=e_f,
                               H=eH, kappa3_note=k3_note)
     return fig, table
+
+
+def atd_model_figure(measured_by_label, model_by_label, *, operating_point,
+                     bins=60, tof_unit="us", center=False, log_y=False,
+                     normalize_models=True, y_label=None,
+                     figsize=(9.5, 4.2)):
+    """Data-vs-model ATD figure: measured arrivals as DENSITY step
+    histograms, model predictions as density curves, on shared axes.
+    measured_by_label: {label: 1-D arrivals}; model_by_label:
+    {label: (t, density)} — a label may appear in either or both.
+    Each model curve is normalized to unit area (trapezoid) so data
+    and model share the density axis. center=True shifts every label
+    to its own centroid (sample mean; curve first moment), so shapes
+    with very different means compare on one axis — the axis is then
+    labelled as a centroid offset. log_y=True puts density on a log
+    axis (the tail view); zero-count bins simply have no step there.
+    normalize_models=False draws each model curve AT THE AREA IT WAS
+    GIVEN (for mixture components whose area is their population
+    weight); legend stats always come from the unit-area shape. Returns (fig, stats): stats as in
+    atd_figure for measured labels, plus centroid/width/skew/kappa3
+    computed from the curve for model labels (key 'model' True)."""
+    import matplotlib.pyplot as plt
+    if not measured_by_label and not model_by_label:
+        raise ValueError("atd_model_figure: nothing to draw")
+    fig, ax = plt.subplots(figsize=figsize)
+    stats = {}
+    for lab, t in measured_by_label.items():
+        t = np.asarray(t, float)
+        if len(t) < 3:
+            raise ValueError(f"atd_model_figure: label {lab!r} has "
+                             f"{len(t)} arrivals — too few")
+        mu, sd = float(t.mean()), float(t.std())
+        k3 = float(((t - mu) ** 3).mean())
+        stats[lab] = dict(centroid=mu, width=sd, skew=k3 / sd ** 3,
+                          kappa3=k3, tail_frac_2sd=float((t > mu + 2 * sd).mean()),
+                          n=len(t), model=False)
+        ax.hist(t - (mu if center else 0.0), bins=bins, density=True,
+                histtype="step", lw=1.8,
+                label=f"{lab}: mu={mu:.0f}, sd={sd:.1f}, "
+                      f"skew={k3 / sd ** 3:+.3f} (n={len(t)})")
+    for lab, (t, dens) in model_by_label.items():
+        t = np.asarray(t, float)
+        dens = np.asarray(dens, float)
+        if t.ndim != 1 or t.shape != dens.shape or len(t) < 8:
+            raise ValueError(f"atd_model_figure: model {lab!r} needs "
+                             f"matching 1-D (t, density) with >= 8 points")
+        if np.any(np.diff(t) <= 0) or np.any(dens < 0):
+            raise ValueError(f"atd_model_figure: model {lab!r} t must "
+                             f"increase and density be >= 0")
+        area = float(np.trapezoid(dens, t))
+        if area <= 0:
+            raise ValueError(f"atd_model_figure: model {lab!r} has "
+                             f"non-positive area {area}")
+        shape = dens / area
+        mu = float(np.trapezoid(t * shape, t))
+        var = float(np.trapezoid((t - mu) ** 2 * shape, t))
+        sd = float(np.sqrt(var))
+        k3 = float(np.trapezoid((t - mu) ** 3 * shape, t))
+        stats[lab] = dict(centroid=mu, width=sd, skew=k3 / sd ** 3,
+                          kappa3=k3, area=area, n=None, model=True)
+        dens = shape if normalize_models else dens
+        ax.plot(t - (mu if center else 0.0), dens, lw=1.6, alpha=0.9,
+                label=f"{lab}: mu={mu:.0f}, sd={sd:.1f}, "
+                      f"skew={k3 / sd ** 3:+.3f} (model)")
+    ax.set_xlabel(f"arrival time - centroid [{tof_unit}]" if center
+                  else f"arrival time [{tof_unit}]")
+    ax.set_ylabel(y_label or f"density [1/{tof_unit}]")
+    if log_y:
+        ax.set_yscale("log")
+    ax.legend(fontsize=8)
+    import textwrap
+    ax.set_title("\n".join(textwrap.wrap(
+        f"ATD vs model — {operating_point}", width=88)), fontsize=10)
+    fig.tight_layout()
+    return fig, stats
+
+
+def cumulant_projection_figure(projection, *, x_label, operating_point,
+                               measured=None, figsize=(13.5, 3.0)):
+    """Additive-cumulant projection panels: sd, kappa3, and normalized
+    skew (kappa3/sd^3) vs a count or length variable. projection:
+    {x: dict(sd, kappa3)} with >= 2 points, drawn as lines — the
+    analytic prediction. measured (optional): {x: dict(sd, kappa3[,
+    sd_se, kappa3_se])} drawn as points with error bars where SEs are
+    given. Returns fig."""
+    import matplotlib.pyplot as plt
+    if len(projection) < 2:
+        raise ValueError(f"cumulant_projection_figure: {len(projection)} "
+                         f"projection points — need >= 2 for a line")
+    xs = np.array(sorted(projection), float)
+    sd = np.array([projection[x]["sd"] for x in xs])
+    k3 = np.array([projection[x]["kappa3"] for x in xs])
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    panels = ((axes[0], sd, "sd [us]"), (axes[1], k3, "kappa3 [us^3]"),
+              (axes[2], k3 / sd ** 3, "skew = kappa3 / sd^3"))
+    for ax, y, ylabel in panels:
+        ax.plot(xs, y, "-", lw=1.8, label="additive cumulants")
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(ylabel)
+    if measured:
+        mx = np.array(sorted(measured), float)
+        msd = np.array([measured[x]["sd"] for x in mx])
+        mk3 = np.array([measured[x]["kappa3"] for x in mx])
+        msd_se = np.array([measured[x].get("sd_se", 0.0) for x in mx])
+        mk3_se = np.array([measured[x].get("kappa3_se", 0.0) for x in mx])
+        skew = mk3 / msd ** 3
+        skew_se = np.abs(skew) * np.sqrt(
+            np.divide(mk3_se, mk3, out=np.zeros_like(mk3_se),
+                      where=mk3 != 0) ** 2
+            + (3 * np.divide(msd_se, msd, out=np.zeros_like(msd_se),
+                             where=msd != 0)) ** 2)
+        for ax, y, yerr in ((axes[0], msd, msd_se), (axes[1], mk3, mk3_se),
+                            (axes[2], skew, skew_se)):
+            ax.errorbar(mx, y, yerr=np.where(yerr > 0, yerr, np.nan),
+                        fmt="o", ms=5, capsize=3, label="measured")
+    for ax in axes:
+        ax.legend(fontsize=8)
+    import textwrap
+    fig.suptitle("\n".join(textwrap.wrap(
+        f"cumulant projection — {operating_point}", width=130)), fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def trend_panels_figure(panels, *, x_label, operating_point, figsize=None):
+    """Measured trends against one control variable, one panel per
+    quantity, one or more series per panel. panels is an ordered
+    {panel_title: spec} where spec has:
+      series: {label: dict(x, y[, yerr])} — yerr absolute, either one
+              array (symmetric) or a (lo, hi) pair of BOUNDS converted
+              to bar lengths here;
+      y_label (optional), log_y (optional bool), reference_y (optional
+      horizontal guide, e.g. 1.0 for a ratio panel).
+    Error bars draw only where given. Returns fig; no file side
+    effects."""
+    import matplotlib.pyplot as plt
+    import textwrap
+    if not panels:
+        raise ValueError("trend_panels_figure: no panels")
+    n_panels = len(panels)
+    fig, axes = plt.subplots(1, n_panels,
+                             figsize=figsize or (4.5 * n_panels, 3.2))
+    axes = np.atleast_1d(axes)
+    for ax, (title, spec) in zip(axes, panels.items()):
+        series = spec.get("series")
+        if not series:
+            raise ValueError(f"trend_panels_figure: panel {title!r} has "
+                             f"no series")
+        for label, data in series.items():
+            x = np.asarray(data["x"], float)
+            y = np.asarray(data["y"], float)
+            if x.shape != y.shape:
+                raise ValueError(f"trend_panels_figure: {title!r}/{label!r} "
+                                 f"x {x.shape} vs y {y.shape}")
+            yerr = data.get("yerr")
+            if yerr is not None:
+                yerr = np.asarray(yerr, float)
+                if yerr.ndim == 2:
+                    if yerr.shape != (2, len(x)):
+                        raise ValueError(
+                            f"trend_panels_figure: {title!r}/{label!r} "
+                            f"bounds shape {yerr.shape}, need (2, n)")
+                    yerr = np.vstack([y - yerr[0], yerr[1] - y])
+                    if (yerr < 0).any():
+                        raise ValueError(
+                            f"trend_panels_figure: {title!r}/{label!r} "
+                            f"bounds do not bracket y")
+            ax.errorbar(x, y, yerr=yerr, fmt="o-", ms=4.5, lw=1.4,
+                        capsize=3, label=label)
+        if spec.get("reference_y") is not None:
+            ax.axhline(spec["reference_y"], color="0.4", lw=0.9, ls="--")
+        if spec.get("log_y"):
+            ax.set_yscale("log")
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(spec.get("y_label", title))
+        ax.set_title(title, fontsize=10)
+        ax.legend(fontsize=8)
+    fig.suptitle("\n".join(textwrap.wrap(operating_point, width=130)),
+                 fontsize=10)
+    fig.tight_layout()
+    return fig
+
+
+def ecdf_compare_figure(measured_by_label, model_by_label, *,
+                        operating_point, survival=False, log_y=False,
+                        x_label="arrival time [us]", figsize=(9.5, 4.2)):
+    """Cumulative comparison of sample sets and model curves with NO
+    binning: measured sets draw as exact ECDF staircases (every event a
+    step), models as cumulative curves integrated from (t, density)
+    input. survival=True plots 1 - F (the tail view; pairs naturally
+    with log_y). Sparse data belong here rather than in a histogram.
+    Returns fig."""
+    import matplotlib.pyplot as plt
+    import textwrap
+    if not measured_by_label and not model_by_label:
+        raise ValueError("ecdf_compare_figure: nothing to draw")
+    fig, ax = plt.subplots(figsize=figsize)
+    for lab, samples in measured_by_label.items():
+        samples = np.sort(np.asarray(samples, float))
+        if len(samples) < 2:
+            raise ValueError(f"ecdf_compare_figure: {lab!r} has "
+                             f"{len(samples)} samples")
+        fraction = np.arange(1, len(samples) + 1) / len(samples)
+        y = 1.0 - fraction if survival else fraction
+        ax.step(samples, y, where="post", lw=1.6,
+                label=f"{lab} (n={len(samples)})")
+    for lab, (t, dens) in model_by_label.items():
+        t = np.asarray(t, float)
+        dens = np.asarray(dens, float)
+        if t.shape != dens.shape or np.any(np.diff(t) <= 0):
+            raise ValueError(f"ecdf_compare_figure: model {lab!r} needs "
+                             f"matching arrays with increasing t")
+        cumulative = np.concatenate(
+            [[0.0], np.cumsum(np.diff(t) * 0.5 * (dens[1:] + dens[:-1]))])
+        if cumulative[-1] <= 0:
+            raise ValueError(f"ecdf_compare_figure: model {lab!r} has "
+                             f"non-positive area")
+        cumulative = cumulative / cumulative[-1]
+        ax.plot(t, 1.0 - cumulative if survival else cumulative, lw=1.6,
+                alpha=0.9, label=f"{lab} (model)")
+    if log_y:
+        ax.set_yscale("log")
+    ax.set_xlabel(x_label)
+    ax.set_ylabel("1 - F(t)" if survival else "F(t)")
+    ax.legend(fontsize=8)
+    ax.set_title("\n".join(textwrap.wrap(
+        f"{'survival' if survival else 'ECDF'} — {operating_point}",
+        width=88)), fontsize=10)
+    fig.tight_layout()
+    return fig

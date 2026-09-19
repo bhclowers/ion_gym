@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "name": "Ion Funnel (r-z)",
- "notes": "Stacked-ring ion funnel, r-z symmetric. Geometry of record: 18 ring electrodes, thickness 0.6 mm, gap 1.4 mm (pitch 2.0 mm), inner diameter tapering 12.5 mm down to 2.50 mm, wall (OD-ID)/2 = 2.00 mm on every ring; DC exit plate. RF confines radially while the DC gradient walks ions down the taper toward the exit. Solved at 0.005 mm/gu so every dimension above is exact on the lattice.",
+ "notes": "Stacked-ring ion funnel, r-z symmetric. Geometry of record: 18 ring electrodes, thickness 0.6 mm, gap 1.4 mm (pitch 2.0 mm), inner diameter tapering 12.5 mm down to 2.50 mm, wall (OD-ID)/2 = 2.00 mm on every ring; DC exit plate. RF confines radially while the DC gradient walks ions down the taper toward the exit. Solved at 0.005 mm/gu so every dimension above is exact on the lattice. | 2026-09-15 (L-448): rec_every 10 -> 16. At dt_ns=2 over t_max_us=3000 this wanted 150,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- so this deck was recording only the first 2,000 us of the flight. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 150,002 records per ion.",
  "geometry": {
   "width_mm": 38.6,
   "height_mm": 9.6,
@@ -651,7 +651,7 @@
  "integration": {
   "dt_ns": 2,
   "t_max_us": 3000,
-  "rec_every": 10,
+  "rec_every": 16,
   "max_records": 100000,
   "record_channels": [
    "speed",

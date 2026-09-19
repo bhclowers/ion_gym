@@ -2143,6 +2143,143 @@ def wrap_title(text, fig=None, fontsize=10):
                               break_long_words=False))
 
 
+# ------------------------------------------------ plotly figure text layout
+# Pixel budget for every piece of figure text. ONE place, so a header can
+# never be assembled from independently positioned parts again (L-462:
+# a 42 px top margin held a title with <br><sup> lines, a paper-y 1.045
+# time stamp, and a default-placed legend -- all three overlapped).
+PLOTLY_TEXT = dict(title_px=13, sub_px=10, foot_px=10, line_gap=1.45,
+                   pad_px=6, legend_px=150, char_px=0.56,
+                   # wrap width when the figure declares none (autosized
+                   # panes): deliberately NARROW -- an extra wrapped line
+                   # costs a slot of height, an under-wrapped one clips
+                   wrap_default_px=640)
+
+
+def plotly_title(fig):
+    """The figure's title text: layout.meta["title"] for figures laid out
+    by layout_plotly_text, else plotly's native title text. Refuses a
+    figure carrying neither, naming the figure type."""
+    meta = fig.layout.meta
+    if isinstance(meta, dict) and meta.get("title"):
+        return meta["title"]
+    if fig.layout.title and fig.layout.title.text:
+        return fig.layout.title.text
+    raise ValueError(f"{type(fig).__name__} carries no title (neither "
+                     f"layout.meta['title'] nor layout.title.text)")
+
+
+def layout_plotly_text(fig, *, title=None, subtitles=(), footers=(),
+                       legend=None, width_px=None, text=PLOTLY_TEXT):
+    """Place ALL of a plotly figure's text so no two pieces can overlap.
+
+    Every header and footer line gets its own pixel slot, and the margins
+    are sized from the slot count, so the layout holds at any figure
+    height (annotation pixel shifts, not paper fractions):
+
+      title      the top of the header, wrapped into slots and placed
+                 as annotations exactly like the subtitles. NOT plotly's
+                 native title: measured on plotly 6/7, any multi-line
+                 native title is nudged up a fixed ~0.7 em regardless of
+                 line count or anchoring (clipping line 1 at the figure
+                 edge, or landing on the subtitles when bottom-anchored);
+                 compensating would encode a renderer-internal constant.
+                 The plain title is recorded in fig.layout.meta["title"];
+                 read it with plotly_title(fig).
+      subtitles  lines stacked BELOW the title and ABOVE the plot area,
+                 each in its own slot. A title given as
+                 "main<br><sup>a</sup><br>b" is split into title + lines,
+                 so legacy callers are budgeted rather than overflowing.
+      footers    lines stacked below the plot area, top to bottom.
+      legend     a legend is moved to its own RIGHT-side column with a
+                 reserved margin (never the shared top band) whenever the
+                 figure has a legend entry; `legend=False` hides it,
+                 `legend=True` forces the column.
+      width_px   the title and every line wrap to this width (default:
+                 the figure's layout.width, else text["wrap_default_px"],
+                 a deliberately narrow width for autosized panes) so no
+                 line clips at the figure edge; wrapped title lines get
+                 their own slots too.
+
+    Annotations already on the figure are PRESERVED (appended to, never
+    replaced). Returns the figure.
+    """
+    import re as _re
+    import textwrap as _tw
+
+    def _strip(t):
+        return _re.sub(r"</?sup>", "", t).strip()
+
+    subs = [str(x) for x in subtitles if str(x).strip()]
+    if title is not None and "<br>" in str(title):
+        head, *rest = str(title).split("<br>")
+        title = head
+        subs = [_strip(r) for r in rest if _strip(r)] + subs
+    foots = [str(x) for x in footers if str(x).strip()]
+
+    has_legend = any(getattr(tr, "showlegend", None) for tr in fig.data)
+    show_legend = has_legend if legend is None else bool(legend)
+    w = float(width_px or fig.layout.width or text["wrap_default_px"])
+    usable = w - (text["legend_px"] if show_legend else 0) - 2 * text["pad_px"]
+
+    def _wrap(lines, px):
+        per = max(30, int(usable / (px * text["char_px"])))
+        out = []
+        for ln in lines:
+            out += _tw.wrap(ln, width=per, break_long_words=False) or [ln]
+        return out
+
+    subs = _wrap(subs, text["sub_px"])
+    foots = _wrap(foots, text["foot_px"])
+    t_lines = _wrap([str(title)], text["title_px"]) if title else []
+    t_slot = text["title_px"] * text["line_gap"] * len(t_lines)
+    s_slot = text["sub_px"] * text["line_gap"]
+    f_slot = text["foot_px"] * text["line_gap"]
+    pad = text["pad_px"]
+    top = int(round(pad + t_slot + len(subs) * s_slot + pad))
+    bottom = int(round(pad + len(foots) * f_slot + (pad if foots else 0)))
+
+    annos = list(fig.layout.annotations or [])
+    # the header is ONE column of slots measured up from the plot area's
+    # top edge (paper y = 1): subtitles nearest the plot, title lines
+    # above them. Every slot is a pixel shift, so height never matters.
+    sub_block = len(subs) * s_slot
+    for k, ln in enumerate(t_lines):
+        annos.append(dict(
+            name="title", text=ln, xref="paper", yref="paper", x=0.5,
+            y=1.0, xanchor="center", yanchor="bottom", showarrow=False,
+            yshift=int(round(sub_block + (len(t_lines) - 1 - k)
+                             * text["title_px"] * text["line_gap"])) + 2,
+            font=dict(size=text["title_px"])))
+    for k, ln in enumerate(subs):
+        annos.append(dict(
+            text=ln, xref="paper", yref="paper", x=0.5, y=1.0,
+            xanchor="center", yanchor="bottom", showarrow=False,
+            yshift=int(round((len(subs) - 1 - k) * s_slot)) + 2,
+            font=dict(size=text["sub_px"], color="#555")))
+    for k, ln in enumerate(foots):
+        annos.append(dict(
+            text=ln, xref="paper", yref="paper", x=0.5, y=0.0,
+            xanchor="center", yanchor="top", showarrow=False,
+            yshift=-int(round(k * f_slot)) - 2,
+            font=dict(size=text["foot_px"], color="#888")))
+
+    margin = dict(l=0, r=int(text["legend_px"]) if show_legend else 0,
+                  t=top, b=bottom)
+    meta = dict(fig.layout.meta) if isinstance(fig.layout.meta, dict) else {}
+    if title:
+        meta["title"] = str(title)
+    # native title cleared: the header text is ONLY the slotted lines
+    upd = dict(margin=margin, annotations=annos, showlegend=show_legend,
+               title=None, meta=meta)
+    if show_legend:
+        upd["legend"] = dict(x=1.0, xanchor="left", y=1.0, yanchor="top",
+                             xref="paper", yref="paper",
+                             font=dict(size=text["sub_px"]))
+    fig.update_layout(**upd)
+    return fig
+
+
 def render_mpl(scene: Scene, views=None, *, field: bool = True,
                path: str | None = None, dpi: int = DEFAULT_DPI, cmap: str | None = None,
                legend: bool = True, layout: str = "row",
@@ -4999,17 +5136,21 @@ def station_stats(spec, trajs, cols, *, mz=None):
     reflection-family ordinals seen. Stations that nothing reached
     report n_hit = 0 with a reason -- never omitted.
     """
-    from ion_gym.physics.stations import first_detection
+    from ion_gym.physics.stations import first_station_crossing
     import numpy as _np
     out = []
     sts = list(getattr(spec, "stations", None) or [])
     for st in sts:
         ts, fam = [], set()
         for tr in trajs:
-            # name= selects THIS station: with several declared, the
-            # unnamed call would silently report the first one for all
-            # of them.
-            det = first_detection(tr, cols, spec, name=st.name)
+            # name= AND kind= select THIS station: with several declared,
+            # the unnamed call would silently report the first one for
+            # all of them -- and the kind-agnostic crossing scan is what
+            # makes an impact_plane row possible at all (the old
+            # first_detection call refused any non-detect station, and
+            # sim_app then dropped the WHOLE table for the run).
+            det = first_station_crossing(tr, cols, spec, name=st.name,
+                                         kind=st.kind)
             if det is None:
                 continue
             ts.append(float(det["t_us"]))
@@ -5373,7 +5514,7 @@ def deck_views_mpl(spec, *, title="", show_symmetry=True,
         first = True
         for sh in el.shapes:
             p = sh.params or {}
-            if sh.type != "rect":
+            if sh.type not in ("rect", "polygon"):
                 raise ValueError(
                     f"deck_views_mpl: shape type {sh.type!r} on "
                     f"electrode {el.name!r} not yet drawable — extend "
@@ -5381,8 +5522,21 @@ def deck_views_mpl(spec, *, title="", show_symmetry=True,
             ex = p.get("extrude", {}) or {}
             zlo = float(ex.get("lo_mm", 0.0))
             zhi = float(ex.get("hi_mm", g.depth_mm or 0.0))
-            x0, y0 = float(p["x_mm"]), float(p["y_mm"])
-            w, h = float(p["width_mm"]), float(p["height_mm"])
+            # PROJECTED extents, not the unrotated declaration. A
+            # rotated rect or a polygon spans more x (and y) than its
+            # x_mm/width_mm pair says; taking those directly drew a band
+            # in the wrong place on both of these panels.
+            if sh.type == "polygon":
+                pts = [(float(u), float(v)) for u, v in p["points_mm"]]
+            else:
+                _rec = (el.name, "", "rect", "z", zlo, zhi,
+                        (float(p["x_mm"]), float(p["y_mm"]),
+                         float(p["width_mm"]), float(p["height_mm"]),
+                         float(p.get("rotation_deg", 0.0) or 0.0)))
+                pts = _rec_corners(_rec)
+            x0, x1 = min(q[0] for q in pts), max(q[0] for q in pts)
+            y0, y1 = min(q[1] for q in pts), max(q[1] for q in pts)
+            w, h = x1 - x0, y1 - y0
             lbl = (f"{el.name} ({el.dc:+.0f} V)"
                    if first and el.dc is not None else None)
             ax_xz.add_patch(Rectangle((x0, zlo), w, zhi - zlo,
@@ -5439,6 +5593,7 @@ def spec_schematic_ax(ax, spec, *, label_fontsize=6):
     the single source the voxelizer measures. Solver-true rendering
     (scene_from_simspec) remains the authority for any physics claim."""
     from matplotlib.patches import Rectangle
+    from matplotlib.patches import Polygon as _Poly
     phase_of = {g.name: g.phase_deg for g in
                 (spec.geometry.rf_groups or [])}
     palette = {"rf0": "#d62728", "rf180": "#1f77b4",
@@ -5453,14 +5608,30 @@ def spec_schematic_ax(ax, spec, *, label_fontsize=6):
             cls = "gnd"
         for s in el.shapes:
             d = s.to_dict()
-            if d.get("type") != "rect":
+            kind = d.get("type")
+            if kind == "polygon" and "points_mm" in d:
+                # Polygons used to be refused here, which pushed every
+                # swept/faceted deck out of the framework entirely.
+                ax.add_patch(_Poly([(float(u), float(v))
+                                    for u, v in d["points_mm"]],
+                                   closed=True, facecolor=palette[cls],
+                                   edgecolor="#222", linewidth=0.3))
+                continue
+            if kind != "rect":
                 raise VizError(
-                    "spec_schematic_ax draws declared rects only; "
+                    "spec_schematic_ax draws declared rects and polygons; "
                     "electrode {0!r} has a {1!r} shape — use the "
                     "solver-true scene for this spec".format(
-                        el.name, d.get("type")))
+                        el.name, kind))
+            # angle + rotation_point='center' reproduces
+            # raster2d._rect_mask exactly. Drawing the unrotated box was
+            # a display-not-equal-to-solver-input defect, silent because
+            # rotation_deg never reached this function.
             ax.add_patch(Rectangle((d["x_mm"], d["y_mm"]),
                                    d["width_mm"], d["height_mm"],
+                                   angle=float(d.get("rotation_deg", 0.0)
+                                               or 0.0),
+                                   rotation_point="center",
                                    facecolor=palette[cls],
                                    edgecolor="#222", linewidth=0.3))
     ax.set_xlim(0, spec.geometry.width_mm)
@@ -6773,10 +6944,31 @@ def _deck_shapes3d(spec, caller):
                 continue
             if sh.type == "rect" and {"x_mm", "y_mm", "width_mm",
                                       "height_mm"} <= set(p):
+                # ROTATION IS CARRIED, not dropped. raster2d._rect_mask
+                # rotates a rect about its CENTRE; this record used to
+                # hold only (x, y, w, h), so every renderer downstream
+                # drew an axis-aligned box where the solver had built a
+                # rotated one — display not equal to solver input, and
+                # silently, with no refusal. Measured on a 40-degree
+                # plate: solver x [75.25, 85.00], renderer x [74.08,
+                # 86.08]. rotation_deg is RECT-ONLY in this schema (no
+                # ellipse/polygon consumer exists), so it lives here and
+                # nowhere else.
                 recs.append((el.name, grp, "rect", eax, lo, hi,
                              (float(p["x_mm"]), float(p["y_mm"]),
                               float(p["width_mm"]),
-                              float(p["height_mm"]))))
+                              float(p["height_mm"]),
+                              float(p.get("rotation_deg", 0.0) or 0.0))))
+            elif sh.type == "polygon" and "points_mm" in p:
+                # Polygons were REFUSED outright here, which made every
+                # deck built from swept/faceted geometry undrawable by
+                # the framework — the caller's only recourse was to
+                # hand-roll a plot, which is the thing the renderer
+                # contract exists to prevent. The vertices are already
+                # in the in-plane frame, so no rotation applies.
+                recs.append((el.name, grp, "polygon", eax, lo, hi,
+                             tuple((float(u), float(v))
+                                   for u, v in p["points_mm"])))
             elif sh.type == "ellipse" and {"cx_mm", "cy_mm", "rx_mm",
                                            "ry_mm"} <= set(p):
                 recs.append((el.name, grp, "ellipse", eax, lo, hi,
@@ -6793,6 +6985,36 @@ def _deck_shapes3d(spec, caller):
     return recs
 
 
+def _rec_corners(rec):
+    """In-plane (u, v) outline of a shape record: the rotated rect's four
+    corners, or a polygon's vertices. ONE place computes this, so the
+    extent helper and the patch builders cannot disagree about where a
+    body actually is."""
+    _n, _g, kind, _eax, _lo, _hi, ip = rec
+    kind = kind.split(":")[-1]
+    if kind == "polygon":
+        return list(ip)
+    if kind != "rect":
+        raise ValueError(
+            f"_rec_corners: shape kind {kind!r} has no polygonal outline "
+            f"— extend this helper rather than falling back to an "
+            f"axis-aligned box, which is how rotation was lost before")
+    u0, v0, du, dv = ip[0], ip[1], ip[2], ip[3]
+    rot = ip[4] if len(ip) > 4 else 0.0
+    if not rot:
+        return [(u0, v0), (u0 + du, v0), (u0 + du, v0 + dv), (u0, v0 + dv)]
+    # about the CENTRE, matching raster2d._rect_mask exactly
+    cu, cv = u0 + du / 2.0, v0 + dv / 2.0
+    a = math.radians(rot)
+    ca, sa = math.cos(a), math.sin(a)
+    out = []
+    for pu, pv in ((u0, v0), (u0 + du, v0), (u0 + du, v0 + dv),
+                   (u0, v0 + dv)):
+        ru, rv = pu - cu, pv - cv
+        out.append((cu + ru * ca - rv * sa, cv + ru * sa + rv * ca))
+    return out
+
+
 def _rec_extent(rec, axis):
     """(lo, hi) span of a shape record along a named axis."""
     _n, _g, kind, eax, lo, hi, ip = rec
@@ -6800,16 +7022,17 @@ def _rec_extent(rec, axis):
     if axis == eax:
         return (lo, hi)
     u_ax, v_ax = _CYCLIC[eax]
-    if kind == "rect":
-        u0, v0, du, dv = ip
-        return (u0, u0 + du) if axis == u_ax else (v0, v0 + dv)
+    if kind in ("rect", "polygon"):
+        pts = _rec_corners(rec)
+        vals = [p[0] for p in pts] if axis == u_ax else [p[1] for p in pts]
+        return (min(vals), max(vals))
     cu, cv, ru, rv = ip
     return (cu - ru, cu + ru) if axis == u_ax else (cv - rv, cv + rv)
 
 
 def deck_multiview(spec, *, operating_point, planes=None,
                    views=("xy", "xz", "yz"), aspect="equal",
-                   figsize=(11.0, 8.0), trajectories=None):
+                   figsize=(11.0, 8.0), trajectories=None, show=None):
     """Multi-axis schematic of a 3-D deck — the doctrine view (any
     3-D representation is shown multi-axis; axial coordinate
     horizontal): xy plan, xz side, yz cross-section, drawn FROM THE
@@ -6825,10 +7048,31 @@ def deck_multiview(spec, *, operating_point, planes=None,
     flight) — the doctrine's multi-axis flight-path clause; ions
     without a usable trajectory are counted and reported on the
     figure, never silently dropped.
+    ``show`` (iterable of electrode names, None = all) draws only those
+    electrodes -- a layer view such as rods-only -- while group COLORS
+    stay keyed to the whole deck, so a layer figure and the full figure
+    of one deck always color a group alike. The title states how many
+    of the deck's electrodes are shown. Unknown names refuse.
     Returns the figure; no side effects."""
     import textwrap
     import matplotlib.pyplot as plt
     recs = _deck_shapes3d(spec, "deck_multiview")
+    all_groups = sorted({g for _, g, *_ in recs})
+    n_electrodes = len(spec.geometry.electrodes)
+    shown_note = ""
+    if show is not None:
+        wanted = set(show)
+        known = {el.name for el in spec.geometry.electrodes}
+        unknown = sorted(wanted - known)
+        if unknown:
+            raise ValueError(f"deck_multiview: show names electrodes not "
+                             f"in the deck: {unknown}")
+        if not wanted:
+            raise ValueError("deck_multiview: show is empty -- nothing "
+                             "to draw")
+        recs = [r for r in recs if r[0] in wanted]
+        shown_note = (f" · showing {len(wanted)} of {n_electrodes} "
+                      f"electrodes")
     for v in views:
         if v not in ("xy", "xz", "yz"):
             raise ValueError(f"deck_multiview: unknown view {v!r} "
@@ -6838,7 +7082,7 @@ def deck_multiview(spec, *, operating_point, planes=None,
                    .get("z") == "mirror")
     groups = sorted({g for _, g, *_ in recs})
     cmap = plt.get_cmap("tab10")
-    gcol = {g: cmap(i % 10) for i, g in enumerate(groups)}
+    gcol = {g: cmap(i % 10) for i, g in enumerate(all_groups)}
     n = len(views)
     fig = plt.figure(figsize=figsize, layout="constrained")
     axes = {}
@@ -6858,6 +7102,7 @@ def deck_multiview(spec, *, operating_point, planes=None,
             ax.set_aspect(aspect)
         A, B = v[0], v[1]
         from matplotlib.patches import Ellipse as _Ell
+        from matplotlib.patches import Polygon as _Poly
         _cut_section = False
         for rec in sorted(recs, key=lambda r:
                           r[2].startswith("cut:")):  # metal, then cuts
@@ -6884,6 +7129,18 @@ def deck_multiview(spec, *, operating_point, planes=None,
                 r = {u_ax: ru, v_ax: rv}
                 patches.append(("ell", c[A], c[B],
                                 2 * r[A], 2 * r[B]))
+            elif kind in ("rect", "polygon") and {A, B} == {u_ax, v_ax}:
+                # TRUE cross-section for a polygon or a ROTATED rect:
+                # draw the actual outline, not its bounding box. The
+                # projected-band branch below is right for the other two
+                # panels (where one in-plane axis is integrated out) but
+                # on this panel it would square off a 40-degree plate
+                # into the box that contains it.
+                pts = _rec_corners(rec)
+                idx = 0 if A == u_ax else 1
+                patches.append(("poly",
+                                tuple((q[idx], q[1 - idx]) for q in pts),
+                                None, None, None))
             else:                            # projected band
                 a0, a1 = _rec_extent(rec, A)
                 b0, b1 = _rec_extent(rec, B)
@@ -6891,7 +7148,12 @@ def deck_multiview(spec, *, operating_point, planes=None,
             if zmirror and "z" in (A, B):
                 mirrored = []
                 for kp, a, b, da, db in patches:
-                    if B == "z":
+                    if kp == "poly":
+                        j = 0 if B == "z" else 1
+                        mirrored.append((kp, tuple(
+                            (q[0], -q[1]) if j else (-q[0], q[1])
+                            for q in a), b, da, db))
+                    elif B == "z":
                         mb = (-b - db) if kp == "rect" else -b
                         mirrored.append((kp, a, mb, da, db))
                     else:
@@ -6901,7 +7163,9 @@ def deck_multiview(spec, *, operating_point, planes=None,
                     if m not in patches:     # coincident copies
                         patches.append(m)
             for kp, a, b, da, db in patches:
-                if kp == "rect":
+                if kp == "poly":
+                    ax.add_patch(_Poly(a, closed=True, **style))
+                elif kp == "rect":
                     ax.add_patch(plt.Rectangle((a, b), da, db,
                                                **style))
                 else:
@@ -6960,7 +7224,7 @@ def deck_multiview(spec, *, operating_point, planes=None,
     fig.legend(handles=handles, fontsize=7, frameon=False,
                loc="outside right upper")
     fig.suptitle("\n".join(textwrap.wrap(
-        f"deck multiview — {operating_point}", width=64)),
+        f"deck multiview — {operating_point}{shown_note}", width=64)),
         fontsize=10)
     return fig
 
@@ -7024,7 +7288,13 @@ def deck_plane_preview(spec, *, planes, operating_point,
         ax1.add_patch(plt.Rectangle((x, y), w, h, facecolor=gcol[g],
                                     edgecolor="k", lw=0.3, alpha=0.8))
     if trajectories is not None:
-        # ions IN the apparatus: (results, cols, axial_ch, transv_ch)
+        # ions IN the apparatus: (results, cols, axial_ch, transv_ch).
+        # Each results item may be (L-465, all three occur in the wild):
+        #   * an object with .traj (the app's result records),
+        #   * a (traj, summary) tuple exactly as fly(i) returns it,
+        #   * a bare trajectory array.
+        # Anything else REFUSES naming the item -- the old code died
+        # mid-loop on tuple.traj with no hint of the expected shapes.
         res, tcols, ach, tch = trajectories
         for ch in (ach, tch):
             if ch not in tcols:
@@ -7032,9 +7302,22 @@ def deck_plane_preview(spec, *, planes, operating_point,
                     f"deck_plane_preview: overlay channel {ch!r} not in "
                     f"cols {list(tcols)}")
         ia, it = tcols.index(ach), tcols.index(tch)
-        for r in res:
-            if r.traj is not None and len(r.traj):
-                ax1.plot(r.traj[:, ia], r.traj[:, it], lw=0.9, alpha=0.9)
+        for k, r in enumerate(res):
+            if hasattr(r, "traj"):
+                traj = r.traj
+            elif (isinstance(r, tuple) and len(r) == 2
+                    and hasattr(r[0], "ndim")):
+                traj = r[0]                     # fly(i) -> (traj, summary)
+            elif hasattr(r, "ndim"):
+                traj = r                        # bare trajectory array
+            else:
+                raise ValueError(
+                    f"deck_plane_preview: trajectories[0][{k}] is "
+                    f"{type(r).__name__}; expected an object with .traj, "
+                    f"a (traj, summary) tuple from fly(i), or a bare "
+                    f"trajectory array")
+            if traj is not None and len(traj):
+                ax1.plot(traj[:, ia], traj[:, it], lw=0.9, alpha=0.9)
     ax1.set_ylabel("y [mm] (gap axis)")
     ax1.set_title("xy plan — electrode footprints by drive group")
     ax1.autoscale_view()

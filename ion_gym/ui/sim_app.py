@@ -47,6 +47,7 @@ from ion_gym.io.sim_spec import (SimSpec, OPTIONAL_CHANNELS,
 from ion_gym.io.spec_io import load_any_spec
 from ion_gym.physics.sim_build import build_run, build_needs_solve, build_route
 from ion_gym.physics.ensemble_driver import run_threaded
+from ion_gym.ui.widget_options import set_options
 from ion_gym.viz.viz_core import VizError
 from ion_gym.viz import viz_core as V
 
@@ -1683,9 +1684,7 @@ class SimApp:
         else:
             # refresh channel options for the new spec, preserving selection
             for w in (self.w_ax, self.w_ay):
-                keep = w.value
-                w.options = chan_opts
-                w.value = keep if keep in chan_opts else chan_opts[0]
+                set_options(w, chan_opts)
 
         # --- Config tab (examples, save/load, reload past runs)
         self.w_examples = pn.widgets.Select(
@@ -1818,10 +1817,10 @@ class SimApp:
             # the redraw path reads the selection instead of remembering
             # what was last clicked.
             _names = list(self._assembly_specs) + [WHOLE_ASSEMBLY]
-            self.w_stage.options = ["Full Assembly"] + _names
+            set_options(self.w_stage, ["Full Assembly"] + _names)
             _tgt = ["(displayed stage)"] + list(self._assembly_specs)
             if list(self.w_solve_target.options) != _tgt:
-                self.w_solve_target.options = _tgt
+                set_options(self.w_solve_target, _tgt)
             self.w_solve_target.disabled = False
             self.w_stage.disabled = False
             self.w_fly_assembly.disabled = False
@@ -1844,6 +1843,15 @@ class SimApp:
                 self._stage_swapping = False
         self.w_json = pn.widgets.TextAreaInput(
             name="spec JSON", height=200, value=self.spec.to_json())
+        # The loaded spec the box text was last written from — the common
+        # ancestor for carrying loaded-spec edits into a possibly-staged box
+        # (L-450). None when the box holds a document NOT written from the
+        # loaded spec (staged example, upload, bootstrap, staged assembly).
+        self._box_base = json.loads(self.w_json.value)
+        # Beside the box, always rendered: says when an edit to the loaded
+        # spec could NOT be carried into the box, so Apply JSON's revert is
+        # never a surprise. Empty when box and loaded spec agree.
+        self.w_box_sync = pn.pane.Markdown("", sizing_mode="stretch_width")
         # summary table under the JSON: legible digest of
         # the staged spec — updates live so a changed JSON is visible at a
         # glance (electrodes, symmetry, drive/DC groups, size, pitch, ions).
@@ -2195,6 +2203,7 @@ class SimApp:
             self.w_upload,
             self.w_load_msg,
             self.w_json,
+            self.w_box_sync,
             pn.Row(self.w_applyjson, self.w_apply_busy),
             pn.pane.Markdown("##### spec summary *(live)*"),
             self.w_spec_summary,
@@ -2302,8 +2311,16 @@ class SimApp:
             # Placed in Config because that is where examples are loaded,
             # and version-coupled examples (e.g. the refined oa-TOF, which
             # needs >= v329 birth semantics) fail HERE first.
+            # The IMPORT ORIGIN is shown beside it (L-459): the number is
+            # always the running package's own -- so when it "looks
+            # wrong", the truth is that Python imported a DIFFERENT tree
+            # than the one the user updated (a dry-run sync, or a stale
+            # pip-installed copy shadowing the repo). The path makes that
+            # a one-glance diagnosis instead of a mystery.
             pn.pane.Markdown(
                 f"<span style='color:#888'>ion_gym v{ion_gym.__version__}"
+                f" · loaded from: "
+                f"{__import__('pathlib').Path(ion_gym.__file__).parent}"
                 f" · examples: {__import__('ion_gym.io.paths', fromlist=['paths']).repo_root() / 'examples'}"
                 "</span>"),
             sizing_mode="stretch_width")
@@ -2323,7 +2340,7 @@ class SimApp:
                 spec.integration = self.spec.integration
                 self._pre_stl_spec = self.spec        # for restore on clear
                 self.spec = spec
-                self._rebuild_for_new_spec(solve=False)
+                self._rebuild_for_new_spec(solve=False, box_from_loaded=True)
                 # FLAG the dimensionality assumption rather than hiding it:
                 # STL import currently builds a 2-D x-y cross-section
                 # (planar slice); ions coast along z. Exact only for
@@ -2351,7 +2368,7 @@ class SimApp:
                 if getattr(self, "_pre_stl_spec", None) is not None:
                     self.spec = self._pre_stl_spec
                     self._pre_stl_spec = None
-                    self._rebuild_for_new_spec(solve=False)
+                    self._rebuild_for_new_spec(solve=False, box_from_loaded=True)
                 self._runs.clear()
                 self._active = None
                 self.status.object = ("**cleared** — STLs + cache purged; "
@@ -2763,8 +2780,8 @@ class SimApp:
         # leaves a working instrument worth keeping.
         self._clear_assembly_state()
         self.spec = SimSpec.from_json(self._initial_spec_json)
-        self._rebuild_for_new_spec()
-        self.w_runsel.options = []
+        self._rebuild_for_new_spec(box_from_loaded=True)
+        set_options(self.w_runsel, [])
         self.status.object = "**reset** to initial spec"
 
     # ------------------------------------------------------ layout
@@ -2921,17 +2938,40 @@ class SimApp:
         against firing during construction (before self.status)."""
         if not hasattr(self, "status"):
             return
+        from ion_gym.io.spec_io import set_geometry_build_options
         g = self.spec.geometry
         g.field_method = self.w_fieldmethod.value
         g.channel_dtype = self.w_chandtype.value
-        # the JSON box must never go stale w.r.t. these options: a later
-        # Apply JSON re-parses the BOX, and a stale box silently reverted
-        # them (gradient/float32 would not stick).
-        self.w_json.value = self.spec.to_json()
-        self._refresh_spec_summary()
-        self.status.object = (
-            f"**field method = {g.field_method}, channel = "
-            f"{g.channel_dtype}** — the next Solve/Fly re-composes the field.")
+        msg = (f"**field method = {g.field_method}, channel = "
+               f"{g.channel_dtype}** — the next Solve/Fly re-composes the "
+               f"field.")
+        # The JSON box must carry these options too: a later Apply JSON
+        # re-parses the BOX, and a box without them silently reverted them
+        # (v256: gradient/float32 would not stick). But the box is the
+        # STAGED document (_editor_spec) and may differ from self.spec, so
+        # only these two keys are patched into it. Replacing the box with
+        # self.spec.to_json() discarded unapplied edits and, through
+        # _on_json_edited, snapped a typed pitch back to the loaded one
+        # (L-450). The patch is guarded so the pitch is not re-synced.
+        # Holds for every deck: two schema keys, no route or builder branch.
+        try:
+            new_txt = set_geometry_build_options(
+                self.w_json.value, field_method=g.field_method,
+                channel_dtype=g.channel_dtype)
+        except ValueError as e:
+            # Refuse the BOX write, never overwrite the box as a fallback.
+            # The loaded spec already carries the options; say that the box
+            # does not, and what Apply JSON would then do.
+            msg += (f"\n\n**Not written to the JSON box:** {e}. Apply JSON "
+                    f"from this box would revert these options.")
+        else:
+            self._json_guard = True
+            try:
+                self.w_json.value = new_txt
+            finally:
+                self._json_guard = False
+            self._refresh_staged_summary()
+        self.status.object = msg
         # the cost card these selectors live in must re-price immediately:
         # both options change the compose time and the channel memory
         self._refresh_sizing()
@@ -2987,13 +3027,12 @@ class SimApp:
                 offset_v=float(self.w_tw_off.value),
                 waveform=self.w_tw_wave.value,
                 prefix=(self.w_tw_prefix.value or "TW").strip())
-            self.w_json.value = self.spec.to_json()
+            self._merge_loaded_into_box()
             self._suspend_live = True
             try:
-                self._rebuild_for_new_spec()
+                self._rebuild_for_new_spec(box_from_loaded=False)
             finally:
                 self._suspend_live = False
-            self._refresh_spec_summary()
             self.status.object = (
                 f"**built {len(groups)}-phase {self.w_tw_wave.value} "
                 f"travelling wave** ({', '.join(groups)}) across "
@@ -3018,7 +3057,7 @@ class SimApp:
                 waveform=self.w_tw_wave.value,
                 offset_v=float(self.w_tw_off.value),
                 prefix=prefix)
-            self.w_json.value = self.spec.to_json()
+            self._merge_loaded_into_box()
             # IN-PLACE editor refresh (2026-09-12, Brian: adjusting TW
             # groups scrolled the UI to the top, and the retune controls
             # went unresponsive until a tab switch). The old path called
@@ -3044,7 +3083,6 @@ class SimApp:
                 w["amp"].value = float(g.amplitude_v)
                 w["freq"].value = float(g.frequency_hz)
                 w["wave"].value = g.waveform
-            self._refresh_spec_summary()
             self.status.object = (
                 f"**retuned {len(names)} TW phase groups** "
                 f"({', '.join(names)}) to amp {self.w_tw_amp.value:g} V, "
@@ -3086,7 +3124,7 @@ class SimApp:
                     if new_g is None:
                         el.dc_index = None
             self.spec = s
-            self.w_json.value = s.to_json()
+            self._merge_loaded_into_box()
             # IN-PLACE sync: rebuilding the tab on every
             # pick scrolled the view to the top and left the fired widget
             # detached (unresponsive until a tab switch). Update the per-
@@ -3113,7 +3151,6 @@ class SimApp:
             finally:
                 self._suspend_live = False
             self._refresh_dc_derived()
-            self._refresh_spec_summary()
         except Exception as e:
             self.status.object = self._err_status("member pick", e)
 
@@ -3137,7 +3174,7 @@ class SimApp:
                     elif i not in chosen and has:
                         el.rf_groups = [g for g in el.rf_groups if g != gname]
             self.spec = s
-            self.w_json.value = s.to_json()
+            self._merge_loaded_into_box()
             # IN-PLACE sync — same rationale as the DC picker above.
             self._suspend_live = True
             try:
@@ -3156,7 +3193,6 @@ class SimApp:
                         dp.value = mem
             finally:
                 self._suspend_live = False
-            self._refresh_spec_summary()
         except Exception as e:
             self.status.object = self._err_status("drive member pick", e)
 
@@ -3193,8 +3229,6 @@ class SimApp:
             return
         try:
             self._sync_spec()                # reads widgets -> self.spec
-            self.w_json.value = self.spec.to_json()
-            self._refresh_spec_summary()
         except Exception as e:               # never let a watcher die silently
             if hasattr(self, "status"):
                 self.status.object = f"**live sync:** {e}"
@@ -3354,7 +3388,7 @@ class SimApp:
             setattr(s.bounds, f"{axis}_min", w["min"].value)
             setattr(s.bounds, f"{axis}_max_on", w["max_on"].value)
             setattr(s.bounds, f"{axis}_max", w["max"].value)
-        self.w_json.value = s.to_json()
+        self._merge_loaded_into_box()
 
     # --------------------------------------------------- rendering
     def _update_dt_advice(self):
@@ -3499,7 +3533,16 @@ class SimApp:
         # contoured the phase-0 image while xy showed the peak — two
         # pictures of one plane). field_slice_3d already documents peak
         # phase; now the 2-D image follows the physics, not the view.
-        if getattr(model, "rf_V", 0):
+        # CAPABILITY marker for the peak snapshot: the model's own drive
+        # channels (chan_phi -- r-z and runner-built 3-D), or the 3-D
+        # display pair's rf_V. The old marker was getattr(model, "rf_V",
+        # 0) ALONE -- a hidden branch that broke silently when L-455
+        # removed the r-z scalar: every RF r-z deck fell to the DC call
+        # and the funnel contours read "DC only" (PI report, L-463).
+        # PlanarModel has neither marker and keeps the no-phase call its
+        # potential_image requires.
+        if (getattr(model, "chan_phi", None)
+                or getattr(model, "rf_V", 0)):
             z, r_full, img, em = model.potential_image(rf_phase=np.pi / 2)
         else:
             z, r_full, img, em = model.potential_image()
@@ -3526,10 +3569,12 @@ class SimApp:
                     # Dehmelt sum is empty with no drives, and the map is
                     # plain electrostatic potential energy. Derived from
                     # the model rather than from the route, so every
-                    # model type answers for itself: planar carries
-                    # `drives`, r-z and 3-D carry `rf_V`.
-                    _has_rf = bool(getattr(model, "rf_V", 0)) or bool(
-                        getattr(model, "drives", ()))
+                    # model type answers for itself: planar AND r-z
+                    # carry `drives` (L-455), 3-D carries chan_groups
+                    # and the display rf_V.
+                    _has_rf = (bool(getattr(model, "rf_V", 0))
+                               or bool(getattr(model, "drives", ()))
+                               or bool(getattr(model, "chan_groups", ())))
                     _pe_txt = (
                         f"effective RF pseudopotential (adiabatic "
                         f"approximation), m/z {mzq:g}" if _has_rf else
@@ -3980,9 +4025,21 @@ class SimApp:
         PE options live. Keeping a duplicate set on the display tab would be
         two controls for one setting."""
         t = getattr(self, "_pe_tab", None)
+        # the plane is VALIDATED against the current model: the tab's
+        # selector syncs on the TAB's refresh, which this redraw path
+        # never runs, so after a route change the widget can still hold
+        # a plane the new model does not declare (L-463: "RZModel has no
+        # 'xy' plane" crash from the shading selector). The model
+        # declares; a stale widget value resolves to its first plane.
+        from ion_gym.viz.viz_core import model_planes
+        planes = (model_planes(self._model)
+                  if getattr(self, "_model", None) is not None else ("xy",))
         if t is None:
-            return "xy", "mask"
-        return t.w_plane.value, t.w_metal.value
+            return planes[0], "barrier"
+        pl = t.w_plane.value
+        if pl not in planes:
+            pl = planes[0]
+        return pl, t.w_metal.value
 
     def _electrode_dc(self):
         """{electrode label -> DC volts}, resolved (so a DC-ladder member
@@ -4593,6 +4650,21 @@ class SimApp:
                     self.status.object = "".join(parts)
                 return
             on_ready(*st["res"])
+            # RELEASE THE BUILD TUPLE THE MOMENT IT IS CONSUMED.
+            # st["res"] is build_run's (model, fly, cols, births). This
+            # per-build state dict is created fresh on every build and
+            # something outlives the worker that fills it, so each one
+            # pinned a whole Stl3DModel: MEASURED at 3210 MB per model on
+            # the slimgrid deck (495x481x55, 18 electrodes), one leaked
+            # per build, four builds = 12.84 GB, machine wedged in about
+            # six. The referrer walk found every leaked instance hanging
+            # off exactly this dict, with no SimApp attribute at any
+            # depth -- only the CURRENT model is on SimApp._model, which
+            # is where the app actually reads it from. So the second
+            # reference here is dead weight from the instant on_ready
+            # returns. Emptied, st costs a few hundred bytes, and it no
+            # longer matters what retains st itself.
+            st["res"] = None
 
         # Drive the poll on Panel's event loop when there is a server
         # session. Earlier this pre-checked asyncio.get_running_loop(), but
@@ -4673,9 +4745,7 @@ class SimApp:
     def _sync_planes(self):
         opts = self._planes_for_spec()
         if list(self.w_plane.options) != opts:
-            self.w_plane.options = opts
-            if self.w_plane.value not in opts:
-                self.w_plane.value = opts[0]
+            set_options(self.w_plane, opts)
         self.w_plane.disabled = (len(opts) == 1)
 
     def _station_stats(self, results):
@@ -4857,6 +4927,35 @@ class SimApp:
         return m[p]
 
     def _redraw(self, results, live=False):
+        """Full redraw, then release the superseded Plotly figures.
+
+        L-449. A Plotly Figure holds REFERENCE CYCLES (traces and layout
+        point back at the parent), so assigning pane.object = new_fig
+        drops this caller's reference but does NOT free the old figure:
+        only the cyclic collector can, and nothing in the app called it.
+        The app has four Plotly panes, so each flight left four figures
+        alive, each holding its own copy of the plotted arrays --
+        measured at +365 MB per flight, figures climbing 21 -> 26 and
+        never falling, until a browser teardown collected 6.8 GB at once.
+
+        Until now the only thing collecting them was the TELEMETRY
+        heartbeat, a diagnostic on a 30 s timer. That made memory
+        behaviour depend on a monitor being enabled, and switching it
+        off silently reintroduced the accumulation. Cleanup belongs to
+        the code that makes the garbage, so it lives here.
+
+        Skipped on live=True: the streaming tick assigns arrays into
+        EXISTING traces and builds no new figure, so there is nothing to
+        collect and a per-tick collect would cost tens of ms in the one
+        path measured in tens of ms.
+        """
+        out = self._redraw_impl(results, live=live)
+        if not live:
+            import gc
+            gc.collect()
+        return out
+
+    def _redraw_impl(self, results, live=False):
         """Draw a result set into the main pane.
 
         live=False (stored runs, plane changes, the FINAL post-flight
@@ -5234,7 +5333,7 @@ class SimApp:
         self._autoclear_val = self.w_autoclear.value
         if self.w_autoclear.value:
             self._runs.clear()
-            self.w_runsel.options = []
+            set_options(self.w_runsel, [])
 
         def done(model, fly, cols, births):
             self._model, self._cols = model, cols
@@ -5249,10 +5348,13 @@ class SimApp:
             _derived = ["speed", "ke_ev", "radius", "e_field", "e_axial"]
             _opts = list(cols) + [d for d in _derived if d not in cols]
             for w in (self.w_ax, self.w_ay):
-                cur = w.value
-                w.options = _opts
-                if cur in _opts:
-                    w.value = cur
+                # The invalid case is the one that mattered and was the one
+                # missing: this restored `cur` only when it survived into
+                # the new columns, so a run that DROPPED the selected
+                # channel left the axis pointing at a channel absent from
+                # its own options. set_options falls to the first column
+                # there instead of leaving the contradiction standing.
+                set_options(w, _opts)
                 # NO SWALLOW.  This used to be `except Exception: pass`, which
                 # meant a column-name mismatch between the tracer's recorded
                 # channels and the analysis selectors left the OLD options in
@@ -5290,7 +5392,7 @@ class SimApp:
         """Drop all stored runs and free their trajectory memory."""
         self._runs.clear()
         self._active = None
-        self.w_runsel.options = []
+        set_options(self.w_runsel, [])
         # This USED to be `self._base_figure(self._model)` inside an
         # `except Exception: pass`.  `_base_figure(model, la="x", lb="y")` has
         # DEFAULTS, so the call did not fail -- it silently redrew in xy no matter
@@ -5340,7 +5442,7 @@ class SimApp:
             else:
                 opts[f"✗ {r['label']} — different geometry "
                      f"({r['spec_name']})"] = r["path"]
-        self.w_fieldpick.options = opts
+        set_options(self.w_fieldpick, opts)
         self._field_rows = {r["path"]: r for r in rows}
         d = str(_paths.fields_dir())
         topts = {}
@@ -5348,7 +5450,7 @@ class SimApp:
             for name in sorted(os.listdir(d)):
                 if name.endswith(".traj.npz"):
                     topts[name] = os.path.join(d, name)
-        self.w_trajpick.options = topts
+        set_options(self.w_trajpick, topts)
 
     def _on_save_field(self, _=None):
         """Explicit save (the default). Pulls the solved bases from
@@ -5423,6 +5525,7 @@ class SimApp:
         except (OSError, ValueError) as e:
             self.status.object = f"**field unreadable:** {e}"
             return
+        self._box_base = None          # foreign text until apply adopts it
         self.w_json.value = json.dumps(meta["spec"], indent=2)
         self._on_apply_json()
         if getattr(self, "spec", None) is None:
@@ -5512,8 +5615,7 @@ class SimApp:
         self._runs[name] = fin
         self._active = name
         self._sync_analysis_mz()
-        self.w_runsel.options = list(self._runs.keys())
-        self.w_runsel.value = name
+        set_options(self.w_runsel, list(self._runs.keys()), prefer=name)
         self._redraw(results)
         msg = (f"**trajectories loaded** as run '{name}' "
                f"({len(results)} ions).")
@@ -5711,8 +5813,16 @@ class SimApp:
         # generic label on a destructive-adjacent action hides intent
         self._cache_pick.param.watch(self._sync_cache_export_btn,
                                      "value")
+        # paths.outputs_dir() is the ONE home for generated artifacts, and
+        # its own docstring records that committed code carrying absolute
+        # /mnt/user-data/outputs literals is forbidden. The helper that
+        # used to sit here reintroduced exactly that literal, with a
+        # cwd-relative fallback that put exports wherever the server
+        # happened to be launched from.
+        from ion_gym.io import paths as _p
         self._cache_export_dir = pn.widgets.TextInput(
-            name="export to", value=str(_default_export_dir()), width=380)
+            name="export to", value=str(_p.outputs_dir("exported_fields")),
+            width=380)
         self._cache_clear_btn = pn.widgets.Button(
             name="🗑 clear ALL field cache", button_type="danger", width=210)
         self._cache_clear_btn.on_click(self._on_cache_clear_all)
@@ -5777,11 +5887,15 @@ class SimApp:
             return (f"{e['key'][:12]} — {who}"
                     + (f" — {desc}" if desc else "")
                     + f" ({e['bytes'] / 1e6:.1f} MB)")
-        self._cache_pick.options = ([_pick_label(e) for e in inv]
-                                    or ["(cache empty)"])
+        # The key maps are built BEFORE the options are replaced: setting
+        # the value fires _sync_cache_export_btn, which resolves the label
+        # through _cache_key_of. Populating the maps afterwards would have
+        # that watcher read the PREVIOUS refresh's map.
         self._cache_key_of = {_pick_label(e): e["key"] for e in inv}
         self._cache_label_of_key12 = {e["key"][:12]: _pick_label(e)
                                       for e in inv}
+        set_options(self._cache_pick,
+                    [_pick_label(e) for e in inv] or ["(cache empty)"])
         self._sync_cache_export_btn()
         header = ("**In-memory caches** (freed on 'clear ALL' or when the "
                   "app restarts):\n")
@@ -5840,19 +5954,87 @@ class SimApp:
                " — *no spec JSON: entry predates descriptors; re-solve "
                "once to record it*"))
 
+    # Every module-level cache that can hold solver arrays, named
+    # explicitly. A cache MISSING from this list is a gap in the report,
+    # not proof the process has none — so an absent attribute is
+    # reported, never skipped. (module, attribute, what, bounded?)
+    _MEM_CACHES = (
+        ("ion_gym.physics.build_planar", "_PLANAR_BASIS_CACHE",
+         "planar bases", False),
+        ("ion_gym.physics.build_rz", "_RZ_BASIS_CACHE",
+         "r-z bases", False),
+        ("ion_gym.physics.build_stl", "_STL_BUILD_CACHE",
+         "STL bases", False),
+        ("ion_gym.physics.build_stl3d", "_COMPOSE_GRAD_CACHE",
+         "compose gradients", True),
+        ("ion_gym.viz.viz_core", "_MASK_OUTLINE_CACHE",
+         "mask outlines", True),
+    )
+
+    @staticmethod
+    def _array_bytes(obj, seen=None, depth=0):
+        """Array bytes reachable from obj. Bounded depth so a cyclic
+        object graph cannot hang the report; modules are skipped by kind
+        because walking one can trigger a lazy import of an optional
+        backend that is not installed."""
+        import types
+        if seen is None:
+            seen = set()
+        if depth > 6 or id(obj) in seen or isinstance(obj, types.ModuleType):
+            return 0
+        seen.add(id(obj))
+        n = getattr(obj, "nbytes", None)
+        if isinstance(n, int):
+            return n
+        t = 0
+        if isinstance(obj, dict):
+            for k, v in list(obj.items()):
+                t += SimApp._array_bytes(k, seen, depth + 1)
+                t += SimApp._array_bytes(v, seen, depth + 1)
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            for v in list(obj):
+                t += SimApp._array_bytes(v, seen, depth + 1)
+        elif hasattr(obj, "__dict__"):
+            t += SimApp._array_bytes(vars(obj), seen, depth + 1)
+        return t
+
     def _mem_cache_lines(self):
-        lines = []
+        """What this process is RETAINING, by name and by bytes.
+
+        Reported only the compose-gradient slot before, which is the one
+        bounded cache of the five — so the three UNBOUNDED basis caches,
+        the ones that actually grow across a session, were invisible in
+        the app's own memory read-out. `_runs` was invisible too, and it
+        holds every flight's trajectories with no eviction.
+        """
+        import sys
+        lines, total = [], 0
+        for mod, attr, what, bounded in self._MEM_CACHES:
+            m = sys.modules.get(mod)
+            if m is None:
+                lines.append(f"- {what}: module not imported")
+                continue
+            c = getattr(m, attr, None)
+            if c is None:
+                lines.append(f"- {what}: **{attr} ABSENT** — this report "
+                             f"is out of date for this build ({mod})")
+                continue
+            nb = self._array_bytes(c)
+            total += nb
+            lines.append(f"- {what}: {len(c)} entries, {nb / 1e6:.1f} MB"
+                         + ("" if bounded else "  **(unbounded)**"))
+        runs = getattr(self, "_runs", {})
+        rb = self._array_bytes(runs)
+        total += rb
+        lines.append(f"- retained runs (`_runs`): {len(runs)}, "
+                     f"{rb / 1e6:.1f} MB  **(unbounded; trajectories are "
+                     f"the only copy unless banked)**")
         try:
-            from ion_gym.physics.build_stl3d import _COMPOSE_GRAD_CACHE
-            nb = 0
-            for slot in _COMPOSE_GRAD_CACHE.values():
-                for trip in slot.get("grads", {}).values():
-                    for a in trip:
-                        nb += getattr(a, "nbytes", 0)
-            lines.append(f"- compose gradients: {len(_COMPOSE_GRAD_CACHE)} "
-                         f"geometry, {nb / 1e6:.1f} MB")
-        except Exception as e:
-            lines.append(f"- compose gradients: unreadable ({e})")
+            from ion_gym.ui.telemetry import rss_mb
+            lines.append(f"- process RSS: {rss_mb():.0f} MB "
+                         f"(accounted above: {total / 1e6:.1f} MB)")
+        except ImportError as e:
+            lines.append(f"- process RSS: unavailable ({e})")
         return lines
 
     def _on_cache_remove_one(self, _=None):
@@ -5892,7 +6074,15 @@ class SimApp:
             clear_memory_cache as _clear_planar)
         from ion_gym.physics.build_rz import (
             clear_memory_cache as _clear_rz)
-        mem = _clear_planar() + _clear_rz()
+        from ion_gym.physics.build_stl import (
+            clear_memory_cache as _clear_stl)
+        from ion_gym.physics.build_stl3d import (
+            clear_memory_cache as _clear_stl3d)
+        # ALL of them. Purging planar and r-z only left _STL_BUILD_CACHE
+        # holding every STL geometry built this session, while the
+        # status line reported a clear — the button said one thing and
+        # the process held another.
+        mem = _clear_planar() + _clear_rz() + _clear_stl() + _clear_stl3d()
         try:
             n, freed = clear_all()
         except OSError as e:
@@ -6306,8 +6496,7 @@ class SimApp:
                 if mz is not None:
                     seen[f"{float(mz):g}"] = True
             opts = sorted(seen, key=float)
-        self.w_amz.options = opts
-        self.w_amz.value = [v for v in self.w_amz.value if v in opts]
+        set_options(self.w_amz, opts)
 
     @staticmethod
     def _scheme_colors(name):
@@ -6839,8 +7028,8 @@ class SimApp:
                 self._runs[name] = fin
                 self._active = name
                 self._sync_analysis_mz()
-                self.w_runsel.options = list(self._runs.keys())
-                self.w_runsel.value = name
+                set_options(self.w_runsel, list(self._runs.keys()),
+                            prefer=name)
                 self._redraw(fin.results)
                 plate = sum(1 for r in fin.results
                             if r.summary.get("kind") == 0)
@@ -6995,7 +7184,7 @@ class SimApp:
                 _prev_spec = self.spec
                 self.spec = new_spec
                 try:
-                    self._rebuild_for_new_spec(solve=False)
+                    self._rebuild_for_new_spec(solve=False, box_from_loaded=True)
                 except Exception:
                     # NEVER leave the app torn (spec swapped, controls
                     # stale): a later recompute would crash far from
@@ -7006,7 +7195,7 @@ class SimApp:
                     import traceback as _tb
                     _tb.print_exc()
                     self.spec = _prev_spec
-                    self._rebuild_for_new_spec(solve=False)
+                    self._rebuild_for_new_spec(solve=False, box_from_loaded=True)
                     raise
             except Exception as e:
                 self.status.object = (
@@ -7014,7 +7203,13 @@ class SimApp:
                     f"spec restored; full traceback on the console")
                 return
 
-    def _rebuild_for_new_spec(self, solve=False):
+    def _rebuild_for_new_spec(self, solve=False, *, box_from_loaded):
+        # box_from_loaded (required, no default — every caller states it):
+        #   True  -> a LOAD: the box is replaced by the loaded spec and
+        #            becomes the merge ancestor (_box_base).
+        #   False -> an EDIT of the loaded spec: the caller has already
+        #            merged the edit into the box (_merge_loaded_into_box),
+        #            which may hold staged work; the rebuild leaves it alone.
         # A NEW SPEC IS A NEW SUBJECT: retire flight-derived overlays
         # (detections/impacts, assembly traces, live figure bank) so the
         # previous instrument's arrivals cannot draw on this one
@@ -7047,7 +7242,16 @@ class SimApp:
             _pl = getattr(_sym, "planes", {}) if _sym else {}
             self.w_mirror.value = [a for a in "xyz"
                                    if (_pl or {}).get(a) == "mirror"]
-        self.w_json.value = self.spec.to_json()
+        if box_from_loaded is True:
+            self._set_box_from_loaded()
+        elif box_from_loaded is False:
+            # deliberate no-op: the caller merged its edit into the box
+            # already; replacing it here is the L-450 overwrite.
+            pass
+        else:
+            raise TypeError(
+                f"_rebuild_for_new_spec: box_from_loaded must be True or "
+                f"False, got {box_from_loaded!r}")
         self._active = None
         self._model = None            # force geometry preview until re-solved
         self._scene = None             # scene lives and dies with the model
@@ -7304,8 +7508,8 @@ class SimApp:
         s.geometry.rf_groups.append(
             RFGroupSpec(name=name, waveform=wave, amplitude_v=0.0))
         self.spec = s
-        self.w_json.value = s.to_json()
-        self._rebuild_for_new_spec()
+        self._merge_loaded_into_box()
+        self._rebuild_for_new_spec(box_from_loaded=False)
         self.status.object = (
             f"**drive group {name!r} ({wave}) added** — set its amplitude/"
             f"frequency/phase, then assign electrodes to it below.")
@@ -7327,8 +7531,8 @@ class SimApp:
         uniform = bool(kind and kind.value == "uniform")
         s.geometry.dc_groups.append(DCGroupSpec(name=name, uniform=uniform))
         self.spec = s
-        self.w_json.value = s.to_json()
-        self._rebuild_for_new_spec()
+        self._merge_loaded_into_box()
+        self._rebuild_for_new_spec(box_from_loaded=False)
         if uniform:
             self.status.object = (
                 f"**uniform DC group {name!r} added** — assign electrodes and "
@@ -7365,8 +7569,8 @@ class SimApp:
         s.geometry.rf_groups = [g for g in s.geometry.rf_groups
                                 if g.name not in names]
         self.spec = s
-        self.w_json.value = s.to_json()
-        self._rebuild_for_new_spec()
+        self._merge_loaded_into_box()
+        self._rebuild_for_new_spec(box_from_loaded=False)
         det = (" — detached " + ", ".join(sorted(set(detached)))
                ) if detached else ""
         self.status.object = (
@@ -7408,8 +7612,8 @@ class SimApp:
         s.geometry.dc_groups = [g for g in s.geometry.dc_groups
                                 if g.name not in names]
         self.spec = s
-        self.w_json.value = s.to_json()
-        self._rebuild_for_new_spec()
+        self._merge_loaded_into_box()
+        self._rebuild_for_new_spec(box_from_loaded=False)
         det = (" — " + "; ".join(detached)) if detached else ""
         self.status.object = (
             f"**{len(names)} DC group(s) removed** ({', '.join(names)})"
@@ -7453,7 +7657,7 @@ class SimApp:
             msg.append(f"{gname}: {len(rows)} members numbered 1..{len(rows)}")
         s.resolve_dc_groups()
         self.spec = s
-        self.w_json.value = s.to_json()
+        self._merge_loaded_into_box()
         self.status.object = "**auto-numbered by z** — " + "; ".join(msg)
 
     def _on_example_selected(self, evt=None):
@@ -7473,6 +7677,7 @@ class SimApp:
             return
         try:
             spec = _example_specs()[name]()
+            self._box_base = None      # staged, not written from self.spec
             self.w_json.value = spec.to_json()      # -> _on_json_edited -> cost
             self.status.object = (
                 f"**staged** *{name}* — cost shown above. "
@@ -7515,6 +7720,9 @@ class SimApp:
                 self._clear_assembly_state()
                 if self._sniff_assembly(self.w_json.value):
                     n_st = self._load_assembly_text(self.w_json.value)
+                    # the box keeps the ASSEMBLY document, which no loaded
+                    # SimSpec edit can be merged into
+                    self._box_base = None
                     self._beam_sync_banner()
                     self._clear_beam_panel()
                     # DEFAULT VIEW = FULL ASSEMBLY, applied LAST
@@ -7547,7 +7755,7 @@ class SimApp:
                     return
                 self.spec = load_any_spec(self.w_json.value)
             n_el = len(self.spec.geometry.electrodes)
-            self._rebuild_for_new_spec()
+            self._rebuild_for_new_spec(box_from_loaded=True)
             # a loaded spec reports its cost AS AUTHORED, before anyone
             # changes anything
             self.w_pitch.value = float(self.spec.geometry.mm_per_gu)
@@ -7611,8 +7819,8 @@ class SimApp:
         self._assembly_doc = doc
         self._assembly_specs = specs
         names = list(specs)
-        self.w_stage.options = ["Full Assembly"] + names
-        self.w_fly_src.options = names
+        set_options(self.w_stage, ["Full Assembly"] + names)
+        set_options(self.w_fly_src, names)
         self.w_fly_src.disabled = False
         self.w_set_fly_params.disabled = False
         if getattr(self, "w_instrument_dl", None) is not None:
@@ -7972,16 +8180,14 @@ class SimApp:
         if getattr(self, "w_stage", None) is not None:
             self._stage_swapping = True
             try:
-                self.w_stage.options = ["(no assembly loaded)"]
-                self.w_stage.value = "(no assembly loaded)"
+                set_options(self.w_stage, ["(no assembly loaded)"])
             finally:
                 self._stage_swapping = False
             self.w_stage.disabled = True
         for _a, _opts in (("w_solve_target", ["(displayed stage)"]),):
             _w = getattr(self, _a, None)
             if _w is not None:
-                _w.options = _opts
-                _w.value = _opts[0]
+                set_options(_w, _opts)
                 _w.disabled = True
         for _a in ("w_view_assembly", "w_fly_assembly"):
             _w = getattr(self, _a, None)
@@ -8287,8 +8493,10 @@ class SimApp:
                 for i, st in enumerate(stns)] + ["(new)"]
         self._station_loading = True
         try:
-            self.w_stn_pick.options = opts
-            self.w_stn_pick.value = opts[0]
+            # prefer=opts[0] preserves this site's DELIBERATE reset-to-first
+            # (it reloads the station editor from the picked entry); the
+            # default preserve-current policy would be a behavior change here.
+            set_options(self.w_stn_pick, opts, prefer=opts[0])
             self._station_load()
         finally:
             self._station_loading = False
@@ -8385,7 +8593,7 @@ class SimApp:
         edit that stopped at the live spec would VANISH from the very
         flight it was made for.
         """
-        self.w_json.value = self.spec.to_json()
+        self._merge_loaded_into_box()
         # LIVE stage, not the displayed SUBJECT (found while
         # wiring this): _assembly_stage can be WHOLE_ASSEMBLY since the
         # subject-mode change, and matching it against stage names
@@ -8743,9 +8951,7 @@ class SimApp:
             self._impact_hits = hits
             _names = sorted({h["station"] for h in hits})
             if _names:
-                self.w_impact_station.options = _names
-                if self.w_impact_station.value not in _names:
-                    self.w_impact_station.value = _names[0]
+                set_options(self.w_impact_station, _names)
                 for _w in (self.w_impact_station, self.w_impact_plane,
                            self.w_impact_hist_axis):
                     _w.disabled = False
@@ -9329,7 +9535,7 @@ class SimApp:
             self._sync_assembly_notices()
             self._live_stage_name = name
             self._sync_plane_controls()
-            self._rebuild_for_new_spec()
+            self._rebuild_for_new_spec(box_from_loaded=True)
             self.w_pitch.value = float(self.spec.geometry.mm_per_gu)
             self._refresh_sizing()
         finally:
@@ -9872,8 +10078,7 @@ class SimApp:
             _st = sorted({p.get("station") for p in self._impact_hits
                           if p.get("station")})
             if _st:
-                self.w_impact_station.options = _st
-                self.w_impact_station.value = _st[0]
+                set_options(self.w_impact_station, _st, prefer=_st[0])
                 for _w in (self.w_impact_station, self.w_impact_plane,
                            self.w_impact_hist_axis):
                     _w.disabled = False
@@ -9900,7 +10105,7 @@ class SimApp:
             _flown_mz = sorted({float(p["mz"]) for p in out["per_ion"]
                                 if p.get("mz") is not None})
             if _flown_mz and getattr(self, "w_amz", None) is not None:
-                self.w_amz.options = [f"{m:g}" for m in _flown_mz]
+                set_options(self.w_amz, [f"{m:g}" for m in _flown_mz])
             self.stats.update(results,
                               self._assembly_specs.get(_final.name,
                                                        self.spec))
@@ -9958,6 +10163,7 @@ class SimApp:
                 msg += f" · {out.get('note', 'R undefined')}"
         else:
             res = st["res"]
+            st["res"] = None      # same leak as the build path; see 4594
             dt = _time.time() - t0
             det = res.get("detection")
             # BANK THE TRACE (without it there are no trajectories
@@ -10240,28 +10446,78 @@ class SimApp:
                 self.w_pitch.value = float(sp.geometry.mm_per_gu)
             finally:
                 self._json_guard = False
-            # summary reflects the JSON in the BOX (staged), so a changed
-            # or pasted JSON is legible before Apply.
-            try:
-                from ion_gym.io.spec_io import spec_summary_rows
-                rows = spec_summary_rows(sp)
-                self.w_spec_summary.object = (
-                    "| field | value |\n|---|---|\n"
-                    + "\n".join(f"| {k} | {v} |" for k, v in rows))
-            except (ValueError, KeyError, TypeError, AttributeError):
-                # AUDITED: narrowed like the enclosing handler
-                # — fires per keystroke on half-typed JSON; quiet by
-                # design, structural errors raise.
-                pass
         except (ValueError, KeyError, TypeError, AttributeError):
-            # NARROW, and legitimately quiet: this fires on EVERY keystroke in
-            # the JSON editor, and mid-edit text is invalid JSON almost by
-            # definition (json.JSONDecodeError is a ValueError).  The
-            # authoritative parse with a REPORTED error is _on_apply_json;
-            # this handler only keeps the pitch widget in sync when the text
-            # happens to be parseable.
-            self.w_spec_summary.object = "*(JSON not parseable yet)*"
+            # NARROW, and legitimately quiet about the PITCH: this fires on
+            # EVERY keystroke in the JSON editor, and mid-edit text is invalid
+            # JSON almost by definition (json.JSONDecodeError is a
+            # ValueError). The authoritative parse with a REPORTED error is
+            # _on_apply_json; this handler only keeps the pitch widget in sync
+            # when the text happens to be parseable. The summary below says
+            # the box does not parse, so the state is visible.
+            pass
+        self._refresh_staged_summary()
         self._refresh_sizing()
+
+    def _refresh_staged_summary(self):
+        """Config-tab summary for the JSON IN THE BOX (staged), so a changed
+        or pasted JSON is legible before Apply. Contrast
+        _refresh_spec_summary, which summarizes the LOADED spec. An
+        unparseable box is reported in the table's place, never left
+        showing the previous document's rows."""
+        try:
+            from ion_gym.io.spec_io import spec_summary_rows
+            rows = spec_summary_rows(self._editor_spec())
+            self.w_spec_summary.object = (
+                "| field | value |\n|---|---|\n"
+                + "\n".join(f"| {k} | {v} |" for k, v in rows))
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            self.w_spec_summary.object = f"*(JSON not parseable yet: {e})*"
+
+    def _set_box_from_loaded(self):
+        """A LOAD: replace the box with the loaded spec and make that the
+        merge ancestor. Unguarded on purpose — _on_json_edited then syncs
+        the pitch widget and summary to the newly loaded deck."""
+        self.w_json.value = self.spec.to_json()
+        self._box_base = json.loads(self.w_json.value)
+        self.w_box_sync.object = ""
+
+    def _merge_loaded_into_box(self):
+        """An EDIT of the loaded spec: carry it into the box without
+        discarding what the user staged there (L-450). Three-way against
+        _box_base via spec_io.merge_loaded_delta; written under _json_guard
+        so a typed, unapplied pitch is not snapped back. When the edit
+        cannot be carried, the box is left untouched and the note beside it
+        says so — never a fallback overwrite."""
+        from ion_gym.io.spec_io import merge_loaded_delta
+        loaded = json.loads(self.spec.to_json())
+        base = self._box_base
+        if base is None:
+            self._note_box_not_synced(
+                "the box holds a document that was not written from the "
+                "loaded spec (a staged example, an upload or bootstrap not "
+                "yet applied, or an assembly)")
+            return
+        try:
+            new_txt = merge_loaded_delta(self.w_json.value, base, loaded)
+        except ValueError as e:
+            self._note_box_not_synced(str(e))
+            return
+        self._json_guard = True
+        try:
+            self.w_json.value = new_txt
+        finally:
+            self._json_guard = False
+        self._box_base = loaded
+        self.w_box_sync.object = ""
+        self._refresh_staged_summary()
+        self._refresh_sizing()
+
+    def _note_box_not_synced(self, why):
+        """The visible outcome of a merge that could not be made."""
+        self.w_box_sync.object = (
+            f"**JSON box not updated from the loaded spec:** {why}. The "
+            f"loaded spec carries the edit and Solve/Fly use it; **Apply "
+            f"JSON** from this box would revert it.")
 
     def _on_apply_pitch(self, _=None):
         """Set the pitch ON THE JSON IN THE WINDOW, apply it, rebuild.
@@ -10291,7 +10547,7 @@ class SimApp:
             finally:
                 self._json_guard = False
             self.spec = sp
-            self._rebuild_for_new_spec()
+            self._rebuild_for_new_spec(box_from_loaded=True)
             self._refresh_sizing()
             # The adjustment is REPORTED, always, with no threshold — a
             # domain that moved silently is the defect class this guards
@@ -10350,6 +10606,7 @@ class SimApp:
                 doc, stls, repo_root() / "uploads" / "decks")
             if where is not None:
                 text = _json.dumps(doc, indent=1)
+            self._box_base = None      # foreign text until apply adopts it
             self.w_json.value = text
             self._on_apply_json()
             if other:
@@ -10386,13 +10643,12 @@ class SimApp:
         try:
             self._sync_spec()
             rep = load_drive_template(self.spec, source)
-            self.w_json.value = self.spec.to_json()
+            self._merge_loaded_into_box()
             self._suspend_live = True
             try:
-                self._rebuild_for_new_spec(solve=False)
+                self._rebuild_for_new_spec(solve=False, box_from_loaded=False)
             finally:
                 self._suspend_live = False
-            self._refresh_spec_summary()
             rf = ", ".join(rep["rf_loaded"]) or "(none)"
             dc = ", ".join(rep["dc_loaded"]) or "(none)"
             self.w_tmpl_status.object = (
@@ -10594,12 +10850,3 @@ summary{{cursor:pointer;font-weight:600;color:#555}}</style></head>
             frames.append(df)
         return (pd.concat(frames, ignore_index=True) if frames
                 else pd.DataFrame())
-
-def _default_export_dir():
-    """Default field-export destination: the user-facing outputs dir in
-    managed sandboxes, else ./exported_fields under the cwd."""
-    import os
-    cand = "/mnt/user-data/outputs"
-    if os.path.isdir(cand) and os.access(cand, os.W_OK):
-        return cand
-    return os.path.abspath("exported_fields")

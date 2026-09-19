@@ -21,8 +21,8 @@ ratio is unmeasured). planar/tw2d = 0.78x vacuum, 0.84x HS: the
 spec-routed planar (Verlet) route is ~20% FASTER than this kernel on
 the identical case. tw2d's remaining distinct value: RK4 bit-parity
 with the 3-D kernel (Gates D/E) and the lean direct-call API.
-Numbers + operating point: internal/studies/rf_arrival_time/
-bench_kernels_results.json. Supersession is a PI ruling (L-427).
+Numbers + operating point are banked with the kernel-benchmark record
+in the development tree. Supersession is a PI ruling (L-427).
 
 Conventions (from the contract):
   * RFGroupSpec.frequency_hz is the WAVEFORM frequency f_waveform;

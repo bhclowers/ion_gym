@@ -27,6 +27,7 @@ dependencies = [
     "bokeh",
     "trimesh",
     "manifold3d",
+    "psutil",
 ]
 
 # Extras mirror the sectioned tail of requirements.txt, so `pip install
@@ -43,6 +44,14 @@ notebooks = ["matplotlib", "cma", "nbformat", "jupyter_bokeh"]
 # reported as a gate FAILURE, which reads as a broken tree rather than a
 # missing package. Declared here so the suite is installable by name.
 gates = ["pytest"]
+# CAD export (ion_gym.io.jcad_export): jupytercad-core validates emitted
+# .jcad documents against the official schema; cadquery evaluates a
+# .jcad into a STEP assembly. Both are imported INSIDE the functions that
+# need them, so the package imports without them. Kept out of `all`:
+# cadquery pulls the OpenCascade (OCP) wheels, a heavy install that no
+# solve or flight path needs.
+# kiutils: pure-Python KiCad file writer for flatapole_kicad (tiny).
+cad = ["cadquery", "jupytercad-core", "kiutils"]
 all = ["contourpy", "matplotlib", "cma", "nbformat", "jupyter_bokeh",
        "pytest"]
 

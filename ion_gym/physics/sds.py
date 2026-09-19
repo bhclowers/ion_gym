@@ -181,3 +181,143 @@ def _sphere_rand(r):
     z = (2.0*S - 1.0) * r
     f = 2.0*r*math.sqrt(1.0 - S)
     return xp*f, yp*f, z
+
+# ---------------------------------------------------------------- regime
+# Threshold on gamma/Omega. A NAMED DEFAULT, not a derived number: it is
+# the order of magnitude at which the mobility limit is reached within an
+# RF cycle. The exact value wants measuring -- sweep gamma/Omega over a
+# couple of decades at fixed geometry, run HS and SDS at each point, and
+# take the ratio where SDS departs from HS beyond tolerance. HS is the
+# reference because it resolves collisions and assumes no terminal
+# velocity. Until that campaign runs, this is a judgement, and the
+# warning says so by printing the ratio rather than a verdict alone.
+SDS_MIN_GAMMA_OVER_OMEGA = 1.0
+SDS_ASSUMED_MZ_WHEN_UNSET = 300.0
+
+
+def rf_regime_note(spec):
+    """Warn when SDS is used with RF outside the regime it is valid in.
+
+    Returns a multi-line warning string, or None when the operating
+    point is fine or the check does not apply.
+
+    THE RATIO IS gamma/Omega, NOT COLLISIONS PER CYCLE (corrected
+    2026-09-15). gamma is the MOMENTUM-TRANSFER relaxation rate
+    q/(m*K) that ion_params() already computes from the shipped mobility
+    table -- the same number the integrator damps with. Omega = 2*pi*f.
+    An earlier version of this guard counted kinetic-theory COLLISIONS
+    per cycle and was wrong by two orders of magnitude on the PI's deck
+    (1.35 against the true 0.015), because a collision is not a
+    relaxation: a heavy ion needs roughly its mass ratio in light-gas
+    collisions before it loses directed velocity. Mobility accounts for
+    that; a collision count does not. Using the model's own damping also
+    removes the assumed cross-section and assumed relative speed
+    entirely -- nothing here is estimated except the mass when the deck
+    does not declare one.
+
+    WHY IT MATTERS. SDS damps acceleration toward the LOCAL
+    MOBILITY-LIMITED DRIFT VELOCITY each step and then adds an ICDF
+    diffusive jump; both halves assume that relaxation COMPLETES within
+    a step, i.e. gamma >> Omega. RF confinement is the opposite
+    condition: the pseudopotential is built from MICROMOTION, the driven
+    oscillation out of phase with the field gradient, which survives
+    only when gamma << Omega. The two cannot both hold. Where RF
+    confinement is physical, SDS cannot represent it, and the ions go
+    unconfined and time out while the same deck under hard-sphere
+    transits normally.
+
+    MEASURED on the PI's bent flatapole (0.05 Torr N2, 273 K, 2 MHz):
+    gamma/Omega = 0.027 at m/z 100, 0.015 at 300, 0.008 at 622 -- deep
+    in the RF-confined regime, and getting worse with mass. Reaching
+    gamma/Omega = 1 at m/z 300 and 2 MHz would need about 6.4 Torr.
+
+    THIS WARNS, IT DOES NOT REFUSE (PI ruling). The boundary is soft,
+    the ratio degrades gradually rather than failing at a threshold, and
+    working near it is legitimate. See Allen and Bush, Anal. Chem. 88
+    (2016) -- RF confinement in ion mobility, apparent mobilities and
+    effective temperatures.
+    """
+    import math
+    import pathlib as _pl
+    coll = getattr(spec, "collisions", None)
+    if coll is None or not getattr(coll, "enabled", False):
+        return None
+    if str(getattr(coll, "model", "")).lower() != "sds":
+        return None
+    rf = [g for g in (spec.geometry.rf_groups or [])
+          if float(getattr(g, "amplitude_v", 0.0) or 0.0) != 0.0]
+    if not rf:
+        return None                       # no RF: nothing to erase
+    f_hz = max(float(getattr(g, "frequency_hz", 0.0) or 0.0) for g in rf)
+    p_torr = float(getattr(coll, "P_torr", 0.0) or 0.0)
+    t_k = float(getattr(coll, "T_k", 0.0) or 0.0)
+    if f_hz <= 0 or p_torr <= 0 or t_k <= 0:
+        return None                       # not enough to judge; say nothing
+
+    # SourceSpec declares masses as mz_list; "mz" is not a field on it,
+    # so a getattr default would silently fall through to the assumed
+    # mass on EVERY deck and never report a real number.
+    mz = getattr(spec.source, "mz_list", None)
+    if isinstance(mz, (list, tuple)) and mz:
+        masses, mz_note = sorted(float(x) for x in mz), ""
+    elif isinstance(mz, (int, float)) and mz:
+        masses, mz_note = [float(mz)], ""
+    else:
+        masses = [SDS_ASSUMED_MZ_WHEN_UNSET]
+        mz_note = (f" (source.mz_list is unset, so m/z {masses[0]:g} was "
+                   f"ASSUMED -- declare it and this is exact)")
+
+    gas_mass = float(getattr(coll, "gas_mass_amu", 0.0) or 28.0)
+    gas_diam = float(getattr(coll, "gas_diam_nm", 0.0) or 0.366)
+    charge = abs(int(getattr(spec.source, "charge", 1) or 1))
+    md = load_massdata(str(_pl.Path(__file__).parent / "sds_mobility.dat"))
+    omega = 2.0 * math.pi * f_hz
+
+    rows = []
+    for m in masses:
+        pr = ion_params(m, charge, gas_mass, gas_diam, t_k, p_torr, md)
+        gamma = pr["damping"] * 1.0e6                     # 1/us -> 1/s
+        rows.append((m, gamma / omega, pr["mfp_mm"], pr["ko"]))
+    worst = min(r[1] for r in rows)
+    if worst >= SDS_MIN_GAMMA_OVER_OMEGA:
+        return None
+
+    # pressure that would reach the threshold for the worst mass
+    m_worst = [r[0] for r in rows if r[1] == worst][0]
+    need_p = None
+    _p = p_torr
+    for _ in range(40):
+        _p *= 2.0
+        _g = ion_params(m_worst, charge, gas_mass, gas_diam, t_k, _p,
+                        md)["damping"] * 1.0e6
+        if _g / omega >= SDS_MIN_GAMMA_OVER_OMEGA:
+            need_p = _p
+            break
+
+    lines = [
+        f"[sds] WARNING: SDS with RF at gamma/Omega = {worst:.4f} -- "
+        f"below the {SDS_MIN_GAMMA_OVER_OMEGA:g} this model needs."
+        f"{mz_note}",
+        f"[sds]   gamma is the momentum-transfer relaxation rate "
+        f"q/(m*K) from the shipped mobility table; Omega = 2*pi*"
+        f"{f_hz / 1e6:.3f} MHz, at {p_torr:.4g} Torr / {t_k:.0f} K:",
+    ]
+    for m, ratio, mfp, ko in rows:
+        lines.append(f"[sds]     m/z {m:<8g} Ko {ko:.4g}  "
+                     f"gamma/Omega {ratio:.4f}  mfp {mfp:.3f} mm")
+    lines += [
+        "[sds]   SDS assumes relaxation completes within a step "
+        "(gamma >> Omega). RF confinement needs the opposite "
+        "(gamma << Omega): the pseudopotential is made of MICROMOTION, "
+        "which the damping erases. Expect ions to go UNCONFINED and "
+        "time out while the same deck under model='hs' transits.",
+        (f"[sds]   To reach gamma/Omega = "
+         f"{SDS_MIN_GAMMA_OVER_OMEGA:g} at m/z {m_worst:g}: pressure "
+         f"about {need_p:.2f} Torr at this frequency"
+         if need_p else
+         f"[sds]   No reachable pressure below 2^40 x {p_torr:g} Torr "
+         f"puts m/z {m_worst:g} in regime at this frequency"),
+        "[sds]   Otherwise use model='hs', which resolves collisions "
+        "and keeps the micromotion.",
+    ]
+    return "\n".join(lines)

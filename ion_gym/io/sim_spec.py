@@ -1614,7 +1614,7 @@ class SimSpec(_StrictAttrs):
             mem = [e for e in g.electrodes if e.dc_group == grp.name]
             if not mem:
                 continue
-            if getattr(grp, "uniform", False):
+            if grp.uniform:
                 # plain equal-V group: every member at v_in (v_out mirrors)
                 grp.v_out = grp.v_in
                 for e in mem:
@@ -1932,6 +1932,32 @@ class SimSpec(_StrictAttrs):
                             f"{e.dc_group!r} is not defined")
                 continue
             grp = next(x for x in g.dc_groups if x.name == e.dc_group)
+            if grp.uniform:
+                # ONE AUTHORITY: resolve_dc_groups() short-circuits a
+                # uniform group before either ladder branch and writes
+                # v_in to every member, consulting neither dc_index nor
+                # dc_weight. validate() demanding them anyway made the
+                # two disagree: a deck that resolves perfectly was
+                # refused at load. That is a defect of THIS check for
+                # every uniform group in every deck (the flag is a
+                # first-class DCGroupSpec field, not a device option) —
+                # it is not scoped to the geometry that exposed it, and
+                # the member-count check twenty lines below already
+                # treats uniform as its own kind.
+                #
+                # A member that DOES carry dc_index is NOT refused here,
+                # and that is deliberate rather than an oversight. The
+                # shipped fleet uses the index on uniform members as a
+                # stable member ordinal — mirror pairs numbered L_* 0..2
+                # against R_* 100..102 in the planar MRTOF and xevo
+                # decks, plate ordinals in the OA decks — while the
+                # group itself carries v_in == v_out. Refusing it here
+                # rejects 19 decks in this tree that pristine v522
+                # accepts and that resolve to exactly the same voltages
+                # either way. An unused ordinal is not a contradiction;
+                # the voltage the deck declares is the voltage the
+                # solver receives, which is the invariant that matters.
+                continue
             if grp.interp == "linear":
                 if e.dc_index is None:
                     errs.append(f"electrode {e.name}: in dc_group "
@@ -1952,7 +1978,7 @@ class SimSpec(_StrictAttrs):
             mem = [e for e in g.electrodes if e.dc_group == gr.name]
             # uniform groups put ONE voltage on every member -> 1 is fine;
             # only ladders need >=2 to interpolate v_in..v_out.
-            if not getattr(gr, "uniform", False) and len(mem) < 2:
+            if not gr.uniform and len(mem) < 2:
                 errs.append(f"dc_group {gr.name}: ladder needs >=2 members to "
                             f"distribute v_in..v_out, has {len(mem)} "
                             f"(use a uniform group for a single-voltage set)")
@@ -2317,6 +2343,53 @@ class PitchChange(_StrictAttrs):
             t += (f", origin {self.old_origin_mm:g} -> "
                   f"{self.new_origin_mm:g} mm ({why})")
         return t
+
+
+def check_recording_capacity(integ):
+    """Refuse a recording that cannot cover the declared flight.
+
+    max_records is a CAP ON THE BUFFER, and when the flight needs more
+    records than the cap allows the integrator does not thin the trace --
+    IT STOPS RECORDING. The trajectory returned then covers only the
+    first part of the flight and carries nothing saying so.
+
+    MEASURED (L-448): dt 2 ns, t_max 3000 us, rec_every 10,
+    max_records 100000. 1,500,000 steps / 10 = 150,000 records wanted
+    against a 100,000 cap, so every trace stopped around 2000 us of a
+    3000 us flight and the last third was simply absent. Fates and
+    positions still looked plausible; any timing observable read off the
+    tail was wrong. That is a CORRECTNESS defect, which is why this
+    refuses rather than warns -- a warning on this path already existed
+    on the 3-D STL route and went unseen in the console for months.
+
+    The message carries the arithmetic and BOTH levers with the value
+    that would actually fit, so the fix is a copy-paste, not a
+    calculation. Raising rec_every thins uniformly and keeps the whole
+    flight; raising max_records keeps the sample rate and costs memory
+    (records x ions x channels x 8 bytes).
+    """
+    dt_ns = float(getattr(integ, "dt_ns", 0.0) or 0.0)
+    t_max_us = float(getattr(integ, "t_max_us", 0.0) or 0.0)
+    every = max(int(getattr(integ, "rec_every", 1) or 1), 1)
+    cap = int(getattr(integ, "max_records", 0) or 0)
+    if dt_ns <= 0 or t_max_us <= 0 or cap <= 0:
+        return None                      # nothing to check against
+    steps = t_max_us * 1e3 / dt_ns
+    need = int(steps / every) + 2
+    if need <= cap:
+        return None
+    every_fit = int(-(-steps // (cap - 2))) if cap > 2 else None
+    covered_us = cap * every * dt_ns * 1e-3
+    return (
+        f"recording cannot cover the flight: {steps:,.0f} steps at "
+        f"dt_ns={dt_ns:g} over t_max_us={t_max_us:g}, recorded every "
+        f"{every} -> {need:,} records wanted but max_records={cap:,}. "
+        f"max_records does NOT thin the trace, it STOPS RECORDING, so "
+        f"every trajectory would cover only the first {covered_us:,.0f} "
+        f"us and the rest would be silently absent. Either set "
+        f"rec_every={every_fit} (thins uniformly, keeps the whole "
+        f"flight) or set max_records={need:,} (keeps the sample rate, "
+        f"costs {need:,} records per ion).")
 
 
 def set_pitch(spec, mm_per_gu):

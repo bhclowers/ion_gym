@@ -548,6 +548,19 @@ def build_run(spec: SimSpec, verbose=False,
     # electrode.dc. Doing it here (one door, all builders) means a builder
     # cannot forget, and a group member's dc can never be stale.
     spec.resolve_dc_groups()
+    # ONE DOOR for every route: a recording that cannot cover the
+    # declared flight is refused here, before anything is built, rather
+    # than truncating mid-flight on whichever builder happens to run.
+    from ion_gym.io.sim_spec import check_recording_capacity
+    _rec_err = check_recording_capacity(spec.integration)
+    if _rec_err:
+        raise ValueError(_rec_err)
+    # SDS outside its regime WARNS rather than refuses: the boundary is
+    # soft and exploring near it is legitimate. One door, every route.
+    from ion_gym.physics.sds import rf_regime_note
+    _sds_note = rf_regime_note(spec)
+    if _sds_note:
+        print(_sds_note)
     errs = spec.validate()
     if errs:
         raise ValueError("invalid spec: " + "; ".join(errs))

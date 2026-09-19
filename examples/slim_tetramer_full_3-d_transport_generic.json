@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "name": "SLIM 3D",
- "notes": "SLIM tetramer, full 3-D, authored natively as inline extruded shapes (no geometry files). Axes: x = transport (37 mm), y = board gap (mirror axis; half-domain 0..2.05 mm with grid.mirror='y' giving two boards and a 2.75 mm gap between inner faces at y = \u00b11.375 mm), z = board width (13 mm, five rungs). RF rails confine across the gap; travelling DC rungs carry ions along x.",
+ "notes": "SLIM tetramer, full 3-D, authored natively as inline extruded shapes (no geometry files). Axes: x = transport (37 mm), y = board gap (mirror axis; half-domain 0..2.05 mm with grid.mirror='y' giving two boards and a 2.75 mm gap between inner faces at y = \u00b11.375 mm), z = board width (13 mm, five rungs). RF rails confine across the gap; travelling DC rungs carry ions along x. | 2026-09-15 (L-448): rec_every 20 -> 37. At dt_ns=1 over t_max_us=3600 this wanted 180,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- so this deck was recording only the first 2,000 us of the flight. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 180,002 records per ion.",
  "geometry": {
   "width_mm": 37.050000000000004,
   "height_mm": 12.350000000000001,
@@ -2725,7 +2725,7 @@
  "integration": {
   "dt_ns": 1.0,
   "t_max_us": 3600,
-  "rec_every": 20,
+  "rec_every": 37,
   "record_channels": [
    "speed",
    "ke_ev",

@@ -3,7 +3,7 @@
   "version": "0.168.0",
   "source": "https://registry.npmjs.org/three/-/three-0.168.0.tgz",
   "bundled_on": "2026-08-27",
-  "directive": "Standing directive (2026-08-26): release tooling CHECKS the npm registry for a newer three and ASKS \u2014 it never auto-updates. Updating is the explicit `python internal/tools/vendor_three.py --update [version]`, and any pin move past r168 must revisit TransformControls scene attachment (r169+: scene.add(controls.getHelper())) and then pass edit_gate + a browser pass.",
+  "directive": "Standing directive (2026-08-26): release tooling CHECKS the npm registry for a newer three and ASKS \u2014 it never auto-updates. Updating is an explicit, tool-driven re-vendor in the development tree, and any pin move past r168 must revisit TransformControls scene attachment (r169+: scene.add(controls.getHelper())) and then pass the editor gate plus a browser pass.",
   "files": {
     "three.module.min.js": {
       "sha256": "ee08b04912b21d9bf71f13658a65da65c113827601377076663e710c0b1772d0",

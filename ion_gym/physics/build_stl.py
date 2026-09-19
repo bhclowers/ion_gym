@@ -56,6 +56,20 @@ from ion_gym.io.lattice import cover_extent_mm
 from ion_gym.physics.collision3d import KG_AMU, E_CHG
 
 
+def unsupported_drive_features(spec):
+    """Declared drive features the 2-D STL route does NOT apply: NONE,
+    as of 2026-09-16 (L-455). The single signed-B fold (every drive as
+    sin at the lowest frequency) is superseded: this route assembles the
+    same per-group channels as the planar build
+    (build_planar.assemble_drive_groups) and flies the same kernel, so
+    waveforms, phases, frequencies, offsets, duty and multi-group
+    membership are honoured identically. Kept as the route's contract
+    statement for the field export door."""
+    return []
+
+
+
+
 def _grid_counts_2d(g):
     """(nx, ny) of the stl2d voxel grid, through THE counting
     function. The stl2d route counts CELLS (its historical
@@ -326,6 +340,22 @@ def einzel3d_spec(stl_dir, lens_v=-800.0, beam_ke_ev=30.0, bore_mm=3.0,
 _STL_BUILD_CACHE = {}
 
 
+def clear_memory_cache():
+    """Drop the in-process STL basis cache (_STL_BUILD_CACHE). The disk
+    cache is separate (fa_cache.clear_all). Returns the number of
+    entries dropped — a visible, reported clear, not a silent wipe.
+
+    THIS DID NOT EXIST while build_planar and build_rz both had one, so
+    the app's "clear cache" button purged two of the three unbounded
+    basis caches and left this one holding every STL geometry ever built
+    in the session. Each entry is a full per-electrode basis set, so on
+    a sweep across geometries it is the largest thing in the process.
+    """
+    n = len(_STL_BUILD_CACHE)
+    _STL_BUILD_CACHE.clear()
+    return n
+
+
 def _stl_geom_signature(spec, ground_border):
     """Cache key capturing everything voxelize+solve depends on: the STL
     files + mtimes, grid, grounding. Voltages/RF are NOT in the key —
@@ -484,42 +514,21 @@ def build_stl_run(spec: SimSpec, verbose=False, ground_border=False):
         spec, ground_border, verbose)
     _t_assemble = time.time()
 
-    A = np.zeros((nx, ny))
-    # collect per-(freq,phase) RF bases, then FOLD into one signed B the
-    # way build_rz does: phase 0 -> +, phase 180 -> -. The planar tracer
-    # flies a single B (A + sin(wt)*B); for the two-phase quad/funnel this
-    # signed fold is exact and gives the proper saddle (x-rods and y-rods
-    # in antiphase). >2 distinct phases (travelling wave) would need the
-    # multi-B tracer — flagged, not silently mis-flown.
-    freqs = set()
-    phase_groups = {}          # (freq,phase) -> summed amp*fa
-    for idx, el in enumerate(g.electrodes, start=1):
-        fa = bases[idx] / 1e4
-        A = A + el.dc * fa
-        amp, freq, phase = g.electrode_rf(el)
-        if amp != 0.0 and freq != 0.0:
-            freqs.add(round(freq, 3))
-            k2 = (round(freq, 3), round(phase, 3))
-            phase_groups.setdefault(k2, np.zeros((nx, ny)))
-            phase_groups[k2] += amp * fa
-    Bk = []
-    if phase_groups:
-        f0 = sorted(freqs)[0]
-        phases = sorted({k[1] for k in phase_groups})
-        B = np.zeros((nx, ny))
-        for (freq, phase), basis in phase_groups.items():
-            sign = 1.0 if (phase % 360.0) < 90.0 or (phase % 360.0) >= 270.0 \
-                else -1.0
-            B = B + sign * basis
-        Bk = [(B, f0, 0.0)]
-        if len(phases) > 2:
-            import warnings
-            warnings.warn(
-                "STL build: >2 RF phases folded into a two-phase B — the "
-                "single-B planar tracer approximates it. Multi-B "
-                "travelling-wave tracer is the flagged extension.")
+    # assemble A (DC + drive offsets) + per-GROUP drive potentials through
+    # the ONE shared 2-D assembly (build_planar.assemble_drive_groups):
+    # every waveform, phase, frequency, offset, duty and multi-group
+    # membership the planar kernel honours is honoured here identically.
+    # SUPERSEDED in this change (L-455): the single signed-B fold that
+    # flew every drive as sin at the lowest frequency, and its >2-phase
+    # warning — the general channel kernel flies the drives as declared.
+    from ion_gym.physics.build_planar import assemble_drive_groups
+    A, drives = assemble_drive_groups(spec, bases, v_basis=1e4)
+    # back-compat Bk: the sin drives as (B, freq_hz, phase_deg) tuples
+    Bk = [(B, gg.frequency_hz, gg.phase_deg) for B, gg in drives
+          if gg.waveform == "sin"]
     Ex, Ey = _grad2d(np.ascontiguousarray(A), h)
-    model = PlanarModel(A, Bk, ele0, Ex, Ey, h, spec, el_bands=bands)
+    model = PlanarModel(A, Bk, ele0, Ex, Ey, h, spec, el_bands=bands,
+                        drives=drives)
     # Axial extent comes from the SPEC DECLARATION only (an earlier
     # version measured the mesh z-bounds, and the app
     # quad's rods are 1 mm cross-section TOKENS — it drew 1 mm rods.

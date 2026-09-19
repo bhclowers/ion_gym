@@ -1,7 +1,7 @@
 {
  "schema": "ion_gym.assembly/1",
  "name": "funnel_hexapole",
- "notes": "v8 (2026-09-05): PI clarification of the gap ruling \u2014 the physical gap between ring_19 and the rods STAYS, and the HEXAPOLE covers it, because the gap must fly at the hex stage's gas, not the funnel's 2.5 Torr. Funnel domain ends at ring_19's downstream face (width 38.6 -> 37.7; electrodes/voltages untouched). Hexapole domain 49.95 -> 50.85 with EVERY electrode translated +0.9 mm local z \u2014 a pure translation: rod span, wire ladder pitch, radii and tilt slope all EXACTLY as the PI's upload; rods start at world 38.6 as originally, wires flush at the new depth. Seam 38.6 -> 37.7; exit 88.55 UNCHANGED. HEX CLOCK SET BY PI 2026-09-05: integration.t_max_us = 3000. RECORD BUDGET NOTE: at dt 1 ns and rec_every 10 a full 3000 us flight wants 300k records vs the deck's max_records 100000 \u2014 the buffer refusal will name it if an ion flies that long; raising max_records or rec_every is the PI's call. FLIGHT PARAMETERS SET BY PI 2026-09-05 (pasted Ion tab): 25 ions per m/z x [200,400,600] = 75 ions, disc r 4 at x0 4, KE 0.1-1.9 eV, T 0 K, launch +x (axial). beam.mz follows the first mass; mz_per_ion is generated per the blocks convention at load.",
+ "notes": "v8 (2026-09-05): PI clarification of the gap ruling \u2014 the physical gap between ring_19 and the rods STAYS, and the HEXAPOLE covers it, because the gap must fly at the hex stage's gas, not the funnel's 2.5 Torr. Funnel domain ends at ring_19's downstream face (width 38.6 -> 37.7; electrodes/voltages untouched). Hexapole domain 49.95 -> 50.85 with EVERY electrode translated +0.9 mm local z \u2014 a pure translation: rod span, wire ladder pitch, radii and tilt slope all EXACTLY as the PI's upload; rods start at world 38.6 as originally, wires flush at the new depth. Seam 38.6 -> 37.7; exit 88.55 UNCHANGED. HEX CLOCK SET BY PI 2026-09-05: integration.t_max_us = 3000. RECORD BUDGET NOTE: at dt 1 ns and rec_every 10 a full 3000 us flight wants 300k records vs the deck's max_records 100000 \u2014 the buffer refusal will name it if an ion flies that long; raising max_records or rec_every is the PI's call. FLIGHT PARAMETERS SET BY PI 2026-09-05 (pasted Ion tab): 25 ions per m/z x [200,400,600] = 75 ions, disc r 4 at x0 4, KE 0.1-1.9 eV, T 0 K, launch +x (axial). beam.mz follows the first mass; mz_per_ion is generated per the blocks convention at load. | 2026-09-15 (L-448): hexapole stage rec_every 10 -> 31. At dt_ns=1 over t_max_us=3000 it wanted 300,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- so this shipped fixture was recording only the first 1000 us of a 3000 us flight. Thinning keeps the whole flight at a third of the sample rate; raising the cap instead would have kept the rate and tripled the record.",
  "stages": [
   {
    "name": "funnel",
@@ -1913,7 +1913,7 @@
     "integration": {
      "dt_ns": 1,
      "t_max_us": 3000,
-     "rec_every": 10,
+     "rec_every": 31,
      "max_records": 100000,
      "record_channels": [
       "speed",

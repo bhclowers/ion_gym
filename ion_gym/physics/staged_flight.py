@@ -200,7 +200,7 @@ def check_seam(region_a: Region, region_b: Region, mz_Da,
     THE BOUND: |E(t)| = |A + sum_k w_k(t) B_k| <= sqrt(sum_c (|A_c| +
     sum_k W_k |B_k,c|)^2) pointwise, with W_k the channel's amplitude
     bound (|amp|+|off| for sin/cos/square at |base|<=1; |amp|*max|tab|
-    + |off| for tables; rf_V for the r-z single drive; gate channels at
+    + |off| for tables; unit-peak drive channels for r-z; gate channels at
     full). Rigorous for every phase, waveform and duty — an ion can
     never see more. A pass is therefore a real pass; a fail states the
     ceiling.
@@ -262,12 +262,15 @@ def check_seam(region_a: Region, region_b: Region, mz_Da,
         k_plane = int(round(region_a.exit.value_mm / h))
         k_plane = max(0, min(EzA.shape[0] - 1, k_plane))
         dc_mag = np.sqrt(EzA[k_plane] ** 2 + EuA[k_plane] ** 2) * 1e-3
-        # single sinusoidal drive: s(t) = sin(wt) * rf_V on the per-volt
-        # B basis (tracer_rz), plus the gate channel at g in {0,1} —
-        # included at full whenever the gate can arm (tau_gate >= 0).
-        rf = float(f.get("rf_V", 0.0))
-        bz = np.abs(EzA[k_plane]) + abs(rf) * np.abs(f["EzB"][k_plane])
-        bu = np.abs(EuA[k_plane]) + abs(rf) * np.abs(f["EuB"][k_plane])
+        # drive channels: E = EA + sum_k w_k(t) E_k with |w_k| <= 1 (the
+        # amplitude is baked into each channel basis, tracer_rz), plus
+        # the gate channel at g in {0,1} — included at full whenever the
+        # gate can arm (tau_gate >= 0).
+        bz = np.abs(EzA[k_plane])
+        bu = np.abs(EuA[k_plane])
+        for _k in range(np.asarray(f["EzK"]).shape[0]):
+            bz = bz + np.abs(f["EzK"][_k][k_plane])
+            bu = bu + np.abs(f["EuK"][_k][k_plane])
         if float(f.get("tau_gate", -1.0)) >= 0.0:
             bz = bz + np.abs(f["EzG"][k_plane])
             bu = bu + np.abs(f["EuG"][k_plane])
@@ -465,7 +468,7 @@ def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
     n, kind, _nc, bface = _fly_planar(
         x0, y0, float(v0_mm_us[0]), float(v0_mm_us[1]), float(tob_us),
         float(mz_Da), f["ExA"], f["EyA"], f["ExK"], f["EyK"],
-        f["ch_kind"], f["ch_om"], f["ch_ph"],
+        f["ch_kind"], f["ch_om"], f["ch_ph"], f["ch_duty"],
         f["tab_t"], f["tab_v"], f["tab_off"],
         f["ele"].astype(_np.float64), float(f["h_mm"]), acc,
         float(reg.dt_ns) * 1e-3, float(reg.t_max_us),
@@ -696,9 +699,12 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
         float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         float(v0_mm_us[0]), float(v0_mm_us[1]), float(v0_mm_us[2]),
         float(tob_us), float(mz_Da),
-        f["EzA"], f["EuA"], f["EzB"], f["EuB"], f["EzG"], f["EuG"],
+        f["EzA"], f["EuA"], f["EzK"], f["EuK"],
+        f["ch_kind"], f["ch_om"], f["ch_ph"], f["ch_duty"],
+        f["tab_t"], f["tab_v"], f["tab_off"],
+        f["EzG"], f["EuG"],
         f["tau_gate"], f["ele"], f["u0"], f["h_mm"], acc,
-        f["rf_V"], f["om_rad_us"], dt, float(reg.t_max_us),
+        dt, float(reg.t_max_us),
         g["T_k"], g["P_pa"], g["sigma_m2"], g["c_star"], g["c_bar"],
         g["sig1d"], g["m_gas"], rec, int(reg.rec_every), int(seed),
         *f13, bnd_on, bnd_val,

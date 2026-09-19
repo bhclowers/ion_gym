@@ -26,7 +26,8 @@ from ion_gym.io.sim_spec import SimSpec, OPTIONAL_CHANNELS, BASE_CHANNELS
 from ion_gym.physics.sim_build import generate_births
 from ion_gym.physics.solver2d import solve_laplace
 from ion_gym.physics.ionbench import build_field_aware
-from ion_gym.physics.build_planar import electrode_mask          # shape rasterizer (shared)
+from ion_gym.physics.build_planar import (electrode_mask,        # shape rasterizer (shared)
+                                          K_SIN, K_SQUARE)       # channel kinds (shared)
 from ion_gym.physics.symmetry import (verify_symmetry, verify_symmetry_shapes, reduction_summary)
 from ion_gym.physics.collision3d import (E_CHG, KG_AMU, KB, gas_mass)
 from ion_gym.physics.tracer_rz import _fly_rec_full   # THE r-z tracer
@@ -83,7 +84,8 @@ class RZModel:
     # An r-z model's plane is r-z.  It is NOT xy -- saying so was the bug.
     PLANES = ('rz',)
 
-    def __init__(self, A, B, ele, EzA, EuA, EzB, EuB, u0, mm, rf_V, om,
+    def __init__(self, A, ele, EzA, EuA, EzK, EuK, ch_kind, ch_om,
+                 ch_ph, ch_duty, drives, u0, mm,
                  T_k, P_pa, sigma_m2, m_gas, spec, *,
                  EzG=None, EuG=None, tau_gate=-1.0):
         self.A = A
@@ -91,14 +93,22 @@ class RZModel:
         # Named by the deck's own electrode names.
         self.el_masks = el_masks_from_labels(
             ele, getattr(spec.geometry, 'electrodes', None))
-        self.B = B
         self.ele = ele
         self.EzA, self.EuA = EzA, EuA
-        self.EzB, self.EuB = EzB, EuB
+        # DRIVE CHANNELS (L-455; supersedes the single rf_V*sin*B fold):
+        # EzK/EuK are (K, nz, 2nr-1) per-GROUP aware fields with the
+        # group amplitude baked in; the kernel weights each with the
+        # UNIT waveform (build_planar._wave_eval). `drives` keeps the
+        # (folded potential, RFGroupSpec) pairs for display and export.
+        self.EzK, self.EuK = EzK, EuK
+        self.ch_kind = np.asarray(ch_kind, np.int64)
+        self.ch_om = np.asarray(ch_om, np.float64)
+        self.ch_ph = np.asarray(ch_ph, np.float64)
+        self.ch_duty = np.asarray(ch_duty, np.float64)
+        self.drives = drives
+        self.chan_phi = [B0 for B0, _g in drives]
         self.u0 = u0
         self.mm_per_gu = mm
-        self.rf_V = rf_V
-        self.om_rad_us = om
         # gate channel: step(t - tau_gate) * G; zeros/-1 = no gate
         self.EzG = EzG if EzG is not None else np.zeros_like(EzA)
         self.EuG = EuG if EuG is not None else np.zeros_like(EuA)
@@ -107,28 +117,52 @@ class RZModel:
         self.sigma_m2, self.m_gas = sigma_m2, m_gas
         self.spec = spec
 
+    @property
+    def Bk(self):
+        """Sin drives as (B_phi, freq_hz, phase_deg) — the planar-model
+        surface pe_view keys RF presence on."""
+        return [(B0, g.frequency_hz, g.phase_deg) for B0, g in self.drives
+                if g.waveform == "sin"]
+
+    def _w_at_phase(self, k, phase_rad):
+        """Unit waveform of channel k with its own clock at `phase_rad`
+        (mirrors the kernel: sin, or square with duty)."""
+        a = phase_rad + float(self.ch_ph[k])
+        if int(self.ch_kind[k]) == K_SQUARE:
+            d = float(self.ch_duty[k])
+            if d == 0.5:
+                return 1.0 if math.sin(a) >= 0.0 else -1.0
+            return 1.0 if (a / (2.0 * math.pi)) % 1.0 < d else -1.0
+        return math.sin(a)
+
     # ---- plotting surfaces (mirrored to +-r), the shared r-z model API
     def extent(self):
         nz, nr = self.A.shape
         return np.arange(nz) * self.mm_per_gu, np.arange(nr) * self.mm_per_gu
 
     def potential_image(self, rf_phase=None):
+        """DC potential (rf_phase=None), or the drive snapshot with every
+        channel's own waveform evaluated at `rf_phase` on its clock (the
+        single-sin deck reproduces the old sin(phase)*rf_V*B exactly)."""
         z, r = self.extent()
         phi = self.A.copy()
         if rf_phase is not None:
-            phi = phi + math.sin(rf_phase) * self.rf_V * self.B
+            for k, B0 in enumerate(self.chan_phi):
+                phi = phi + self._w_at_phase(k, float(rf_phase)) * B0
         r_full = np.concatenate([-r[::-1], r[1:]])
         img = np.concatenate([phi[:, ::-1], phi[:, 1:]], axis=1)
         em = np.concatenate([self.ele[:, ::-1], self.ele[:, 1:]], axis=1)
         return z, r_full, img, em
 
-    def pe_surface(self, mz=None, charge=1, plane="rz"):
+    def pe_surface(self, mz=None, charge=1, plane="rz", t_us=0.0):
         """Effective (adiabatic) potential-energy landscape in eV: DC
         potential energy + the RF Dehmelt pseudopotential
-        V_pseudo = q|E0|^2/(4 m Omega^2). The r-z path keeps B as a UNIT
-        basis with the amplitude applied at fly time, so the cycle-peak RF
-        field is |E0| = rf_V * |grad B|. Mass-dependent (heavier ->
-        shallower well); valid in the adiabatic regime (Mathieu q ≲ ~0.4).
+        V_pseudo = q|E0|^2/(4 m Omega^2), per drive group by its
+        resolved pe_mode exactly as the planar model: sin -> pseudo
+        (quadrature-composed per frequency), square -> pseudo carries the
+        digital-trap harmonic factor pi^2/6, 'instant' drives add their
+        real potential at t_us. Mass-dependent (heavier -> shallower
+        well); valid in the adiabatic regime (Mathieu q ≲ ~0.4).
         Returns (z, r_full, PE_eV, em) mirrored to +-r like
         potential_image."""
         if plane not in self.PLANES:
@@ -144,18 +178,63 @@ class RZModel:
         r_full = np.concatenate([-r[::-1], r[1:]])
         img = charge * np.concatenate([self.A[:, ::-1], self.A[:, 1:]],
                                       axis=1)
-        if self.rf_V != 0.0 and self.om_rad_us > 0.0:
-            e0 = self.rf_V * np.hypot(self.EzB, self.EuB)         # V/m
-            om = self.om_rad_us * 1e6                             # rad/s
-            m_kg = mz * 1.6605402e-27
-            v_pseudo = (charge * 1.602176634e-19) * e0 ** 2 \
-                / (4.0 * m_kg * om ** 2)
-            img = img + charge * v_pseudo
+        m_kg = mz * 1.6605402e-27
+        q_c = charge * 1.602176634e-19
+        # sin channels sharing a frequency compose in QUADRATURE:
+        # E(t) = sin(wt) Es + cos(wt) Ec with Es = sum cos(ph) E_k,
+        # Ec = sum sin(ph) E_k, so the Dehmelt |E0|^2 = |Es|^2 + |Ec|^2
+        # (the 0/180 funnel pair reduces to the old rf_V*(B_A - B_B)).
+        quad = {}
+        for k, (B0, g) in enumerate(self.drives):
+            if int(self.ch_kind[k]) != K_SIN or self.ch_om[k] <= 0.0:
+                continue
+            if g.resolved_pe_mode() != "pseudo":
+                continue
+            ent = quad.setdefault(round(float(self.ch_om[k]), 12),
+                                  [np.zeros_like(self.EzA),
+                                   np.zeros_like(self.EzA),
+                                   np.zeros_like(self.EzA),
+                                   np.zeros_like(self.EzA)])
+            c, sph = math.cos(self.ch_ph[k]), math.sin(self.ch_ph[k])
+            ent[0] += c * self.EzK[k]
+            ent[1] += c * self.EuK[k]
+            ent[2] += sph * self.EzK[k]
+            ent[3] += sph * self.EuK[k]
+        for om_us, (esz, esu, ecz, ecu) in quad.items():
+            om = om_us * 1e6                                      # rad/s
+            e0_sq = esz ** 2 + esu ** 2 + ecz ** 2 + ecu ** 2     # (V/m)^2
+            img = img + charge * q_c * e0_sq / (4.0 * m_kg * om ** 2)
+        for k, (B0, g) in enumerate(self.drives):
+            mode = g.resolved_pe_mode()
+            if mode == "instant":
+                # the slow-drive picture: the real potential at t_us
+                w = self._w_at_phase(k, float(self.ch_om[k]) * t_us)
+                img = img + charge * w * np.concatenate(
+                    [B0[:, ::-1], B0[:, 1:]], axis=1)
+            elif int(self.ch_kind[k]) == K_SQUARE and self.ch_om[k] > 0.0:
+                # digital (square) pseudo: harmonic sum factor pi^2/6,
+                # per channel (cross-channel square interference at one
+                # frequency is not composed — same scope as planar)
+                om = float(self.ch_om[k]) * 1e6
+                e0_sq = self.EzK[k] ** 2 + self.EuK[k] ** 2
+                img = img + charge * q_c * e0_sq * (math.pi ** 2 / 6.0) \
+                    / (4.0 * m_kg * om ** 2)
         em = np.concatenate([self.ele[:, ::-1], self.ele[:, 1:]], axis=1)
         return z, r_full, img, em
 
     def efield_magnitude(self):
-        return self.rf_V * np.hypot(self.EzB, self.EuB)
+        """Drive |E| at the sin-reference peak (V/m), matching the planar
+        convention: sin channels at cos(phase) — the exact quadrature
+        snapshot — squares at +1. The single-sin deck reproduces the old
+        rf_V * |grad B| bit-for-bit."""
+        ez = np.zeros_like(self.EzA)
+        eu = np.zeros_like(self.EuA)
+        for k in range(len(self.chan_phi)):
+            w = (math.cos(self.ch_ph[k])
+                 if int(self.ch_kind[k]) == K_SIN else 1.0)
+            ez = ez + w * self.EzK[k]
+            eu = eu + w * self.EuK[k]
+        return np.hypot(ez, eu)
 
 
 def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
@@ -306,14 +385,16 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
                       f"and cross-session reuse are unavailable until "
                       f"the cache directory is writable.")
 
-    # assemble A (DC) + RF basis from resolved GROUPS. DC and RF are
-    # independent: every electrode's dc always applies; RF membership is
-    # via its resolved group (named rf_group, or legacy fields).
+    # assemble A (DC + drive offsets) + per-GROUP drive channels. DC and
+    # drives are independent: every electrode's dc always applies; drive
+    # membership is via EVERY named group (the first-group-only read and
+    # the single signed-B fold were the L-455 defect this replaces). A
+    # group's offset_v is a STATIC shift of its members (V(t) =
+    # amplitude_v * w(t) + offset_v), so it folds into A exactly, for
+    # every waveform kind and even when amplitude_v is 0.
     A = np.zeros((nz, nr))
-    # collect per-group bases keyed by (freq, phase)
-    gbases = {}
-    rf_V = 0.0
-    om = 0.0
+    gmap = {gr.name: gr for gr in (g.rf_groups or [])}
+    chan_B, chan_obj, chan_order = {}, {}, []
     # GATE channel (for e.g. CDMS ELIT gating): a group with a 2-point
     # hold table [t0, tau] -> [v0, v1] is a STEP; its members contribute
     # amp*(v1 - v0) to the gate basis G, applied from tau on. Exactly
@@ -329,6 +410,8 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
         for gr in (g.rf_groups or []):
             if gr.waveform != "table" or gr.name not in (el.rf_groups or []):
                 continue
+                # (membership for the gate is the RAW rf_groups list, as
+            # before; the drive channels below use group_names())
             tt, tv = list(gr.table_t_us or []), list(gr.table_v or [])
             if len(tt) != 2 or len(tv) != 2 or gr.interp != "hold":
                 raise ValueError(
@@ -344,50 +427,83 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
                     "put all gated electrodes on tables sharing one tau.")
             tau_gate = tt[1]
             G = G + gr.amplitude_v * (tv[1] - tv[0]) * fa
-        amp, freq, phase = g.electrode_rf(el)
-        if amp != 0.0 and freq != 0.0 and getattr(
-                next((x for x in (g.rf_groups or [])
-                      if x.name in (el.rf_groups or [])), None),
-                "waveform", "sin") == "table":
-            continue          # table groups are the gate, not sin RF
-        if amp != 0.0 and freq != 0.0:
-            key = (round(freq, 3), round(phase, 3))
-            gbases.setdefault(key, [np.zeros((nz, nr)), amp])
-            gbases[key][0] += fa
-            rf_V = max(rf_V, amp)
-            om = freq * 1e-6 * 2 * math.pi
-    # The r-z tracer flies ONE RF basis B with a two-phase sign (0/180).
-    # For the common funnel/quad case (two groups 180 apart) this is
-    # exact: fold the two phase groups into +/- B. For >2 distinct phases
-    # (a travelling wave) the single-B tracer is insufficient — that needs
-    # the multi-B tracer extension (flagged below); we assemble the
-    # dominant two-phase B and warn.
-    B = np.zeros((nz, nr))
-    phases = sorted({k[1] for k in gbases})
-    for (freq, phase), (basis, amp) in gbases.items():
-        sign = 1.0 if (phase % 360.0) < 90.0 or (phase % 360.0) >= 270.0 \
-            else -1.0
-        B = B + sign * basis
-    if len(phases) > 2:
-        import warnings
-        warnings.warn(
-            "r-z build: >2 RF phases (travelling wave) folded into a "
-            "two-phase B — the single-B tracer approximates it. Multi-B "
-            "travelling-wave tracer is the next extension.")
+        for gname in el.group_names():
+            if gname not in gmap:
+                raise ValueError(
+                    f"electrode {el.name!r} names drive group {gname!r} "
+                    f"not in geometry.rf_groups ({sorted(gmap)})")
+            drv = gmap[gname]
+            if drv.waveform == "table":
+                continue          # table groups are the gate, handled above
+            drv.validate()
+            off = float(getattr(drv, "offset_v", 0.0))
+            if off:
+                A = A + off * fa
+            if drv.amplitude_v == 0.0:
+                continue
+            if drv.name not in chan_B:
+                chan_B[drv.name] = np.zeros((nz, nr))
+                chan_obj[drv.name] = drv
+                chan_order.append(drv.name)
+            # amplitude BAKED into the channel potential; the kernel's
+            # w(t) is the UNIT waveform (frequency 0 is NOT skipped —
+            # sin/square at 0 Hz are constants the kernel evaluates)
+            chan_B[drv.name] += drv.amplitude_v * fa
+    drives = [(chan_B[n], chan_obj[n]) for n in chan_order]
 
     Z_mm = np.arange(nz) * h
     U_mm = np.arange(nr) * h
     _, Ue, EzA, EuA = build_field_aware(Z_mm, U_mm, A, ele,
                                         symmetry="cylindrical")
-    _, _, EzB, EuB = build_field_aware(Z_mm, U_mm, B, ele,
-                                       symmetry="cylindrical")
+    EzK_l, EuK_l = [], []
+    for B0, _drv in drives:
+        _, _, Ez_k, Eu_k = build_field_aware(Z_mm, U_mm, B0, ele,
+                                             symmetry="cylindrical")
+        EzK_l.append(Ez_k)
+        EuK_l.append(Eu_k)
+    EzK = (np.ascontiguousarray(np.stack(EzK_l)) if EzK_l
+           else np.zeros((0,) + EzA.shape))
+    EuK = (np.ascontiguousarray(np.stack(EuK_l)) if EuK_l
+           else np.zeros((0,) + EuA.shape))
+    ch_kind = np.array([K_SQUARE if d.waveform == "square" else K_SIN
+                        for _B, d in drives], np.int64)
+    ch_om = np.array([d.frequency_hz * 1e-6 * 2 * math.pi
+                      for _B, d in drives], np.float64)
+    ch_ph = np.array([math.radians(d.phase_deg) for _B, d in drives],
+                     np.float64)
+    ch_duty = np.array([float(d.duty) for _B, d in drives], np.float64)
     _, _, EzG, EuG = build_field_aware(Z_mm, U_mm, G, ele,
                                        symmetry="cylindrical")
     col = spec.collisions
-    return RZModel(A, B, ele, EzA, EuA, EzB, EuB, Ue[0], h, rf_V, om,
+    return RZModel(A, ele, EzA, EuA, EzK, EuK, ch_kind, ch_om, ch_ph,
+                   ch_duty, drives, Ue[0], h,
                    col.T_k, col.P_pa, col.sigma_m2,
                    gas_mass(col.gas) if col.enabled else 4.0, spec,
                    EzG=EzG, EuG=EuG, tau_gate=tau_gate)
+
+
+def unsupported_drive_features(spec):
+    """Declared drive features the r-z kernel does NOT apply: NONE, as of
+    2026-09-16 (L-455). The kernel flies per-group channels — every sin
+    and square group at its own amplitude, frequency, phase and duty,
+    with offset_v folded into the static field and multi-group
+    membership honoured — plus the 2-point hold-table GATE. General
+    table waveforms REFUSE at build with a diagnostic (they never fly
+    wrong), so nothing builds-but-flies-differently. Kept as the route's
+    contract statement for the field export door."""
+    return []
+
+
+
+# The r-z drive channels are sin/square only (general tables refuse at
+# build; the 2-point hold table IS the gate channel), so the kernel's
+# shared breakpoint arrays are empty — one definition, both call sites.
+_TAB_T0 = np.zeros(0, np.float64)
+_TAB_V0 = np.zeros(0, np.float64)
+
+
+def _tab_off0(model):
+    return np.zeros(model.EzK.shape[0] + 1, np.int64)
 
 
 def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
@@ -466,14 +582,17 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
 
     # DRIFT EXTENSION: residual |E| on each OPEN boundary face,
     # measured ONCE per model (the guard input). Component magnitudes
-    # are worst-case bounds: static A exactly, RF basis B at |rf_V|,
-    # gate basis G at its full gain of 1.
+    # are worst-case bounds: static A exactly, every drive channel at
+    # its unit-waveform peak |w| = 1 (amplitude is baked into the
+    # channel), gate basis G at its full gain of 1.
     from ion_gym.physics.drift_extension import (edge_field_max,
                                                  extend_ballistic)
-    _ez_c = [(model.EzA, 1.0), (model.EzB, abs(model.rf_V)),
-             (model.EzG, 1.0)]
-    _eu_c = [(model.EuA, 1.0), (model.EuB, abs(model.rf_V)),
-             (model.EuG, 1.0)]
+    _ez_c = [(model.EzA, 1.0)] \
+        + [(model.EzK[_k], 1.0) for _k in range(model.EzK.shape[0])] \
+        + [(model.EzG, 1.0)]
+    _eu_c = [(model.EuA, 1.0)] \
+        + [(model.EuK[_k], 1.0) for _k in range(model.EuK.shape[0])] \
+        + [(model.EuG, 1.0)]
     # edge_field_max is unit-passthrough and its consumer contract is
     # V/mm (extend_ballistic's edge_e_vpermm vs EDGE_FIELD_MAX_V_PER_MM);
     # the r-z basis arrays are V/m, so convert here (unconverted, the
@@ -513,9 +632,11 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
         rec = np.empty((n_rows, len(col_names)))
         n, kind, ncol, _bface = _fly_rec_full(
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], m_i,
-            model.EzA, model.EuA, model.EzB, model.EuB,
+            model.EzA, model.EuA, model.EzK, model.EuK,
+            model.ch_kind, model.ch_om, model.ch_ph, model.ch_duty,
+            _TAB_T0, _TAB_V0, _tab_off0(model),
             model.EzG, model.EuG, model.tau_gate, ee, model.u0,
-            model.mm_per_gu, acc_i, model.rf_V, model.om_rad_us, dt,
+            model.mm_per_gu, acc_i, dt,
             spec.integration.t_max_us, T, P, model.sigma_m2, c_star,
             c_bar, sig1d, mg, rec, spec.integration.rec_every,
             env.seed, *f13, bnd_on, bnd_val,
@@ -582,12 +703,14 @@ def rz_fly_fields(model: "RZModel", spec: SimSpec):
     """
     return dict(
         route="rz",
-        EzA=model.EzA, EuA=model.EuA, EzB=model.EzB, EuB=model.EuB,
+        EzA=model.EzA, EuA=model.EuA, EzK=model.EzK, EuK=model.EuK,
+        ch_kind=model.ch_kind, ch_om=model.ch_om, ch_ph=model.ch_ph,
+        ch_duty=model.ch_duty,
+        tab_t=_TAB_T0, tab_v=_TAB_V0, tab_off=_tab_off0(model),
         EzG=model.EzG, EuG=model.EuG, tau_gate=model.tau_gate,
         ele=np.concatenate([model.ele[:, :0:-1], model.ele],
                            axis=1).astype(np.float64),
         u0=model.u0, h_mm=model.mm_per_gu,
-        rf_V=model.rf_V, om_rad_us=model.om_rad_us,
         charge=int(spec.source.charge),
     )
 

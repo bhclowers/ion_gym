@@ -78,7 +78,7 @@ packages, with references). The
 numbered validation-notebook series covers field
 accuracy vs. analytic potentials, Mathieu stability, TOF timing vs.
 Wiley–McLaren, collisional thermalization, and transport/Einstein
-closure).
+closure.
 
 ## Physics provenance
 

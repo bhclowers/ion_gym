@@ -164,15 +164,36 @@ class Stl3DModel:
         a, b = [c for i, c in enumerate(coords) if i != ax]
         return a, b, emag, self.ele[tuple([slice(None)] * ax + [k])]
 
-    def pe_surface(self, mz=None, charge=1, plane="xy", index=None):
-        """PE on ANY principal plane, not just xy.
+    def pe_surface(self, mz=None, charge=1, plane="xy", index=None,
+                   t_us=0.0):
+        """PE on ANY principal plane, composed from EVERY drive channel.
 
-        This used to be hard-coded to self.A[:, :, k] -- an xy slice at mid-z.
-        That is not a property of the pseudopotential; it was just the first
-        slice anyone needed. A drag-field guide is 138 mm long and 11 mm wide:
-        the xy cut says almost nothing, and the xz cut is the one that shows
-        the axial ramp. plane is 'xy' | 'xz' | 'yz'; index is the node along
-        the normal (default: the middle).
+        plane is 'xy' | 'xz' | 'yz'; index is the node along the normal
+        (default: the electrode-dense slice via _plane_slice).
+
+        Per channel, by its resolved pe_mode (same reduction as the
+        planar and r-z models, L-456):
+          'pseudo' sin    : Dehmelt from the pack's OWN E stacks (the
+                            fields the tracer flies, so field_method is
+                            honoured here too), quadrature-composed per
+                            frequency: |E0|^2 = |Es|^2 + |Ec|^2 with
+                            Es/Ec the amp*cos/sin(phase)-weighted sums.
+          'pseudo' square : digital-trap harmonic factor pi^2/6, per
+                            channel.
+          'instant'       : the REAL potential amp*base(t_us)*phi_k --
+                            the slow travelling wave the ions surf, at
+                            LAB time t_us. This is the time knob: step
+                            t_us to watch the wave march.
+        A channel's offset_v is a static shift and is ALWAYS included
+        (charge * off * phi_k), matching the 2-D routes where it folds
+        into A. Pseudo terms need an m/z; with mz=None the surface is
+        the mass-independent part (static + offsets + instant drives).
+
+        SUPERSEDED here: the single representative RF pair (rf_V * B)
+        this method used to reduce -- it dropped every square/table
+        drive and every sin group beyond the largest pair.
+        potential_image/field_surface still draw the representative
+        pair, unchanged.
 
         Returns (a, b, PE, ele) where a,b are the in-plane coordinates in mm
         and ele is the electrode LABEL array on that plane (0 = vacuum), so a
@@ -194,22 +215,64 @@ class Stl3DModel:
         a, b = [c for i, c in enumerate(coords) if i != ax]
 
         pe = charge * self.A[sl].copy()
-        if self.rf_V and self.om_rad_us and mz:
-            # |E_RF| must be the FULL 3-D field magnitude, then sliced —
-            # NOT the in-plane gradient of the pre-sliced plane. On a yz (or
-            # xz) cut the RF field's dominant component is often NORMAL to
-            # the plane (across a SLIM gap it points along x); taking only
-            # the in-plane gradient dropped that component and collapsed the
-            # pseudopotential into a flat, truncated skirt (a yz slice
-            # visibly wrong). Gradient over all three axes with the
-            # real node spacing h, magnitude, then slice.
-            gx, gy, gz = np.gradient(self.B, self.h_mm, self.h_mm, self.h_mm)
-            emag = np.sqrt(gx * gx + gy * gy + gz * gz)      # |grad B|, per V
-            e0 = self.rf_V * emag[sl] * 1e3                  # V/m on the plane
-            om = self.om_rad_us * 1e6                        # rad/s
-            v_pseudo = ((charge * E_CHG) * e0 ** 2
-                        / (4 * (mz * KG_AMU) * om ** 2))
-            pe = pe + charge * v_pseudo
+        f = getattr(self, "fly_fields", None)
+        phis = getattr(self, "chan_phi", None)
+        grps = getattr(self, "chan_groups", None)
+        if f is None or phis is None or grps is None:
+            raise ValueError(
+                "Stl3DModel.pe_surface needs the channel surfaces the "
+                "runner attaches (fly_fields, chan_phi, chan_groups); "
+                "this model was constructed without them — build it "
+                "through build_stl3d_run, not by hand")
+        from ion_gym.physics.tracer3d import _wave_eval
+        kinds = np.asarray(f["ch_kind"])
+        # |E| terms use the pack's OWN field stacks (the fields the
+        # tracer flies, electrode-aware when the deck says so), the FULL
+        # 3-D magnitude sliced — an in-plane gradient of a pre-sliced
+        # plane drops the normal component (across a SLIM gap it points
+        # along x) and collapses the pseudopotential into a flat skirt.
+        # Pack fields are V/mm; Dehmelt below wants V/m (the 1e3).
+        m_kg = (mz * KG_AMU) if mz else None
+        quad = {}                      # om_rad_us -> [Es_x..Ec_z] slices
+        for kk, gr in enumerate(grps):
+            amp = float(f["ch_amp"][kk])
+            off = float(f["ch_off"][kk])
+            ph = float(f["ch_ph"][kk])
+            om_us = float(f["ch_om"][kk])
+            if off:
+                # offset_v is a STATIC shift of the group's members —
+                # always present, exactly as the 2-D routes fold it
+                pe = pe + charge * off * phis[kk][sl]
+            if amp == 0.0:
+                continue
+            mode = gr.resolved_pe_mode()
+            if mode == "instant":
+                o0, o1 = int(f["tab_off"][kk]), int(f["tab_off"][kk + 1])
+                w = _wave_eval(int(kinds[kk]), om_us, ph, amp, off,
+                               float(f["ch_duty"][kk]), f["tab_t"],
+                               f["tab_v"], o0, o1, float(t_us)) - off
+                pe = pe + charge * w * phis[kk][sl]
+                continue
+            if not (mz and om_us > 0.0):
+                continue               # pseudo needs a mass and a period
+            if int(kinds[kk]) == 0:    # sin: quadrature-compose per freq
+                ent = quad.setdefault(round(om_us, 12), [0.0] * 6)
+                c, sph = math.cos(ph), math.sin(ph)
+                for i2, EK in enumerate((f["ExK"], f["EyK"], f["EzK"])):
+                    ent[i2] = ent[i2] + amp * c * EK[kk][sl]
+                    ent[3 + i2] = ent[3 + i2] + amp * sph * EK[kk][sl]
+            else:                      # square/cos: per-channel Dehmelt
+                e0_sq = (f["ExK"][kk][sl] ** 2 + f["EyK"][kk][sl] ** 2
+                         + f["EzK"][kk][sl] ** 2) * (amp * 1e3) ** 2
+                fac = (math.pi ** 2 / 6.0) if int(kinds[kk]) == 2 else 1.0
+                om = om_us * 1e6
+                pe = pe + charge * ((charge * E_CHG) * e0_sq * fac
+                                    / (4 * m_kg * om ** 2))
+        for om_us, ent in quad.items():
+            e0_sq = sum(np.asarray(c2) ** 2 for c2 in ent) * 1e6
+            om = om_us * 1e6
+            pe = pe + charge * ((charge * E_CHG) * e0_sq
+                                / (4 * m_kg * om ** 2))
         return a, b, pe, self.ele[sl]
 
 
@@ -347,6 +410,28 @@ def _drive_reweight_key(spec, bases):
 _COMPOSE_GRAD_CACHE = {}
 
 
+def clear_memory_cache():
+    """Drop the composed-gradient cache. Self-clearing on a key change,
+    so it normally holds one geometry — but that one entry is every
+    electrode's DC gradient triple and is not small. Returns entries
+    dropped, matching build_planar/build_rz/build_stl."""
+    n = len(_COMPOSE_GRAD_CACHE)
+    _COMPOSE_GRAD_CACHE.clear()
+    return n
+
+
+def unsupported_drive_features(spec):
+    """Declared drive features the 3-D channel pack does NOT apply:
+    NONE, as of 2026-09-16 (L-455). A group with amplitude_v == 0 but a
+    non-zero offset_v is packed (the offset is its drive), and a table
+    group's interp is packed as declared (hold -> kind 3, linear ->
+    kind 4). Kept as the route's contract statement for the field
+    export door."""
+    return []
+
+
+
+
 def compose_drive_channels(spec, bases, verbose=False):
     """(EA, channels) for the 3-D flight from DECLARED drive groups.
 
@@ -409,7 +494,8 @@ def compose_drive_channels(spec, bases, verbose=False):
 
     # a defined-but-unused group is a spec error surfaced, not ignored
     unused = [n for n in groups if n not in used
-              and groups[n].amplitude_v]
+              and (groups[n].amplitude_v
+                   or getattr(groups[n], "offset_v", 0.0))]
     if unused:
         raise ValueError(
             f"drive groups {unused} are defined and non-zero but no "
@@ -421,6 +507,8 @@ def compose_drive_channels(spec, bases, verbose=False):
     ch_kind, ch_om, ch_ph, ch_amp, ch_off, ch_duty = ([], [], [],
                                                         [], [], [])
     tab_t, tab_v, tab_off = [], [], [0]
+    ch_name = []            # group name per channel, for consumers that
+                            # must say which drive a channel is (exports)
     ele = _ele_from_bases(spec, bases)     # metal mask for edge-aware grad
     # PROGRESS: the per-group gradient passes below are the work that runs
     # AFTER the last [vmg] line (the bases solve) — a full-grid gradient
@@ -428,8 +516,12 @@ def compose_drive_channels(spec, bases, verbose=False):
     # big multi-group scene (SLIM: 10 groups + static) that is many silent
     # seconds and reads as a hang. Announce each pass so the phase is
     # visible.
+    # a group with amplitude 0 but a non-zero offset_v still drives its
+    # members at that DC shift (w = amp*base + off), so it stays a live
+    # channel — dropping it dropped the offset (L-455)
     _active = [(nm, gr) for nm, gr in groups.items()
-               if nm in used and gr.amplitude_v]
+               if nm in used and (gr.amplitude_v
+                                  or getattr(gr, "offset_v", 0.0))]
     _ntot = len(_active) + 1               # +1 for the static field A below
     import time as _t
     # ---- DRIVE-ONLY REWEIGHT ------------------------------------
@@ -458,6 +550,8 @@ def compose_drive_channels(spec, bases, verbose=False):
             raise ValueError(
                 f"group {name!r} waveform {gr.waveform!r} unsupported; "
                 f"one of {sorted(_WAVE_KIND)}")
+        if kind == 3 and getattr(gr, "interp", "hold") != "hold":
+            kind = 4          # table-linear: interp as DECLARED (L-455)
         _cg = _rw["grads"].get(name)
         if _cg is None:
             Ex, Ey, Ez = build_field_aware_3d(group_phi[name], ele, h,
@@ -475,6 +569,7 @@ def compose_drive_channels(spec, bases, verbose=False):
         ExK.append(Ex)
         EyK.append(Ey)
         EzK.append(Ez)
+        ch_name.append(str(name))
         ch_kind.append(kind)
         ch_om.append(2.0 * math.pi * float(gr.frequency_hz) * 1e-6)
         ch_ph.append(math.radians(float(gr.phase_deg)))
@@ -505,6 +600,11 @@ def compose_drive_channels(spec, bases, verbose=False):
     if verbose:
         print(f"[compose] channel {_ntot}/{_ntot} (static DC): "
               f"gradient {_t.time() - _t0:.1f}s", flush=True)
+    # PER-GROUP POTENTIALS retained for the instant PE view (L-456): one
+    # float32 volume per driven group, in channel order — the same arrays
+    # this compose already allocated. The runner POPS them onto the
+    # display model; they never enter the staged-flight pack.
+    chan_phi_list = [group_phi[name] for name, _gr in _active]
     K = len(ch_kind)
     # empty-channel fallback: allocate ONLY when there are no channels
     # (K==0). Allocating z=zeros((K,)+shape) unconditionally wasted a full
@@ -522,6 +622,8 @@ def compose_drive_channels(spec, bases, verbose=False):
         ExK=(_stack(ExK) if K else _empty()),
         EyK=(_stack(EyK) if K else _empty()),
         EzK=(_stack(EzK) if K else _empty()),
+        ch_name=list(ch_name),
+        chan_phi=chan_phi_list,
         ch_kind=np.array(ch_kind, np.int64),
         ch_om=np.array(ch_om, np.float64),
         ch_ph=np.array(ch_ph, np.float64),
@@ -797,6 +899,8 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
                   f"node {_shift_gu[_ax]} — potentials bit-symmetric, "
                   f"E_{_c} identically zero on the plane row")
     fields = dict(ele=metal, h_mm=h, **channels)
+    # per-group potentials ride the MODEL (PE view), not the flight pack
+    _chan_phi = fields.pop("chan_phi")
     # Route tag. A staged assembly dispatches on this rather than
     # sniffing which keys happen to be present: an absent key is ambiguous
     # between "different route" and "solve incomplete", and guessing
@@ -1131,6 +1235,13 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
         f"3-D column desync: {col_names} != {spec.column_names()}")
     assert _ncol_3d == len(col_names), "3-D row width != column count"
     model.fly_fields = _fly_fields
+    # channel-aligned display surfaces for the instant PE view (L-456):
+    # potentials per group plus the RFGroupSpec each channel came from
+    # (pe_mode/waveform resolution needs the group object, and the model
+    # deliberately does not hold the whole spec)
+    model.chan_phi = _chan_phi
+    _gm = {gr.name: gr for gr in spec.geometry.rf_groups}
+    model.chan_groups = [_gm[nm] for nm in _fly_fields["ch_name"]]
     if verbose:
         nx, ny, nz = A.shape
         print(f"[stl3d] {nx}x{ny}x{nz}: voxelize {t_vox:.1f}s, "

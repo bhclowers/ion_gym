@@ -31,6 +31,7 @@ from numba import njit
 from ion_gym.physics.collision3d import _mfp_mm, _collide
 from ion_gym.physics.interp import _bilin
 from ion_gym.physics.raster2d import (_metal_nn)
+from ion_gym.physics.build_planar import _wave_eval   # THE 2-D waveform
 
 
 @njit(cache=True, nogil=True)
@@ -105,18 +106,43 @@ def _write_row(rec, k, t, x, y, z, vx, vy, vz, ez, er, ncol, m_ion, path,
 
 
 @njit(cache=True, nogil=True)
-def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzB, EuB,
+def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
+                  ch_kind, ch_om, ch_ph, ch_duty, tab_t, tab_v, tab_off,
                   EzG, EuG, tau_gate,
-                  ele, u0, mm, acc, rf_V, om, dt, t_max_us,
+                  ele, u0, mm, acc, dt, t_max_us,
                   T_k, P_pa, sigma, c_star, c_bar, sig1d, m_gas,
                   rec, rec_every, seed,
                   cs, cke, cke_x, cke_y, cke_z, cef, cea, cer, crad, cncol, cpath, ceat, cket,
                   bnd_on, bnd_val, pl_col, pl_val, pl_sgn, pl_w, pl_kind):
     """Records base kinematics + enabled optional channels every
     rec_every steps. E-field stored is in V/mm per the channel contract
-    (basis arrays are V/m; the write scale converts). Returns (nrec, kind, ncol)."""
+    (basis arrays are V/m; the write scale converts). Returns (nrec, kind, ncol).
+
+    DRIVE CHANNELS (L-455): the field is
+        E(x, r, t) = E_A + sum_k w_k(t) * E_k + step(t - tau_gate) * E_G
+    with per-group basis fields EzK/EuK (amplitude baked in) and w_k the
+    UNIT waveform build_planar._wave_eval evaluates — sin, cos,
+    square(duty), tables — on the LAB clock. This supersedes the single
+    rf_V * sin(om t) * B fold that flew every sin group at one frequency
+    and the largest amplitude, and squares as sines."""
     np.random.seed(seed)
     nx, nu = EzA.shape
+    K = ch_kind.shape[0]
+
+    def _efield(px, pr, tt):
+        gx = px / mm
+        gu = (pr - u0) / mm
+        ez = _bilin(EzA, gx, gu, nx, nu)
+        er = _bilin(EuA, gx, gu, nx, nu)
+        for k in range(K):
+            w = _wave_eval(ch_kind[k], ch_om[k], ch_ph[k], ch_duty[k],
+                           tab_t, tab_v, tab_off[k], tab_off[k + 1], tt)
+            ez = ez + w * _bilin(EzK[k], gx, gu, nx, nu)
+            er = er + w * _bilin(EuK[k], gx, gu, nx, nu)
+        if tau_gate >= 0.0 and tt >= tau_gate:
+            ez = ez + _bilin(EzG, gx, gu, nx, nu)
+            er = er + _bilin(EuG, gx, gu, nx, nu)
+        return ez * 1e-9 * acc, er * 1e-9 * acc
     t = 0.0
     ncol = 0
     step = 0
@@ -130,16 +156,9 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzB, EuB,
     eat = 0.0
     ket = 0.0
     ke_scale = 0.5 * m_ion * 1.6605402e-27 * 1e6 / 1.602176634e-19
-    # field at the birth point for row 0
-    s0 = math.sin(om * tob) * rf_V
-    g0 = 1.0 if (tau_gate >= 0.0 and tob >= tau_gate) else 0.0
+    # field at the birth point for row 0 (lab clock = tob)
     r0 = math.sqrt(y * y + z * z)
-    ez0 = (_bilin(EzA, x / mm, (r0 - u0) / mm, nx, nu)
-           + s0 * _bilin(EzB, x / mm, (r0 - u0) / mm, nx, nu)
-           + g0 * _bilin(EzG, x / mm, (r0 - u0) / mm, nx, nu)) * 1e-9 * acc
-    er0 = (_bilin(EuA, x / mm, (r0 - u0) / mm, nx, nu)
-           + s0 * _bilin(EuB, x / mm, (r0 - u0) / mm, nx, nu)
-           + g0 * _bilin(EuG, x / mm, (r0 - u0) / mm, nx, nu)) * 1e-9 * acc
+    ez0, er0 = _efield(x, r0, tob)
     # RECORDED FIELD UNITS: V/mm, per the channel contract (sim_spec
     # OPTIONAL_CHANNELS). The basis arrays EzA/EuA/... are stored in V/m
     # (ionbench.build_field_aware scales the mm-grid gradient by 1e3 so
@@ -169,15 +188,8 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzB, EuB,
         vyo = vy
         vzo = vz
         to = t
-        s = math.sin(om * (tob + t)) * rf_V
-        g = 1.0 if (tau_gate >= 0.0 and (tob + t) >= tau_gate) else 0.0
         r = math.sqrt(y * y + z * z)
-        ez = (_bilin(EzA, x / mm, (r - u0) / mm, nx, nu)
-              + s * _bilin(EzB, x / mm, (r - u0) / mm, nx, nu)
-              + g * _bilin(EzG, x / mm, (r - u0) / mm, nx, nu)) * 1e-9 * acc
-        er = (_bilin(EuA, x / mm, (r - u0) / mm, nx, nu)
-              + s * _bilin(EuB, x / mm, (r - u0) / mm, nx, nu)
-              + g * _bilin(EuG, x / mm, (r - u0) / mm, nx, nu)) * 1e-9 * acc
+        ez, er = _efield(x, r, tob + t)
         rr = r if r > 1e-9 else 1e-9
         vx += 0.5 * ez * dt
         vy += 0.5 * er * y / rr * dt
@@ -187,15 +199,8 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzB, EuB,
         z += vz * dt
         path += math.sqrt((x - xo) * (x - xo) + (y - yo) * (y - yo)
                           + (z - zo) * (z - zo))
-        s = math.sin(om * (tob + t + dt)) * rf_V
-        g = 1.0 if (tau_gate >= 0.0 and (tob + t + dt) >= tau_gate) else 0.0
         r = math.sqrt(y * y + z * z)
-        ez = (_bilin(EzA, x / mm, (r - u0) / mm, nx, nu)
-              + s * _bilin(EzB, x / mm, (r - u0) / mm, nx, nu)
-              + g * _bilin(EzG, x / mm, (r - u0) / mm, nx, nu)) * 1e-9 * acc
-        er = (_bilin(EuA, x / mm, (r - u0) / mm, nx, nu)
-              + s * _bilin(EuB, x / mm, (r - u0) / mm, nx, nu)
-              + g * _bilin(EuG, x / mm, (r - u0) / mm, nx, nu)) * 1e-9 * acc
+        ez, er = _efield(x, r, tob + t + dt)
         rr = r if r > 1e-9 else 1e-9
         vx += 0.5 * ez * dt
         vy += 0.5 * er * y / rr * dt

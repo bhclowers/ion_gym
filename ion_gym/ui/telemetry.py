@@ -15,25 +15,156 @@ ambiguity)."""
 from __future__ import annotations
 
 import gc
+import os
+import sys
 import threading
 import time
 
 
-def rss_mb() -> float:
-    """Resident set size in MB, cross-platform. psutil when present
-    (unambiguous bytes); else resource.ru_maxrss with the per-platform
-    unit applied (Linux KB, macOS/BSD bytes) instead of assuming one."""
+# Set to a type name to have every heartbeat report WHAT REFERS TO it.
+# A list so it can be retargeted from a running process without reload:
+#   from ion_gym.ui import telemetry; telemetry.REFERRER_TARGET[0] = "X"
+# Costs a gc.get_referrers walk per reading, so it is OFF by default.
+REFERRER_TARGET = [None]
+
+# Console volume. MINIMAL is the default because the heartbeat prints on
+# a 30 s timer for the life of the session and the diagnostic form --
+# holders plus a referrer block -- runs to six lines a reading, which
+# buries the [compose]/[reuse]/[seed] lines the app needs the console
+# for. VERBOSE is opt-in, for a hunt.
+#   from ion_gym.ui import telemetry
+#   telemetry.VERBOSE[0] = True
+#   telemetry.REFERRER_TARGET[0] = "Stl3DModel"   # or "dict:res"
+VERBOSE = [False]
+
+
+def _macos_phys_footprint_mb():
+    """macOS phys_footprint in MB, or None if unavailable.
+
+    THE NUMBER ACTIVITY MONITOR SHOWS, and the one that predicts a
+    freeze. psutil's rss maps to Mach `resident_size`, which EXCLUDES
+    COMPRESSED PAGES: macOS compresses inactive pages instead of
+    swapping, so a page you allocated and stopped touching leaves
+    resident_size while still being held against physical memory.
+    Measured 2026-09-14: the heartbeat read 463 MB while Activity
+    Monitor showed the same process at 20 GB, and killing it returned
+    20 GB. Three conclusions in this investigation were drawn from
+    resident_size and two of them were wrong in opposite directions.
+
+    Read via libproc proc_pid_rusage(RUSAGE_INFO_V0), whose struct is
+    a 16-byte uuid followed by ten uint64s; ri_phys_footprint is the
+    eighth of those. Returns None on ANY failure rather than a
+    substitute number — the caller labels which metric it got, so a
+    fallback is never mistaken for the real thing.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        import ctypes.util
+
+        class _RUsageV0(ctypes.Structure):
+            _fields_ = [("ri_uuid", ctypes.c_uint8 * 16),
+                        ("ri_fields", ctypes.c_uint64 * 10)]
+
+        libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        buf = _RUsageV0()
+        rc = libc.proc_pid_rusage(ctypes.c_int(os.getpid()),
+                                  ctypes.c_int(0),
+                                  ctypes.byref(buf))
+        if rc != 0:
+            return None
+        return buf.ri_fields[7] / (1024.0 ** 2)
+    except Exception:
+        return None
+
+
+def mem_reading() -> tuple:
+    """(value_mb, label). Footprint where it is the right quantity.
+
+    macOS  -> phys_footprint, labelled 'footprint'
+    else   -> psutil rss, labelled 'rss'
+    neither-> resource.ru_maxrss, labelled 'PEAK' because ru_maxrss is a
+              HIGH-WATER MARK that cannot fall; reporting it as current
+              is how a wrong number gets acted on.
+    """
+    fp = _macos_phys_footprint_mb()
+    if fp is not None:
+        return fp, "footprint"
     try:
         import psutil
-        return psutil.Process().memory_info().rss / (1024.0 ** 2)
+        return psutil.Process().memory_info().rss / (1024.0 ** 2), "rss"
     except Exception:
         import resource
-        import sys
         ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        # ru_maxrss units differ by platform; this is the documented split.
-        if sys.platform == "darwin":
-            return ru / (1024.0 ** 2)      # bytes -> MB
-        return ru / 1024.0                 # KB -> MB (Linux)
+        ru = ru / (1024.0 ** 2) if sys.platform == "darwin" else ru / 1024.0
+        return ru, "PEAK"
+
+
+def rss_mb() -> float:
+    """Memory in MB, scalar. KEPT SCALAR DELIBERATELY: sim_app's
+    _mem_cache_lines() calls this and formats it with :.0f, so returning
+    the (value, label) tuple broke the app at import of the Cache tab.
+    Callers that need the label use mem_reading(); this stays the shape
+    its existing callers expect."""
+    return mem_reading()[0]
+
+
+def array_holders(top=8):
+    """[(holder_type, mb, n_arrays)] — WHO is holding array memory.
+
+    THE WALK THAT REACHES WHAT THE OTHERS CANNOT. A numeric ndarray is
+    not GC-tracked, and CPython UNTRACKS a dict whose values are all
+    untracked, so neither a global array scan nor a container walk finds
+    arrays held in a cache dict or an instance __dict__ (both measured,
+    both returned 0 while a gigabyte was held). But an INSTANCE is
+    tracked, and its __dict__ is reachable THROUGH it -- so walking
+    objects and charging their ndarray-valued attributes reaches exactly
+    the category that has stayed invisible all session.
+
+    Attributed to the HOLDER'S TYPE, so the answer is a name to go fix,
+    not another total. Dedup by array id; views skipped via .base so a
+    slice is never charged against the buffer it borrows.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return []
+    by_type, seen = {}, set()
+
+    def charge(holder, v):
+        if type(v) is not np.ndarray or v.base is not None:
+            return
+        if id(v) in seen:
+            return
+        seen.add(id(v))
+        mb, n = by_type.get(holder, (0.0, 0))
+        by_type[holder] = (mb + v.nbytes / (1024.0 ** 2), n + 1)
+
+    for o in gc.get_objects():
+        try:
+            d = getattr(o, "__dict__", None)
+            if isinstance(d, dict) and d:
+                nm = type(o).__name__
+                for v in list(d.values()):
+                    charge(nm, v)
+                    if isinstance(v, dict):
+                        for vv in list(v.values()):
+                            charge(nm + ".dict", vv)
+                    elif isinstance(v, (list, tuple)):
+                        for vv in list(v):
+                            charge(nm + ".seq", vv)
+            elif isinstance(o, dict):
+                for v in list(o.values()):
+                    charge("<dict>", v)
+            elif isinstance(o, (list, tuple)):
+                for v in list(o):
+                    charge("<seq>", v)
+        except Exception:
+            continue
+    rows = sorted(((mb, n, k) for k, (mb, n) in by_type.items()),
+                  reverse=True)
+    return [(k, mb, n) for mb, n, k in rows[:top]]
 
 
 def _live_figures() -> int:
@@ -48,13 +179,127 @@ def _live_figures() -> int:
         return -1
 
 
-def snapshot(**context) -> dict:
-    """One telemetry reading: RSS, live-figure count, total GC object
-    count, plus any caller context (plane, model, spec name)."""
+def referrers_of(type_name, max_objs=3, depth=2):
+    """Who still points at the leaked instances of `type_name`.
+
+    THE LAST LINK. array_holders() names the OBJECT holding the memory
+    (measured: 20 live Stl3DModel instances, 16.0 GB). It cannot say why
+    they are still alive. gc.get_referrers() on one of them names what
+    refers to it, which is the thing to go and fix.
+
+    Referrers are described, never returned, because a returned referrer
+    is itself a new reference that would keep the leak alive while you
+    look at it. Frames are reported with their FUNCTION NAME: a referrer
+    that is a frame means a live call is holding the object, and a
+    referrer that is a cell means a CLOSURE captured it -- a Panel
+    callback defined per flight with the model in scope keeps that model
+    for as long as the widget lives, which is the leading hypothesis.
+    A dict referrer is reported with the attribute name the object sits
+    under, plus the type that owns that dict, so 'SimApp._model' or
+    'dict in _reuse_cache' comes out directly rather than 'a dict'.
+
+    Bounded: at most `max_objs` instances examined and `depth` levels
+    followed, so a diagnostic cannot walk the whole heap.
+    """
+    out = []
+    # "dict:KEY" targets PLAIN DICTS CARRYING THAT KEY, because the thing
+    # we now need to trace is one: the per-build state dict st = {done,
+    # res, err, ...} that pins a full model through st["res"]. Targeting
+    # by type name cannot reach it -- every dict in the process is named
+    # "dict", so the ordinary path would examine an arbitrary three of
+    # hundreds of thousands. The key IS the identity here.
+    if type_name.startswith("dict:"):
+        want = type_name.split(":", 1)[1]
+        targets = [o for o in gc.get_objects()
+                   if isinstance(o, dict) and want in o][:max_objs]
+    else:
+        targets = [o for o in gc.get_objects()
+                   if type(o).__name__ == type_name][:max_objs]
+    if not targets:
+        return [f"no live {type_name} found"]
+    out.append(f"{type_name}: examining "
+               f"{len(targets)} of the live instances")
+
+    def describe(r, obj):
+        tn = type(r).__name__
+        if tn == "frame":
+            return f"frame in {r.f_code.co_name}() — a live call holds it"
+        if tn == "cell":
+            return "cell — CAPTURED BY A CLOSURE"
+        if isinstance(r, dict):
+            key = next((k for k, v in list(r.items()) if v is obj), None)
+            owners = [o for o in gc.get_referrers(r)
+                      if getattr(o, "__dict__", None) is r]
+            if owners:
+                return f"{type(owners[0]).__name__}.{key} (attribute)"
+            return f"dict[{key!r}]"
+        if isinstance(r, (list, tuple, set)):
+            return f"{tn} of len {len(r)}"
+        return tn
+
+    for i, obj in enumerate(targets, 1):
+        seen = {id(obj)}
+        level = [obj]
+        for d in range(depth):
+            nxt, lines = [], []
+            for o in level:
+                for r in gc.get_referrers(o):
+                    if id(r) in seen or r is level or r is targets:
+                        continue
+                    seen.add(id(r))
+                    lines.append(describe(r, o))
+                    nxt.append(r)
+            if not lines:
+                break
+            uniq = sorted(set(lines))
+            out.append(f"  [{i}] depth {d + 1}: " + "; ".join(uniq[:6]))
+            level = nxt[:12]
+            del nxt
+        del level, seen
+    del targets
+    return out
+
+
+def snapshot(collect: bool = True, **context) -> dict:
+    """One telemetry reading: RSS, live-figure count before AND after a
+    cyclic collection, total GC object count, plus caller context.
+
+    WHY THE COLLECT (2026-09-14). Measured on a live session: RSS climbed
+    ~365 MB per flight while `figures` rose by exactly 4 and never fell,
+    `gc_objects` stayed flat at ~630k, and dropping every stored run
+    freed 30 MB out of 10.4 GB. Four is the number of Plotly panes in the
+    app, so each flight leaves the previous four figures alive, each
+    holding its copy of the plotted arrays.
+
+    Plotly figures contain REFERENCE CYCLES (traces and layout hold
+    back-references to the parent), so they are never freed by
+    refcounting — only by the cyclic collector, which nothing in the app
+    calls. That gives two possibilities with completely different fixes,
+    and this reading separates them in ONE LINE:
+
+      figs=22->6   collectable. They were garbage all along and the app
+                   simply never collected. Fix is a collect on replot.
+      figs=22->22  NOT collectable. Something still holds a live
+                   reference (Panel's model registry, the Bokeh
+                   document). Fix is a real teardown on replot.
+
+    The collect costs a pause proportional to the heap — noticeable on a
+    multi-GB process, which is why it is a parameter and not forced. It
+    runs on the monitor's own daemon thread, never the Panel event loop.
+    """
+    _mem, _lbl = mem_reading()
+    figs_pre = _live_figures()
+    n_collected = gc.collect() if collect else None
     snap = {"t": time.strftime("%H:%M:%S"),
-            "rss_mb": rss_mb(),
-            "figures": _live_figures(),
-            "gc_objects": len(gc.get_objects())}
+            "rss_mb": _mem, "rss_label": _lbl,
+            "figures_pre": figs_pre,
+            "figures": _live_figures() if collect else figs_pre,
+            "collected": n_collected,
+            "gc_objects": len(gc.get_objects()),
+            "holders": array_holders() if VERBOSE[0] else None,
+            "referrers": (referrers_of(REFERRER_TARGET[0])
+                          if (VERBOSE[0] and REFERRER_TARGET[0])
+                          else None)}
     snap.update(context)
     return snap
 
@@ -62,10 +307,32 @@ def snapshot(**context) -> dict:
 def format_line(snap: dict, delta_mb: float | None = None) -> str:
     d = f" Δ{delta_mb:+.0f}MB" if delta_mb is not None else ""
     ctx = " ".join(f"{k}={v}" for k, v in snap.items()
-                   if k not in ("t", "rss_mb", "figures", "gc_objects"))
-    return (f"[mem] {snap['t']} rss~{snap['rss_mb']:.0f}MB{d} "
-            f"figs={snap['figures']} objs={snap['gc_objects']:,}"
+                   if k not in ("t", "rss_mb", "figures", "figures_pre",
+                                "collected", "gc_objects",
+                                "rss_label", "holders",
+                                "referrers"))
+    pre, post = snap.get("figures_pre"), snap["figures"]
+    figs = (f"{post}" if pre is None or pre == post
+            else f"{pre}->{post}")
+    col = ("" if snap.get("collected") is None
+           else f" gc={snap['collected']:,}")
+    head = (f"[mem] {snap['t']} {snap.get('rss_label', 'rss')}"
+            f"~{snap['rss_mb']:.0f}MB{d} "
+            f"figs={figs}{col} objs={snap['gc_objects']:,}"
             + (f" | {ctx}" if ctx else ""))
+    # WHO is holding it, printed under the line. The whole point of this
+    # build: a total tells you there is a problem, a holder tells you
+    # where to go.
+    if not VERBOSE[0]:
+        return head
+    ref = snap.get("referrers") or []
+    hold = snap.get("holders") or []
+    if hold:
+        head += "\n       holders: " + "; ".join(
+            f"{k} {mb:.0f}MB x{n}" for k, mb, n in hold if mb >= 1.0)
+    for line in ref:
+        head += "\n       " + line
+    return head
 
 
 class MemoryHeartbeat:

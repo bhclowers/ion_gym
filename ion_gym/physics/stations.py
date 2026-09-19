@@ -230,25 +230,50 @@ def station_hits(traj, cols, station, *, t_min_us=1.0e-3):
     return hits
 
 
-def first_detection(traj, cols, spec, *, name=None, t_min_us=1.0e-3):
-    """First in-window crossing of the named "detect" station (or the
-    only detect station when name is None).  Returns the hit dict or
-    None (a MISS).  Refuses ambiguity and absent stations by name --
-    a detector the deck does not declare cannot be silently invented.
+def first_station_crossing(traj, cols, spec, *, name=None, kind=None,
+                           t_min_us=1.0e-3):
+    """First in-window crossing of ONE declared station, of ANY kind
+    (detect or impact_plane -- the crossing scan is the same plane
+    geometry either way).  `name`/`kind` filter the declared stations;
+    exactly one must match.  Returns the hit dict or None (a MISS).
+    Refuses ambiguity and absent stations by name -- a station the deck
+    does not declare cannot be silently invented.
     """
-    dets = [st for st in spec.stations if st.kind == "detect"
-            and (name is None or st.name == name)]
-    if not dets:
+    sts = [st for st in spec.stations
+           if (kind is None or st.kind == kind)
+           and (name is None or st.name == name)]
+    want = f"'{kind}' " if kind is not None else ""
+    if not sts:
         raise ValueError(
-            "first_detection: the spec declares no matching 'detect' "
-            f"station (name={name!r}); detection planes live in the "
-            "DECK, not in analysis kwargs")
-    if len(dets) > 1:
+            f"first_station_crossing: the spec declares no matching "
+            f"{want}station (name={name!r}); station planes live in the "
+            f"DECK, not in analysis kwargs")
+    if len(sts) > 1:
         raise ValueError(
-            f"first_detection: {len(dets)} detect stations match "
+            f"first_station_crossing: {len(sts)} {want}stations match "
             f"name={name!r}; pass the station name explicitly: "
-            f"{[d.name for d in dets]}")
-    for h in station_hits(traj, cols, dets[0], t_min_us=t_min_us):
+            f"{[d.name for d in sts]}")
+    for h in station_hits(traj, cols, sts[0], t_min_us=t_min_us):
         if h["in_window"]:
             return h
     return None
+
+
+def first_detection(traj, cols, spec, *, name=None, t_min_us=1.0e-3):
+    """First in-window crossing of the named "detect" station (or the
+    only detect station when name is None).  The detect-only contract:
+    analyses that mean "the detector" refuse a name that is actually an
+    impact plane.  Same scan as first_station_crossing(kind="detect").
+    """
+    try:
+        return first_station_crossing(traj, cols, spec, name=name,
+                                      kind="detect", t_min_us=t_min_us)
+    except ValueError as e:
+        # keep this function's long-standing diagnostic wording (callers
+        # and their tests match on it), cause chained
+        if "declares no matching" in str(e):
+            raise ValueError(
+                "first_detection: the spec declares no matching 'detect' "
+                f"station (name={name!r}); detection planes live in the "
+                "DECK, not in analysis kwargs") from e
+        raise

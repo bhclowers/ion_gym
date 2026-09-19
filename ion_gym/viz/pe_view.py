@@ -40,6 +40,28 @@ from ion_gym.physics.ion_envelope import FATE_COLOR  # noqa: F401
 _PLANE_TRAJ_AXES = {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("y", "z")}
 _PLANE_NORMAL_AXIS = {"xy": "z", "xz": "y", "yz": "x"}
 
+# THE default 3-D view every PE figure has always used; camera=None
+# resolves to exactly this (the UI's view checkbox off, the API default).
+_PE_CAMERA_DEFAULT = dict(eye=dict(x=1.5, y=-1.7, z=0.9))
+
+
+def camera_eye(azim_deg=-48.6, elev_deg=21.7, dist=2.44, ortho=False):
+    """Plotly scene camera from viewing angles: azimuth about +z from +x
+    toward +y, elevation above the xy plane, dist = |eye| in plotly's
+    normalized units. The DOCUMENTED defaults reproduce the historical
+    eye (1.5, -1.7, 0.9) to 3 significant figures; camera=None in
+    pe_figure_3d bypasses this and uses that eye exactly."""
+    import math as _m
+    az, el = _m.radians(float(azim_deg)), _m.radians(float(elev_deg))
+    d = float(dist)
+    eye = dict(x=d * _m.cos(el) * _m.cos(az),
+               y=d * _m.cos(el) * _m.sin(az),
+               z=d * _m.sin(el))
+    cam = dict(eye=eye)
+    if ortho:
+        cam["projection"] = dict(type="orthographic")
+    return cam
+
 
 def plane_axis_names(plane):
     """(a_name, b_name) for a plane's in-plane axes, matching the order
@@ -78,8 +100,72 @@ def scale_pe(PE, mode="linear", factor=1.0, quantity=("PE", "eV")):
                     else f"{_q} x{f:g} [{_u}]")
 
 
+def slice_index(model, plane, slice_mm):
+    """Node index along `plane`'s NORMAL axis for a slice position in mm
+    (canonical/world frame, mirror planes at 0 -- the frame the UI's slice
+    control and every figure axis use). The ONE mm -> node rule: both PE
+    tabs and the API call it.
+
+    Refuses, naming what did not line up, rather than guessing: a plane
+    with no normal (a 2-D or r-z model has nothing to slice), a model
+    without a grid pitch, and a position outside the solved grid (the
+    valid mm range is stated)."""
+    ax = {"xy": 2, "xz": 1, "yz": 0}.get(plane)
+    A = getattr(model, "A", None)
+    if ax is None or A is None or np.ndim(A) != 3:
+        raise ValueError(
+            f"slice_mm={slice_mm!r}: {type(model).__name__} plane {plane!r} "
+            f"has no normal axis to slice (slicing needs a 3-D model and a "
+            f"plane in ['xy', 'xz', 'yz'])")
+    h = float(getattr(model, "h_mm", 0.0) or 0.0)
+    if not h > 0.0:
+        raise ValueError(f"{type(model).__name__} has no positive grid "
+                         f"pitch h_mm ({h!r}); cannot map mm to a node")
+    off = float(_world_off(model)[ax])
+    n = int(np.shape(A)[ax])
+    k = int(round((float(slice_mm) - off) / h))
+    if not (0 <= k < n):
+        raise ValueError(
+            f"slice {'xyz'[ax]} = {slice_mm!r} mm is outside the solved "
+            f"grid [{off:g}, {off + (n - 1) * h:g}] mm ({n} nodes at "
+            f"{h:g} mm)")
+    return k
+
+
+def _slice_label(model, plane, index):
+    """'z = 1.2 mm (node 12)' for a 3-D slice (auto slices resolved to the
+    node the model actually cut), or None where there is no slice."""
+    ax = {"xy": 2, "xz": 1, "yz": 0}.get(plane)
+    if ax is None or not hasattr(model, "_plane_slice"):
+        return None
+    _ax, k = model._plane_slice(plane, index)
+    pos = float(_world_off(model)[ax]) + k * float(model.h_mm)
+    how = "electrode-dense auto" if index is None else "requested"
+    return f"slice {'xyz'[ax]} = {pos:.4g} mm (node {k}, {how})"
+
+
+def model_instant_drives(model):
+    """Names of drive groups the PE view evaluates at a LAB TIME (their
+    resolved pe_mode is 'instant' — slow waves the ions surf, not
+    average). Empty means t_us does not move the surface. Reads the same
+    channel-aligned group lists every route's pe_surface reduces:
+    planar/r-z `drives`, 3-D `chan_groups`."""
+    pairs = getattr(model, "drives", None)
+    if pairs is not None:
+        groups = [g for _B, g in pairs]
+    else:
+        groups = list(getattr(model, "chan_groups", []) or [])
+    return [g.name for g in groups if g.resolved_pe_mode() == "instant"]
+
+
 def model_has_rf(model):
-    """True if the model carries an RF basis (planar Bk list, or r-z rf_V)."""
+    """True if the model carries any drive: a planar/r-z `drives` list, a
+    3-D channel-group list, a sin Bk list, or the 3-D display pair's
+    rf_V. The old rf_V-only fallback was a hidden branch: a SQUARE-only
+    r-z deck (sin Bk empty, scalar rf_V removed in L-455) read as
+    drive-free."""
+    if getattr(model, "drives", None) or getattr(model, "chan_groups", None):
+        return True
     if getattr(model, "Bk", None):
         return True
     om = getattr(model, "om_rad_us", None)
@@ -94,9 +180,11 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                  z_exaggerate=1.0, height=560, stride=1, surface=None,
                  title=None, pe_scale_mode="linear",
                  show_adiabatic_caveat=False, z_aspect=0.55,
-                 metal_mode="mask", electrode_dc=None, plane="xy",
+                 metal_mode="barrier", electrode_dc=None, plane=None,
                  trust_cells=2, quantity=("PE", "eV"),
-                 normal_mm=None, h_mm=0.1):
+                 normal_mm=None, h_mm=0.1, t_us=0.0,
+                 component="effective", index=None, slice_mm=None,
+                 subtitles=(), camera=None):
     """node-centred 3-D PE landscape.
 
     model: planar/r-z model exposing pe_surface(mz, charge)->(x,y,PE,ele).
@@ -113,21 +201,70 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
         dict to override selected fates. Display preference only — it
         changes no value, position or fate.
     title: figure title (be specific: device · component · m/z).
+    plane: None (default) = the MODEL's own first declared plane ("rz"
+        for an r-z model), so a bare call works on every route; an
+        explicit plane the model does not declare refuses. With a
+        precomputed `surface`, None labels axes as "xy".
+    metal_mode: "barrier" (default) draws electrodes AT the barrier
+        landmark so the sheet stays INTACT -- no NaN holes or ragged
+        tears where metal cuts the slice; "mask" keeps the honest NaN
+        holes; "dc" draws q*V_DC.
+    camera: None = the default view (eye 1.5,-1.7,0.9, perspective) --
+        BYTE-IDENTICAL to every figure before this knob existed. Else a
+        dict(azim_deg=, elev_deg=, dist=, ortho=False): azimuth about
+        +z from +x toward +y, elevation above the xy plane, dist in
+        plotly eye units (~2.4 matches the default), ortho=True for an
+        orthographic projection. Built by camera_eye().
+    component: 'effective' (DC + RF pseudo), 'dc', 'rf' (pseudo only) or
+        'efield' (|E|) -- exactly the PE tab's component selector, via
+        compute_component. Ignored when `surface` is given.
+    index / slice_mm: the slice on a 3-D model's plane NORMAL, as a node
+        index or as a position in mm (the tab's slice control; mapped by
+        slice_index, which refuses off-grid positions). Give one, not
+        both; neither = the electrode-dense auto slice. The resolved
+        slice is stamped on the figure.
+    subtitles: extra header lines; placed with every other piece of
+        figure text by viz_core.layout_plotly_text, so nothing overlaps.
+    t_us: LAB TIME the surface's 'instant' drives are evaluated at (a
+        slow travelling wave is drawn where it actually is at t_us, so
+        stepping t_us animates the wave). Ignored by surfaces that carry
+        no instant drive; the figure is stamped with the time whenever
+        the model has one, so a frame lifted into a report says WHEN it
+        is.
     show_adiabatic_caveat: only True for RF devices — the adiabatic-
     approximation note is
         meaningless (and misleading) on a purely DC lens.
     """
+    header = [str(t) for t in subtitles]
+    footer = []
     if surface is not None:
         x, y, PE, ele = surface
+        if plane is None:
+            plane = "xy"                      # display labels only
     else:
-        # SECOND copy of the TypeError capability sniff (the defect was
-        # duplicated).  Same root cause, same cure: the model declares.
-        planes = V.model_planes(model)
-        if plane not in planes:
-            raise ValueError(
-                f"{type(model).__name__} has no {plane!r} plane; it has "
-                f"{planes}.")
-        x, y, PE, ele = model.pe_surface(mz=mz, charge=charge, plane=plane)
+        if plane is None:
+            plane = V.model_planes(model)[0]
+        if index is not None and slice_mm is not None:
+            raise ValueError(f"give index OR slice_mm, not both (index="
+                             f"{index!r}, slice_mm={slice_mm!r})")
+        if slice_mm is not None:
+            index = slice_index(model, plane, slice_mm)
+        # compute_component owns the plane check and the component split;
+        # 'effective' is the very pe_surface call this used to make
+        x, y, PE, ele = compute_component(model, mz, charge, component,
+                                          plane=plane, index=index,
+                                          t_us=t_us)
+        if component == "efield" and tuple(quantity) == ("PE", "eV"):
+            quantity = ("|E|", "V/mm")   # the label follows the quantity
+    _sl = _slice_label(model, plane, index) if model is not None else None
+    if _sl is not None:
+        header.append(_sl)
+        if normal_mm is None:
+            _ax = {"xy": 2, "xz": 1, "yz": 0}[plane]
+            _k = model._plane_slice(plane, index)[1]
+            normal_mm = (float(_world_off(model)[_ax])
+                         + _k * float(model.h_mm))
+            h_mm = float(model.h_mm)
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     PE = np.asarray(PE, float).copy()
@@ -223,10 +360,38 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                        for k, v in electrode_dc.items()}
 
         if plateau:
+            # the SKIRT (the dropped divergent ring, _mask & ~metal) is
+            # part of the same wall landmark: leaving it NaN tore the
+            # sheet into stripes wherever rings cut the slice (the PI's
+            # "holes and rips", L-463). Each electrode's skirt fills at
+            # its plateau; where two skirts overlap the WALL is the
+            # higher one (max). Metal cells then get their exact
+            # plateau, as before.
+            try:
+                from scipy.ndimage import binary_dilation as _dil2
+                wall = np.full(PE.shape, -np.inf)
+                for idx, v in plateau.items():
+                    sel = np.asarray(ele) == idx
+                    if sel.any():
+                        reach = _dil2(sel, iterations=int(trust_cells))
+                        wall[reach] = np.maximum(wall[reach], v)
+                skirt = _mask & ~metal & np.isfinite(wall)
+                PE[skirt] = wall[skirt]
+            except ImportError:
+                pass          # no scipy: _mask is undilated, no skirt exists
             for idx, v in plateau.items():
                 sel = np.asarray(ele) == idx
                 if sel.any():
                     PE[sel] = v
+            left = int(np.isnan(PE[_mask | metal]).sum())
+            if left:
+                # an electrode whose trusted ring yielded no value (fully
+                # enclosed) leaves its cells NaN -- fill at the tallest
+                # measured wall and SAY so, never a silent hole
+                top = max(plateau.values())
+                PE[np.isnan(PE) & (_mask | metal)] = top
+                footer.append(f"{left} masked cell(s) had no trusted ring; "
+                              f"drawn at the tallest wall ({top:.3g})")
         else:
             PE[metal] = np.nan
     else:
@@ -395,22 +560,20 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
             # a skipped item is a REPORTED item: say how many
             # ions fell outside the slice's slab, so an empty-looking slice
             # is an explained decision, not a silent drop.
-            fig.add_annotation(
-                text=(f"{skipped_far} trajectory(ies) outside the "
-                      f"{plane} slab at {_norm_pos:.3g} mm — not draped"),
-                xref="paper", yref="paper", x=0.5, y=0.045,
-                showarrow=False, font=dict(color="#b06000", size=9))
+            footer.append(f"{skipped_far} trajectory(ies) outside the "
+                          f"{plane} slab at {_norm_pos:.3g} mm — not draped")
 
-    annos = []
-    if show_adiabatic_caveat:
-        annos.append(dict(
-            text="effective RF pseudopotential (adiabatic approximation; "
-                 "the full RF tracer is exact)",
-            xref="paper", yref="paper", x=0.5, y=0.0, showarrow=False,
-            font=dict(color="#888", size=10)))
+    _inst = model_instant_drives(model) if model is not None else []
+    if _inst:
+        header.append(f"instant drive(s) {', '.join(_inst)} at lab time "
+                      f"t = {float(t_us):g} µs")
+    # the adiabatic caveat describes a pseudopotential: it is attached only
+    # when the plotted component contains one
+    if show_adiabatic_caveat and component in ("effective", "rf"):
+        footer.append("effective RF pseudopotential (adiabatic "
+                      "approximation; the full RF tracer is exact)")
     fig.update_layout(
-        height=height, margin=dict(l=0, r=0, t=42, b=0),
-        title=dict(text=title, x=0.5, font=dict(size=13)) if title else None,
+        height=height,
         scene=dict(
             xaxis_title=f"{plane[0]} [mm]" if len(plane) == 2 else "x [mm]",
             yaxis_title=f"{plane[1]} [mm]" if len(plane) == 2 else "y [mm]",
@@ -420,17 +583,18 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                 x=(float(np.ptp(x)) / max(float(np.ptp(y)), 1e-9))
                 if np.ptp(y) > 0 else 1.6,
                 y=1.0, z=max(float(z_aspect), 0.05)),
-            camera=dict(eye=dict(x=1.5, y=-1.7, z=0.9))),
-        annotations=annos)
+            camera=camera_eye(**camera) if camera else _PE_CAMERA_DEFAULT))
+    V.layout_plotly_text(fig, title=title, subtitles=header, footers=footer)
     return fig
 
 
-def pe_overlay_2d(fig, model, mz=None, *, charge=1, n_contours=12):
+def pe_overlay_2d(fig, model, mz=None, *, charge=1, n_contours=12,
+                  t_us=0.0):
     """Improved 2-D PE overlay: heatmap of PE plus brick-red PE
     equipotentials (the v51 overlay contoured the raw potential in faint
     blue over a 60%-opacity heatmap — low contrast). Adds traces to an
     existing 2-D figure."""
-    x, y, PE, _ele = model.pe_surface(mz=mz, charge=charge)
+    x, y, PE, _ele = model.pe_surface(mz=mz, charge=charge, t_us=t_us)
     PE = np.asarray(PE, float).copy()
     try:
         from scipy.ndimage import binary_dilation
@@ -456,9 +620,211 @@ def pe_overlay_2d(fig, model, mz=None, *, charge=1, n_contours=12):
     return fig
 
 
+# ------------------------------------------- exported field-window viewer
+def field_window_figure(data, meta, t_us, *, component="mag", plane="xy",
+                        index=None, slice_mm=None, height=520, title=None):
+    """Figure of an EXPORTED field window (field_cycle_io.save_field_window
+    npz) at a lab time — the file-side twin of the live PE/|E| views, so a
+    window handed to a collaborator can be inspected without the deck.
+
+    data, meta : exactly what field_cycle_io.read_field_window returns.
+    t_us       : requested lab time. The view SNAPS to the nearest STORED
+                 sample (the file holds frames, not a continuum) and the
+                 title states the sample actually shown. A time outside
+                 the stored window [t0, t_end] REFUSES with the window
+                 named — the file cannot answer for times it does not
+                 hold.
+    component  : 'mag' (|E|), or 'Ex' / 'Ey' / 'Ez' (a stored component).
+    plane/index/slice_mm: for a 3-D window, the principal-plane slice,
+                 as a node index or a position in mm on the STORED axis
+                 (nearest node; a position outside the stored axis
+                 refuses with its range). Default: mid. Give one of
+                 index/slice_mm, not both. A 2-D window has only its
+                 stored plane and refuses a slice request.
+
+    Returns the plotly figure (saving/showing is the caller's decision).
+    """
+    times = np.asarray(data["t_us"], float)
+    t0, t1 = float(times[0]), float(times[-1])
+    t = float(t_us)
+    if not np.isfinite(t) or t < t0 or t > t1:
+        raise ValueError(
+            f"t = {t_us!r} µs is outside the stored window "
+            f"[{t0:g}, {t1:g}] µs ({len(times)} samples); this export "
+            f"cannot answer for times it does not hold — re-export with "
+            f"save_field_window(t_start_us=..., total_time_us=...) "
+            f"covering the time you want")
+    i = int(np.argmin(np.abs(times - t)))
+    t_shown = float(times[i])
+    comps = {"Ex": data["Ex"][i], "Ey": data["Ey"][i], "Ez": data["Ez"][i]}
+    if component == "mag":
+        F = np.sqrt(sum(np.asarray(c, float) ** 2 for c in comps.values()))
+        qlabel = "|E| [V/mm]"
+    elif component in comps:
+        F = np.asarray(comps[component], float)
+        qlabel = f"{component} [V/mm]"
+    else:
+        raise ValueError(f"component {component!r}: one of "
+                         f"['mag', 'Ex', 'Ey', 'Ez']")
+    # axes are POSITIONAL (x_mm/y_mm/z_mm are the stored array axes in
+    # order); meta["axes"] carries the human names ("x = axial", ...)
+    ax_arr = [np.asarray(data["x_mm"], float), np.asarray(data["y_mm"], float),
+              np.asarray(data["z_mm"], float)]
+    names = list(meta.get("axes", ("x", "y", "z")))
+    while len(names) < 3:
+        names.append("?")
+    if index is not None and slice_mm is not None:
+        raise ValueError(f"give index OR slice_mm, not both (index="
+                         f"{index!r}, slice_mm={slice_mm!r})")
+    if F.ndim == 3:
+        _ax = {"xy": 2, "xz": 1, "yz": 0}
+        if plane not in _ax:
+            raise ValueError(f"plane {plane!r}: a 3-D window slices on "
+                             f"['xy', 'xz', 'yz']")
+        ax = _ax[plane]
+        if slice_mm is not None:
+            axv = ax_arr[ax]
+            lo_mm, hi_mm = float(axv.min()), float(axv.max())
+            if not (lo_mm <= float(slice_mm) <= hi_mm):
+                raise ValueError(
+                    f"slice {names[ax]} = {slice_mm!r} mm is outside the "
+                    f"stored axis [{lo_mm:g}, {hi_mm:g}] mm")
+            index = int(np.argmin(np.abs(axv - float(slice_mm))))
+        k = F.shape[ax] // 2 if index is None else int(index)
+        if not (0 <= k < F.shape[ax]):
+            raise ValueError(f"index {index} outside the {names[ax]} axis "
+                             f"(0..{F.shape[ax] - 1})")
+        sl = [slice(None)] * 3
+        sl[ax] = k
+        F = F[tuple(sl)]
+        in_plane = [j for j in range(3) if j != ax]
+        a, b = ax_arr[in_plane[0]], ax_arr[in_plane[1]]
+        an, bn = names[in_plane[0]], names[in_plane[1]]
+        where = f" · {plane} @ {names[ax]} = {ax_arr[ax][k]:g} mm"
+    elif F.ndim == 2:
+        if index is not None or slice_mm is not None:
+            raise ValueError("this window stores a 2-D plane; it has no "
+                             "normal axis to slice")
+        a, b = ax_arr[0], ax_arr[1]
+        an, bn = names[0], names[1]
+        where = ""
+    else:
+        raise ValueError(f"stored frames have {F.ndim} spatial dims; "
+                         f"expected 2 or 3")
+    fig = go.Figure(go.Heatmap(x=a, y=b, z=F.T, colorscale="Viridis",
+                               colorbar=dict(title=qlabel)))
+    dev = meta.get("deck", "exported window")
+    held = list(meta.get("held_channels", []))
+    fig.update_layout(height=height, xaxis_title=f"{an} [mm]",
+                      yaxis_title=f"{bn} [mm]")
+    V.layout_plotly_text(
+        fig, title=title or f"{dev} · {qlabel}{where}",
+        subtitles=[f"sample {i} at t = {t_shown:g} µs"
+                   + (f" (requested {t:g})" if abs(t_shown - t) > 1e-12
+                      else "")]
+        + ([f"HELD over this window: {', '.join(held)}"] if held else []))
+    fig.update_yaxes(scaleanchor=None)
+    return fig
+
+
+# ------------------------------------------------- time-series frame export
+def save_pe_frames(model, times_us, out_dir, *, mz=None, charge=1,
+                   plane=None, index=None, slice_mm=None,
+                   component="effective", camera=None,
+                   stem="pe", width=900, height=520, gif_path=None,
+                   gif_frame_ms=120, fig_kw=None):
+    """Render the PE view at each lab time in `times_us` and write one PNG
+    per frame (optionally assembling them into an animated GIF).
+
+    THE point of this exporter: a slow 'instant' drive (a travelling
+    wave) is drawn where it actually is at each time, so the frame
+    series shows the wave marching over the landscape. The vertical
+    range and camera are FIXED across the series from the global
+    min/max of every frame's surface — per-frame autoscaling makes an
+    animation lie about amplitudes.
+
+    model      : a built model (planar / r-z / 3-D) — the same object
+                 every other pe_view entry point takes.
+    times_us   : iterable of lab times (µs). One frame each, in order.
+    out_dir    : directory for the frames (created if absent). Frames
+                 are `{stem}_{i:04d}.png`; the time is stamped ON each
+                 frame by pe_figure_3d, and the returned manifest pairs
+                 every path with its time.
+    plane/index/component/mz/charge : exactly compute_component's knobs;
+                 slice_mm is the slice as a position in mm (slice_index;
+                 give index OR slice_mm). Every frame is stamped with the
+                 resolved slice.
+    gif_path   : optional path for an animated GIF assembled from the
+                 frames via Pillow (`gif_frame_ms` per frame, looping).
+    fig_kw     : extra pe_figure_3d keyword arguments (title,
+                 z_exaggerate, stride, ...), applied to every frame.
+
+    Returns (frame_paths, gif_path_or_None). PNG rendering is plotly +
+    kaleido, which needs a Chrome/Chromium binary; without one this
+    RAISES with the remedy rather than writing nothing quietly (set
+    BROWSER_PATH to an existing chromium binary — that is the variable
+    kaleido honours — or install Chrome / `plotly_get_chrome`).
+    """
+    import os
+    times = [float(t) for t in times_us]
+    if not times:
+        raise ValueError("times_us is empty — nothing to render")
+    if index is not None and slice_mm is not None:
+        raise ValueError(f"give index OR slice_mm, not both (index="
+                         f"{index!r}, slice_mm={slice_mm!r})")
+    if plane is None:
+        plane = V.model_planes(model)[0]
+    if slice_mm is not None:
+        index = slice_index(model, plane, slice_mm)
+    os.makedirs(out_dir, exist_ok=True)
+    fig_kw = dict(fig_kw or {})
+    surfaces = [compute_component(model, mz, charge, component,
+                                  plane=plane, index=index, t_us=t)
+                for t in times]
+    lo = min(float(np.nanmin(PE)) for _x, _y, PE, _e in surfaces)
+    hi = max(float(np.nanmax(PE)) for _x, _y, PE, _e in surfaces)
+    mode = fig_kw.get("pe_scale_mode", "linear")
+    exag = fig_kw.get("z_exaggerate", 1.0)
+    zlo, _ = scale_pe(np.array([lo]), mode, exag)
+    zhi, _ = scale_pe(np.array([hi]), mode, exag)
+    pad = 0.05 * max(float(zhi[0]) - float(zlo[0]), 1e-12)
+    paths = []
+    for i, (t, surf) in enumerate(zip(times, surfaces)):
+        fig = pe_figure_3d(model=model, mz=mz, charge=charge,
+                           surface=surf, plane=plane, index=index,
+                           component=component, camera=camera,
+                           t_us=t, **fig_kw)
+        fig.update_scenes(zaxis_range=[float(zlo[0]) - pad,
+                                       float(zhi[0]) + pad])
+        path = os.path.join(out_dir, f"{stem}_{i:04d}.png")
+        try:
+            fig.write_image(path, width=int(width), height=int(height))
+        except Exception as e:
+            raise RuntimeError(
+                f"PNG export failed on frame {i} ({path}): plotly image "
+                f"export needs kaleido AND a Chrome/Chromium binary. "
+                f"Install Chrome (or `plotly_get_chrome`), or point "
+                f"BROWSER_PATH at an existing chromium binary (that is "
+                f"the variable kaleido honours).") from e
+        paths.append(path)
+    if gif_path is not None:
+        try:
+            from PIL import Image
+        except ImportError as e:
+            raise RuntimeError(
+                f"GIF assembly needs Pillow (`pip install pillow`); the "
+                f"{len(paths)} PNG frames are already written in "
+                f"{out_dir}") from e
+        frames = [Image.open(fp).convert("P", palette=Image.ADAPTIVE)
+                  for fp in paths]
+        frames[0].save(gif_path, save_all=True, append_images=frames[1:],
+                       duration=int(gif_frame_ms), loop=0)
+    return paths, gif_path
+
+
 # --------------------------------------------------------------- PE tab
 def _surface_signature(spec, mz, exag, stride, drape, run_id, component,
-                       plane="xy", metal="mask", slice_pos=None):
+                       plane="xy", metal="mask", slice_pos=None, t_us=0.0):
     """Hash of everything that changes the rendered surface — geometry,
     per-electrode DC + RF group, resolution, mass, scaling (mode+factor),
     view options, THE PLANE, the metal mode, and the draped run. Irrelevant
@@ -466,10 +832,13 @@ def _surface_signature(spec, mz, exag, stride, drape, run_id, component,
     away needlessly.
 
     The plane and metal mode MUST be in here: without them, switching to xz
-    and pressing Compute returns the cached xy surface under an xz title."""
+    and pressing Compute returns the cached xy surface under an xz title.
+    t_us likewise: an instant-drive surface at t=25 µs is a different
+    surface from t=0 (checkbox off resolves to exactly 0.0, so the
+    default cache keys are unchanged)."""
     import hashlib
     g = spec.geometry
-    parts = [f"{g.mm_per_gu:.6g}", g.symmetry.coords]
+    parts = [f"{g.mm_per_gu:.6g}", g.symmetry.coords, f"t{float(t_us):.9g}"]
     for e in g.electrodes:
         grps = ",".join(e.group_names())
         parts.append(f"{e.name}|{e.dc:.6g}|{grps}|{e.stl}|"
@@ -512,6 +881,7 @@ def _run_off_doc(build, apply_fn, on_error, join_timeout_s=120.0):
             on_error(st["err"], st["tb"])
         else:
             apply_fn(st["res"])
+            st["res"] = None      # release once consumed; see sim_app 4594
 
     def _poll():
         if not st["done"]:
@@ -548,13 +918,17 @@ def _run_off_doc(build, apply_fn, on_error, join_timeout_s=120.0):
 
 
 def compute_component(model, mz, charge, component, plane=None,
-                      index=None):
+                      index=None, t_us=0.0):
     """Return (x, y, PE, ele) for the chosen component:
       'effective' : DC + RF Dehmelt pseudopotential (pe_surface) — the
                     surface the secular motion actually rides.
       'dc'        : DC potential energy only (q*phi_DC).
       'rf'        : RF pseudopotential only (effective - dc).
-    For a DC-only device (einzel: no RF basis) all three coincide."""
+    For a DC-only device (einzel: no RF basis) all three coincide.
+    t_us: lab time for 'instant' drives (slow TW) — both terms of the
+    split are taken at the SAME time, so 'rf' stays the mass-dependent
+    pseudopotential alone and the instant wave sits in the 'dc'
+    (mass-independent) term."""
     # ASK the model which planes it has.  This used to CALL pe_surface(plane=)
     # and catch TypeError as a proxy for "2-D" -- a signature probe wearing a
     # capability probe's clothes.  It swallowed every genuine TypeError raised
@@ -583,7 +957,7 @@ def compute_component(model, mz, charge, component, plane=None,
                 f"components are still available.")
         return model.field_surface(plane=plane, **_ikw)
     x, y, PE_eff, ele = model.pe_surface(mz=mz, charge=charge, plane=plane,
-                                         **_ikw)
+                                         t_us=t_us, **_ikw)
     if component == "effective":
         return x, y, PE_eff, ele
     # pure DC: potential_image without an RF phase is q*A for the r-z model;
@@ -604,7 +978,7 @@ def compute_component(model, mz, charge, component, plane=None,
     # surface computed some other way, with no diagnostic at all.  Every model
     # now takes `plane`, so there is nothing to fall back FROM.  It is gone.
     _x, _y, PE_dc, _e = model.pe_surface(mz=None, charge=charge, plane=plane,
-                                         **_ikw)
+                                         t_us=t_us, **_ikw)
     if PE_dc.shape != PE_eff.shape:
         raise ValueError(
             f"{type(model).__name__}.pe_surface returned {PE_dc.shape} for the "
@@ -775,27 +1149,17 @@ class FieldSliceTab:
         self.w_plane.disabled = (len(planes) == 1)
 
     def _slice_index(self, model, plane):
-        """Node index along the normal axis from the mm slider, or None
-        (auto mid-plane) when the slider sits at its minimum. Planes
-        without a 3-D normal (rz on a 2-D model) always return None —
-        there is nothing to slice."""
+        """Slice node from the mm control, via the module's ONE rule
+        (slice_index). The control at its minimum means AUTO (None) --
+        the only UI-specific decision here. Any other value is mapped or
+        REFUSED (off-grid position, a plane with no normal); the caller
+        reports the refusal in the status line. The two tabs' private
+        copies of this mapping disagreed on unknown planes (one silently
+        sliced z) and let off-grid positions through to fail later on
+        the worker thread; both are superseded by this."""
         if self.w_slicepos.value <= self.w_slicepos.start:
             return None
-        try:
-            h = float(getattr(model, "h_mm", 0.0)) or 0.0
-            if h <= 0:
-                return None
-            _ax = {"xy": 2, "xz": 1, "yz": 0}.get(plane)
-            if _ax is None:
-                return None
-            _mo = _world_off(model)   # world frame, not stored
-            return int(round((self.w_slicepos.value - _mo[_ax]) / h))
-        except (TypeError, ValueError):
-            # unset/non-numeric widget state -> auto slice. AUDITED
-            # narrowed from Exception; structural errors
-            # (broken model/widget) now raise instead of hiding as
-            # "auto".
-            return None
+        return slice_index(model, plane, float(self.w_slicepos.value))
 
     def _surface(self, model, plane, idx, q=None, mz=None):
         """(a, b, values, ele) for the chosen quantity, or a diagnostic
@@ -898,7 +1262,11 @@ class FieldSliceTab:
                                   "showing φ (PE also available)_")
         p = types.SimpleNamespace(model=model)
         p.plane = self.w_plane.value
-        p.idx = self._slice_index(model, p.plane)
+        try:
+            p.idx = self._slice_index(model, p.plane)
+        except ValueError as e:
+            self.status.object = f"**refused** — {e}. Nothing was recomputed."
+            return None
         p.q = self.w_quantity.value
         p.mz = float(self.w_mz.value)
         return p
@@ -1018,15 +1386,13 @@ class FieldSliceTab:
             _rz_note = (" · RF cycle-peak"
                         if (plane == "rz"
                             and self.w_quantity.value == "efield") else "")
-            fig.update_layout(
-                autosize=True,
-                margin=dict(l=0, r=0, t=42, b=0),
-                title=dict(text=f"{qlabel}{_rz_note} — {device} · {plane} "
-                                f"plane ({pos_txt})"
-                                f"{' · log10' if zlog else ''}",
-                           x=0.5, font=dict(size=13)),
-                xaxis_title=f"{an} [mm]",
-                yaxis_title=f"{bn} [mm]")
+            fig.update_layout(autosize=True,
+                              xaxis_title=f"{an} [mm]",
+                              yaxis_title=f"{bn} [mm]")
+            V.layout_plotly_text(
+                fig, title=(f"{qlabel}{_rz_note} — {device} · {plane} "
+                            f"plane ({pos_txt})"
+                            f"{' · log10' if zlog else ''}"))
             # equal geometric aspect ONLY when locked — delivered via the
             # SANCTIONED mechanism (M-VIZ-Z / viz_core.pane_size_for):
             # size the PANE 1:1 in mm and leave the figure free. A
@@ -1275,6 +1641,37 @@ class PeSurfaceTab:
             name="slice (mm, exact)", value=-1.0, step=0.05, width=140)
         self.w_slicepos.link(self.w_slicenum, value="value")
         self.w_slicenum.link(self.w_slicepos, value="value")
+        # LAB-TIME for instant drives (slow TW): a CHECKBOX + a typed
+        # value, deliberately not a slider — the surface only recomputes
+        # on Compute, and a typed time commits once instead of streaming
+        # invalidations. Checkbox off resolves to exactly t = 0.0, i.e.
+        # the surface every deck showed before this control existed.
+        self.w_time_on = pn.widgets.Checkbox(
+            name="evaluate instant drives at a lab time", value=False)
+        self.w_t_us = pn.widgets.FloatInput(
+            name="lab time t (µs)", value=0.0, step=1.0, width=140,
+            disabled=True)
+        # VIEW ANGLE: checkbox + angle inputs. Off (the default) = the
+        # historical camera exactly; on = camera_eye(azim, elev, dist,
+        # ortho). Camera is pure LAYOUT: these widgets are excluded from
+        # the surface signature and re-apply LIVE to the displayed
+        # figure -- no recompute, and stale-cache invalidation never
+        # fires for a view change.
+        self.w_view_on = pn.widgets.Checkbox(
+            name="set view angle / perspective", value=False)
+        self.w_azim = pn.widgets.FloatInput(
+            name="azimuth (°)", value=-48.6, step=5.0, width=110,
+            disabled=True)
+        self.w_elev = pn.widgets.FloatInput(
+            name="elevation (°)", value=21.7, step=5.0, width=110,
+            disabled=True)
+        self.w_dist = pn.widgets.FloatInput(
+            name="distance", value=2.44, step=0.2, width=100,
+            disabled=True)
+        self.w_ortho = pn.widgets.Checkbox(
+            name="orthographic", value=False, disabled=True)
+        self.reset_btn = pn.widgets.Button(name="Reset PE view",
+                                           button_type="default", width=120)
         self.w_metal = pn.widgets.Select(
             name="electrodes on the PE scale", value="barrier", width=170,
             options={"mask (hole)": "mask",
@@ -1296,8 +1693,22 @@ class PeSurfaceTab:
         self.compute_btn.on_click(self._on_go)
         for w in (self.w_mz, self.w_comp, self.w_exag, self.w_scalemode,
                   self.w_res, self.w_drape, self.w_plane, self.w_metal,
-                  self.w_trust, self.w_slicepos):
+                  self.w_trust, self.w_slicepos, self.w_t_us):
             w.param.watch(lambda e: self.refresh(), "value")
+        self.w_time_on.param.watch(self._on_time_toggle, "value")
+        for w in (self.w_azim, self.w_elev, self.w_dist, self.w_ortho):
+            w.param.watch(lambda e: self._apply_camera(), "value")
+        self.w_view_on.param.watch(self._on_view_toggle, "value")
+        self.reset_btn.on_click(self._on_reset)
+        # widget defaults captured ONCE, right here at construction, so
+        # Reset restores exactly what a fresh tab would show -- no
+        # second hand-maintained default table to drift (L-463)
+        self._defaults = {w: w.value for w in (
+            self.w_mz, self.w_comp, self.w_exag, self.w_scalemode,
+            self.w_res, self.w_drape, self.w_plane, self.w_metal,
+            self.w_trust, self.w_slicepos, self.w_slicenum,
+            self.w_time_on, self.w_t_us, self.w_view_on, self.w_azim,
+            self.w_elev, self.w_dist, self.w_ortho, self.w_zaspect)}
         # z-aspect is a pure VIEW property: restyle the cached figure in
         # place — no invalidation, no recompute.
         self.w_zaspect.param.watch(self._on_aspect, "value")
@@ -1319,6 +1730,52 @@ class PeSurfaceTab:
             return 1
         return max(1, int(np.ceil(max(nx, ny) / max(self.w_res.value, 20))))
 
+    def _camera_dict(self):
+        """None with the checkbox off (= the historical default view);
+        else the camera_eye kwargs the widgets spell."""
+        if not self.w_view_on.value:
+            return None
+        return dict(azim_deg=float(self.w_azim.value),
+                    elev_deg=float(self.w_elev.value),
+                    dist=float(self.w_dist.value),
+                    ortho=bool(self.w_ortho.value))
+
+    def _apply_camera(self):
+        """Re-apply the camera to the DISPLAYED figure, live. Layout
+        only: the surface is untouched, nothing recomputes."""
+        fig = getattr(self.pane, "object", None)
+        if fig is None or not hasattr(fig, "update_scenes"):
+            return
+        cam = self._camera_dict()
+        fig.update_scenes(camera=(camera_eye(**cam) if cam
+                                  else _PE_CAMERA_DEFAULT))
+        self.pane.param.trigger("object")
+
+    def _on_view_toggle(self, _e=None):
+        on = self.w_view_on.value
+        for w in (self.w_azim, self.w_elev, self.w_dist, self.w_ortho):
+            w.disabled = not on
+        self._apply_camera()          # off -> back to the default view
+
+    def _on_reset(self, _e=None):
+        """Every PE control back to its constructed default (time off,
+        slice auto, view off, default camera), then one refresh. The
+        stale-cache contract applies as for any edit: press Compute."""
+        for w, v in self._defaults.items():
+            w.value = v
+        self.status.object = ("_PE controls reset to defaults -- press "
+                              "**Compute surface**_")
+
+    def _on_time_toggle(self, _e=None):
+        self.w_t_us.disabled = not self.w_time_on.value
+        self.refresh()
+
+    def _time_value(self):
+        """Lab time the surface is computed at: exactly 0.0 with the
+        checkbox off (the pre-existing default surface), else the typed
+        value."""
+        return float(self.w_t_us.value) if self.w_time_on.value else 0.0
+
     def _current_sig(self, model):
         spec = self.get_spec()
         return _surface_signature(
@@ -1328,7 +1785,8 @@ class PeSurfaceTab:
             self.get_run_id(), self.w_comp.value,
             plane=self.w_plane.value,
             metal=(self.w_metal.value, int(self.w_trust.value)),
-            slice_pos=round(float(self.w_slicepos.value), 4))
+            slice_pos=round(float(self.w_slicepos.value), 4),
+            t_us=self._time_value())
 
     def _sync_planes(self, model):
         """The selector offers exactly the planes the model DECLARES.
@@ -1348,27 +1806,17 @@ class PeSurfaceTab:
         return self.w_plane.value
 
     def _slice_index(self, model, plane):
-        """Node index along the axis perpendicular to `plane`, from the mm
-        slider — or None (auto electrode-dense slice) when the slider sits
-        at its minimum. The perpendicular axis is z for xy, y for xz, x for
-        yz; the model grid pitch maps mm -> index."""
+        """Slice node from the mm control, via the module's ONE rule
+        (slice_index). The control at its minimum means AUTO (None) --
+        the only UI-specific decision here. Any other value is mapped or
+        REFUSED (off-grid position, a plane with no normal); the caller
+        reports the refusal in the status line. The two tabs' private
+        copies of this mapping disagreed on unknown planes (one silently
+        sliced z) and let off-grid positions through to fail later on
+        the worker thread; both are superseded by this."""
         if self.w_slicepos.value <= self.w_slicepos.start:
-            return None                      # auto (electrode-dense)
-        try:
-            h = float(getattr(model, "h_mm", 0.0)) or 0.0
-            if h <= 0:
-                return None
-            # slider mm is in the CANONICAL frame (mirror plane at 0);
-            # the array index lives in the field frame: idx=(mm-off)/h.
-            _ax = {"xy": 2, "xz": 1, "yz": 0}.get(plane, 2)
-            _mo = _world_off(model)   # world frame, not stored
-            return int(round((self.w_slicepos.value - _mo[_ax]) / h))
-        except (TypeError, ValueError):
-            # unset/non-numeric widget state -> auto slice. AUDITED
-            # narrowed from Exception; structural errors
-            # (broken model/widget) now raise instead of hiding as
-            # "auto".
             return None
+        return slice_index(model, plane, float(self.w_slicepos.value))
 
     # compute is split so the HEAVY part (grid PE +
     # plotly figure) can run off the document thread. compute() stays the
@@ -1388,6 +1836,24 @@ class PeSurfaceTab:
             return None
         self._sync_planes(model)
         p = types.SimpleNamespace(model=model)
+        p.t_us = self._time_value()
+        p.camera = self._camera_dict()
+        if self.w_time_on.value:
+            t_max = float(self.get_spec().integration.t_max_us)
+            if not np.isfinite(p.t_us) or p.t_us < 0.0 or p.t_us > t_max:
+                # refuse-with-diagnostic, figure untouched: the valid
+                # window is named and its source stated.
+                self.status.object = (
+                    f"**refused** — lab time t = {p.t_us!r} µs is outside "
+                    f"the valid window [0, {t_max:g}] µs "
+                    f"(integration.t_max_us; the flight this surface "
+                    f"belongs to lives there). Nothing was recomputed.")
+                return None
+            if not model_instant_drives(model):
+                self.status.object = (
+                    "_note: this model has no instant drives — t has no "
+                    "effect on the surface (sin drives are the averaged "
+                    "pseudopotential)_")
         p.mz = float(self.w_mz.value)
         # spec charge rides the pack: the surface must show the ion the
         # spec flies (displayed == solver input), not a hard-coded z=1
@@ -1396,8 +1862,14 @@ class PeSurfaceTab:
         p.comp = self.w_comp.value
         p.plane = self.w_plane.value
         # slice index along the perpendicular axis from the mm slider
-        # (auto electrode-dense slice when the slider is at its minimum).
-        p.idx = self._slice_index(model, p.plane)
+        # (auto electrode-dense slice when the slider is at its minimum);
+        # an off-grid or unsliceable request refuses HERE, on the doc
+        # thread, with the valid range named
+        try:
+            p.idx = self._slice_index(model, p.plane)
+        except ValueError as e:
+            self.status.object = f"**refused** — {e}. Nothing was recomputed."
+            return None
         p.results = self.get_results() if self.w_drape.value else None
         p.has_rf = model_has_rf(model)
         p.comp_label = {"effective": "effective (DC + RF pseudo)",
@@ -1429,6 +1901,8 @@ class PeSurfaceTab:
                     if _is_E else
                     f"PE surface — {p.device} · {p.comp_label} · m/z "
                     f"{p.mz:g} · {p.plane} plane"))
+        if self.w_time_on.value:
+            p.title += f" · t = {p.t_us:g} µs"
         if _is_E:
             p.title += ("<br><sup>|E| at the RF PEAK for an RF device "
                         "(full 3-D magnitude on the chosen slice); metal "
@@ -1472,16 +1946,19 @@ class PeSurfaceTab:
         import numpy as np
         surface = compute_component(p.model, p.mz,
                                     getattr(p, "charge", 1), p.comp,
-                                    plane=p.plane, index=p.idx)
+                                    plane=p.plane, index=p.idx,
+                                    t_us=getattr(p, "t_us", 0.0))
         fig = pe_figure_3d(
             p.model, surface=surface, results=p.results,
+            t_us=getattr(p, "t_us", 0.0),
+            camera=getattr(p, "camera", None),
             z_exaggerate=p.z_exaggerate,
             pe_scale_mode=p.pe_scale_mode, stride=p.stride,
             title=p.title, show_adiabatic_caveat=p.caveat,
             z_aspect=p.z_aspect,
             metal_mode=p.mmode, electrode_dc=p.edc,
             trust_cells=p.trust_cells,
-            quantity=p.quant, plane=p.plane,
+            quantity=p.quant, plane=p.plane, index=p.idx,
             normal_mm=p.norm_mm,
             h_mm=p.h_mm)
         npts = surface[2][::p.stride, ::p.stride].size
@@ -1595,9 +2072,21 @@ class PeSurfaceTab:
                 hi = _mo[_axp] + (perp - 1) * h
                 step = max(h, (hi - lo) / 200.0)
                 if abs(self.w_slicepos.end - hi) > 1e-9:
+                    # AUTO must survive the retarget: a value sitting at
+                    # the OLD sentinel moves to the NEW one. Without this
+                    # the default -1.0 read as a user request on any axis
+                    # extending below -1 mm (mirrored decks), and the
+                    # "auto" view silently cut z = -1 (L-462; exposed by
+                    # the slice stamp). A genuine request is kept as-is;
+                    # if it is now off-grid, Compute REFUSES with the
+                    # range (slice_index) -- never a quiet reset to auto.
+                    _was_auto = (self.w_slicepos.value
+                                 <= self.w_slicepos.start)
                     self.w_slicepos.start = lo - step   # sentinel = auto
                     self.w_slicepos.end = hi
                     self.w_slicepos.step = step
+                    if _was_auto:
+                        self.w_slicepos.value = lo - step
         except Exception as e:
             # UI boundary; AUDITED: silent pass -> reports.
             self.status.object = (f"**slice-range sync failed** — "
@@ -1619,11 +2108,14 @@ class PeSurfaceTab:
             pn.Row(self.w_mz, self.w_comp, self.w_plane),
             pn.Row(self.w_slicepos, self.w_slicenum),
             pn.Row(self.w_metal, self.w_trust),
+            pn.Row(self.w_time_on, self.w_t_us),
+            pn.Row(self.w_view_on, self.w_azim, self.w_elev, self.w_dist,
+                   self.w_ortho),
             pn.Row(self.w_drape),
             pn.Row(self.w_zaspect),
             pn.Row(self.w_scalemode, self.w_exag),
             pn.Row(self.w_res),
-            pn.Row(self.compute_btn),
+            pn.Row(self.compute_btn, self.reset_btn),
             self.status,
             self.pane,
             sizing_mode="stretch_width")

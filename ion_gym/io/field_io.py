@@ -104,7 +104,19 @@ def _atomic_savez(path, **members):
 
 def _geometry_diff(a, b, prefix=""):
     """Named divergence between two canonical geometry dicts, for the
-    refuse-with-diagnostic message.  Returns a list of 'path: A vs B'."""
+    refuse-with-diagnostic message.  Returns a list of 'path: A vs B'.
+
+    THE ONLY geometry-diff in this module, serving validate_field,
+    resolve_cache_entry and import_field_bundle alike. A second, shallow
+    `_geometry_diff(g1, g2)` was once defined further down the file and
+    SILENTLY SHADOWED this one at import: mismatch messages degraded from
+    naming the diverging path to naming bare top-level keys ("electrodes;
+    width_mm" instead of which electrode field differs), and
+    validate_field raised TypeError instead of refusing whenever a field
+    npz carried no `geometry` in its `_meta` (set(None) is not iterable).
+    Both callers of the shallow version only test the result for
+    emptiness and print it, which this satisfies. Do not add a second
+    one: one name, one authority."""
     out = []
     if isinstance(a, dict) and isinstance(b, dict):
         for k in sorted(set(a) | set(b)):
@@ -652,243 +664,6 @@ def scan_fields(directory=None, spec=None):
     return rows
 
 
-# ============================================================================
-# COMPOSED INSTANTANEOUS FIELD over one drive cycle.
-#
-# save_field above stores the per-electrode BASES — the geometry-only,
-# voltage-independent building blocks. That is the right artifact to move a
-# SOLVE between machines, but it is NOT "the E-field the ions feel at RF
-# phase theta": that is a weighted sum of the bases with the drive waveform
-# evaluated at theta, and it is what you want to hand to an external field
-# solver or plot as a movie over a cycle.
-#
-# This composer takes the SAME channel field pack the tracer flies
-# (EAx/EAy/EAz static + ExK/EyK/EzK per-channel stacks + ch_kind/ch_om/
-# ch_ph/ch_amp/ch_off/ch_duty), evaluates each channel's waveform with the
-# IDENTICAL formula tracer3d._wave_eval uses, and returns Ex/Ey/Ez sampled
-# at N phases across one period of a chosen channel group. Because the
-# waveform match is exact, the exported field is bit-for-bit the field the
-# tracer would have applied at those instants — display equals solve.
-#
-# Zeroing a drive (e.g. the SLIM travelling wave) is done by the CALLER at
-# build time: build_slim3d_fields(tw_amp_v=0.0) returns a pack whose TW
-# channel amplitudes are literally zero, so this composer needs no "turn
-# off TW" flag — it composes whatever pack it is given, honestly.
-# ----------------------------------------------------------------------------
-
-def _wave_eval_np(kind, om, ph, amp, off, duty, t_us):
-    """Vectorised copy of tracer3d._wave_eval for the analytic kinds
-    (sin/cos/square). Kept in lock-step with that function ON PURPOSE: an
-    exported instantaneous field that used a DIFFERENT waveform than the
-    tracer would be a silent lie. Table kinds (3, 4) are refused here
-    rather than approximated — an exported field must match the flight."""
-    K_SIN, K_COS, K_SQUARE = 0, 1, 2
-    if kind == K_SIN:
-        return amp * np.sin(om * t_us + ph) + off
-    if kind == K_COS:
-        return amp * np.cos(om * t_us + ph) + off
-    if kind == K_SQUARE:
-        if duty == 0.5:                       # sign(sin) EXACTLY (frozen)
-            base = np.where(np.sin(om * t_us + ph) >= 0.0, 1.0, -1.0)
-        else:
-            frac = ((om * t_us + ph) / (2.0 * np.pi)) % 1.0
-            base = np.where(frac < duty, 1.0, -1.0)
-        return amp * base + off
-    raise ValueError(
-        f"channel waveform kind {kind} is a TABLE drive; a table field "
-        "cannot be composed analytically over a cycle. Export it by "
-        "sampling the tracer's own waveform table instead.")
-
-
-def compose_cycle_fields(fields, *, cycle_channel="rf", n_phases=36,
-                         t0_us=0.0):
-    """Instantaneous E-field over ONE drive cycle, composed from a channel
-    field pack (the object build_slim3d_fields / tracer field builders
-    return).
-
-    fields: dict with EAx/EAy/EAz (static V/mm), ExK/EyK/EzK (K, nx, ny, nz
-        per-channel V/mm-per-unit-amplitude stacks), and the per-channel
-        drive arrays ch_kind/ch_om/ch_ph/ch_amp/ch_off (+ optional
-        ch_duty, default 0.5). This is exactly what the tracer flies.
-    cycle_channel: which drive sets the PERIOD sampled. "rf" picks the
-        highest-frequency channel (the RF rails on SLIM); "tw" picks the
-        travelling-wave step frequency; or pass an int channel index. The
-        period is 2*pi / om of that channel; every OTHER channel is
-        evaluated at the same instants, so a slow wave barely moves across
-        one fast cycle (and if you zeroed it, it contributes nothing).
-    n_phases: instants sampled across the one cycle (endpoint-exclusive, so
-        phase[0] and the next cycle's phase[0] are not duplicated).
-
-    Returns (phase_deg, Ex, Ey, Ez):
-      phase_deg : (n_phases,) degrees of the cycle_channel, 0..360
-      Ex,Ey,Ez : (n_phases, nx, ny, nz) V/mm — the total field at each
-                 instant, static + sum over channels of w_k(t)*E_k.
-    """
-    EAx = np.asarray(fields["EAx"], float)
-    EAy = np.asarray(fields["EAy"], float)
-    EAz = np.asarray(fields["EAz"], float)
-    ExK = np.asarray(fields["ExK"], float)
-    EyK = np.asarray(fields["EyK"], float)
-    EzK = np.asarray(fields["EzK"], float)
-    ch_kind = np.asarray(fields["ch_kind"])
-    ch_om = np.asarray(fields["ch_om"], float)
-    ch_ph = np.asarray(fields["ch_ph"], float)
-    ch_amp = np.asarray(fields["ch_amp"], float)
-    ch_off = np.asarray(fields["ch_off"], float)
-    ch_duty = np.asarray(fields.get("ch_duty",
-                                    np.full(ch_kind.shape[0], 0.5)), float)
-    K = ch_kind.shape[0]
-    if ExK.shape[0] != K:
-        raise ValueError(
-            f"channel count mismatch: {K} drive channels but "
-            f"{ExK.shape[0]} field stacks — pack is inconsistent.")
-
-    # pick the channel whose period we sample
-    if cycle_channel == "rf":
-        kc = int(np.argmax(np.abs(ch_om)))
-    elif cycle_channel == "tw":
-        kc = int(np.argmin(np.abs(ch_om[np.abs(ch_om) > 0])))
-    elif isinstance(cycle_channel, (int, np.integer)):
-        kc = int(cycle_channel)
-    else:
-        raise ValueError("cycle_channel must be 'rf', 'tw', or a channel "
-                         f"index, not {cycle_channel!r}")
-    om_c = float(ch_om[kc])
-    if om_c == 0.0:
-        raise ValueError(
-            f"cycle channel {kc} has zero frequency — it defines no "
-            "period. Pick the channel that is actually driving.")
-    period_us = 2.0 * np.pi / abs(om_c)
-
-    phase_frac = np.arange(n_phases) / n_phases           # endpoint-excl.
-    times_us = t0_us + phase_frac * period_us
-    phase_deg = 360.0 * phase_frac
-
-    nx, ny, nz = ExK.shape[1:]
-    Ex = np.empty((n_phases, nx, ny, nz), np.float32)
-    Ey = np.empty_like(Ex)
-    Ez = np.empty_like(Ex)
-    for i, t in enumerate(times_us):
-        ex = EAx.copy(); ey = EAy.copy(); ez = EAz.copy()
-        for k in range(K):
-            w = _wave_eval_np(int(ch_kind[k]), ch_om[k], ch_ph[k],
-                              ch_amp[k], ch_off[k], ch_duty[k], t)
-            if w == 0.0:                # a zeroed drive adds nothing
-                continue
-            ex += w * ExK[k]
-            ey += w * EyK[k]
-            ez += w * EzK[k]
-        Ex[i] = ex; Ey[i] = ey; Ez[i] = ez
-    return phase_deg, Ex, Ey, Ez
-
-
-def read_cycle_field_meta(path):
-    """Read ONLY the `_meta` of a cycle-field npz (save_cycle_fields).
-
-    Separate from read_field_meta because a cycle field is a DIFFERENT
-    artifact than a bases field: read_field_meta hard-refuses anything
-    whose kind is not 'ion_gym_field', which is correct for that format
-    and wrong for this one. This reader validates the cycle-field artifact
-    tag instead, so the two formats cannot be confused for each other.
-    """
-    with np.load(path) as z:
-        if _META not in z.files:
-            raise FieldMismatch(
-                f"{os.path.basename(path)}: no _meta member — not an "
-                "ion_gym cycle-field file.")
-        meta = json.loads(bytes(z[_META]).decode())
-    if meta.get("artifact") != "cycle_fields":
-        raise FieldMismatch(
-            f"{os.path.basename(path)}: _meta.artifact is "
-            f"{meta.get('artifact')!r}, not 'cycle_fields'. This reader is "
-            "for save_cycle_fields output; use read_field_meta for a "
-            "per-electrode bases field.")
-    return meta
-
-
-def load_cycle_field(path):
-    """Load a cycle-field npz as (phase_deg, Ex, Ey, Ez, meta).
-
-    Ex/Ey/Ez are (n_phases, nx, ny, nz) V/mm. The physical node
-    coordinates are meta-adjacent arrays x_mm/y_mm/z_mm in the same file;
-    this returns the fields and the validated meta, and leaves the
-    coordinate vectors in the npz for the caller who wants them (they are
-    plain np.load members).
-    """
-    meta = read_cycle_field_meta(path)          # validates the artifact tag
-    with np.load(path) as z:
-        return (z["phase_deg"], z["Ex"], z["Ey"], z["Ez"], meta)
-
-
-def save_cycle_fields(path, fields, frame=None, *, cycle_channel="rf",
-                      n_phases=36, t0_us=0.0, label=None, extra_meta=None):
-    """Compose one drive cycle (compose_cycle_fields) and write it as a
-    self-describing .npz. Returns the written path.
-
-    The file holds:
-      phase_deg (n,)                         — cycle phase at each frame
-      Ex, Ey, Ez (n, nx, ny, nz) float32     — V/mm total field per frame
-      h_mm ()                                — grid pitch
-      x_mm, y_mm, z_mm (axis vectors)        — physical node coordinates
-      ch_kind/ch_om/ch_ph/ch_amp/ch_off/ch_duty — the drive that made it,
-                                                so a reader can see (and a
-                                                zeroed TW shows amp 0)
-      _meta (JSON)                           — provenance + shapes + frame
-
-    Everything a receiver needs to interpret the field without this code is
-    in the file; nothing is implicit.
-    """
-    phase_deg, Ex, Ey, Ez = compose_cycle_fields(
-        fields, cycle_channel=cycle_channel, n_phases=n_phases, t0_us=t0_us)
-    h_mm = float(fields["h_mm"])
-    nx, ny, nz = Ex.shape[1:]
-    x_mm = np.arange(nx) * h_mm
-    y_mm = np.arange(ny) * h_mm + (float(frame["y0_mm"]) if frame and
-                                   "y0_mm" in frame else 0.0)
-    # z is UNFOLDED about the mirror plane in the SLIM pack; centre it there
-    z_center = (float(frame["z_center_gu"]) * h_mm
-                if frame and "z_center_gu" in frame else 0.0)
-    z_mm = np.arange(nz) * h_mm - z_center
-
-    ch_duty = np.asarray(fields.get("ch_duty",
-                         np.full(np.asarray(fields["ch_kind"]).shape[0],
-                                 0.5)), float)
-    meta = {
-        "format": FIELD_FORMAT,
-        "artifact": "cycle_fields",
-        "quantity": "E_total (V/mm)",
-        "cycle_channel": cycle_channel,
-        "n_phases": int(n_phases),
-        "shape": [int(n) for n in Ex.shape],
-        "h_mm": h_mm,
-        "note": ("Instantaneous total E-field composed over one drive "
-                 "cycle. Any zeroed drive (e.g. TW) has ch_amp 0 and "
-                 "contributes nothing — the drive arrays record what made "
-                 "this field."),
-        "label": label or "",
-    }
-    if frame:
-        meta["frame"] = {k: (float(v) if isinstance(v, (int, float,
-                             np.floating)) else v) for k, v in frame.items()}
-    if extra_meta:
-        meta.update(extra_meta)
-
-    arrays = dict(
-        phase_deg=phase_deg.astype(np.float64),
-        Ex=Ex, Ey=Ey, Ez=Ez,
-        h_mm=np.float64(h_mm),
-        x_mm=x_mm, y_mm=y_mm, z_mm=z_mm,
-        ch_kind=np.asarray(fields["ch_kind"]),
-        ch_om=np.asarray(fields["ch_om"], float),
-        ch_ph=np.asarray(fields["ch_ph"], float),
-        ch_amp=np.asarray(fields["ch_amp"], float),
-        ch_off=np.asarray(fields["ch_off"], float),
-        ch_duty=ch_duty,
-    )
-    _atomic_savez(path, **arrays, **{_META: _meta_to_member(meta)})
-    return path
-
-
 # --------------------------------------------------------------------------
 # Cache-entry bundles: the array-level pair above
 # (save_field/load_field) speaks the planar/rz dialect (b{k}/ele) and
@@ -920,12 +695,6 @@ def _entry_spec_json(key, root=None):
         if isinstance(r, dict) and r.get("spec_json"):
             return r["spec_json"]
     return None
-
-
-def _geometry_diff(g1, g2):
-    """Names of geometry fields that differ (order-stable); [] == same."""
-    keys = sorted(set(g1) | set(g2))
-    return [k for k in keys if g1.get(k) != g2.get(k)]
 
 
 def resolve_cache_entry(spec, root=None):

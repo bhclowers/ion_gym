@@ -120,6 +120,170 @@ def load_any_spec(txt, *, work_dir=None, stl_dir=None):
                     if isinstance(txt, (str, bytes)) else []))
 
 
+def set_geometry_build_options(txt, *, field_method, channel_dtype,
+                               indent=2):
+    """Write ``geometry.field_method`` and ``geometry.channel_dtype`` into a
+    SimSpec JSON TEXT and return the new text. Nothing else is touched.
+
+    This is a key-level patch, not a load/serialize round trip, on purpose:
+    the text may be a staged, unapplied edit, and a round trip through
+    ``load_any_spec`` would normalize it (an assembly would come back
+    flattened, a scene3d would come back as a SimSpec). The two keys are
+    written explicitly even at their defaults; ``SimSpec.from_json`` reads
+    an explicit default identically to an omitted one, and validating the
+    values stays with ``SimSpec.validate``.
+
+    Refuses with a diagnostic when the text is not a SimSpec document —
+    unparseable, or a schema that has no ``geometry`` block to carry the
+    options (assembly, staged_assembly, scene3d, unknown). ``indent``
+    matches ``SimSpec.to_json``'s default so an unedited box keeps its
+    layout.
+    """
+    try:
+        doc = json.loads(txt)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"the JSON box does not parse ({e}); field_method/channel_dtype "
+            f"could not be written into it") from e
+    kind = sniff(doc)
+    if kind != "simspec":
+        raise ValueError(
+            f"the JSON box holds a '{kind}' document, which has no geometry "
+            f"block to carry field_method/channel_dtype; only a SimSpec "
+            f"(top-level 'geometry') can store them")
+    doc["geometry"]["field_method"] = field_method
+    doc["geometry"]["channel_dtype"] = channel_dtype
+    return json.dumps(doc, indent=indent)
+
+
+_ABSENT = object()   # sentinel: a key or index not present at a path
+
+
+def _doc_get(doc, path):
+    """Value at ``path`` (tuple of dict keys / list indices), or _ABSENT."""
+    cur = doc
+    for k in path:
+        if isinstance(k, str) and isinstance(cur, dict) and k in cur:
+            cur = cur[k]
+        elif (isinstance(k, int) and isinstance(cur, list)
+              and 0 <= k < len(cur)):
+            cur = cur[k]
+        else:
+            return _ABSENT
+    return cur
+
+
+def _changed_paths(a, b, path=()):
+    """Leaf paths where JSON trees ``a`` and ``b`` differ. Dicts recurse per
+    key; lists recurse per index only when both have the same length (an
+    edited element), otherwise the whole list is one changed leaf (an added
+    or removed element changes the list as a unit)."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        keys = list(a) + [k for k in b if k not in a]
+        for k in keys:
+            yield from _changed_paths(a.get(k, _ABSENT), b.get(k, _ABSENT),
+                                      path + (k,))
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            yield from _changed_paths(x, y, path + (i,))
+    elif a != b:
+        yield path
+    else:
+        # equal leaves: nothing changed at this path, so there is nothing
+        # to report — the generator yields no path on purpose.
+        return
+
+
+def merge_loaded_delta(staged_txt, base, loaded, *, indent=2):
+    """Carry an edit made to the LOADED spec into the STAGED JSON text,
+    three-way, and return the new text.
+
+    ``base`` is the JSON-normal dict of the loaded spec at the moment the
+    box text was last written from it (the common ancestor); ``loaded`` is
+    the same after the edit; ``staged_txt`` is what the box holds now, which
+    the user may have edited since. For every path where ``base`` and
+    ``loaded`` differ:
+
+      * staged already equals loaded there -> nothing to do;
+      * staged still equals base there      -> write loaded's value;
+      * staged differs from both            -> CONFLICT.
+
+    Any conflict refuses the whole merge with the conflicting paths named;
+    the box is never partially patched. Comparisons use the staged text's
+    CANONICAL form (``SimSpec.from_json(...).to_json()``) so an explicit
+    default and an omitted one compare equal; writes go into the RAW
+    document so nothing the user staged outside the changed paths is
+    rewritten. Holds for every deck: it is schema-generic dict/list
+    arithmetic with no route, builder or key special-cased.
+
+    Refuses (ValueError) when the text does not parse, is not a SimSpec
+    document, or does not load as one.
+    """
+    from ion_gym.io.sim_spec import SimSpec
+    try:
+        doc = json.loads(staged_txt)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"the JSON box does not parse ({e})") from e
+    kind = sniff(doc)
+    if kind != "simspec":
+        raise ValueError(
+            f"the JSON box holds a '{kind}' document, not a SimSpec, so an "
+            f"edit to the loaded spec has no place in it")
+    try:
+        canon = json.loads(SimSpec.from_json(staged_txt).to_json())
+    except (ValueError, KeyError, TypeError) as e:
+        raise ValueError(
+            f"the JSON box does not load as a SimSpec ({e})") from e
+
+    writes, conflicts = [], []
+    for p in _changed_paths(base, loaded):
+        want = _doc_get(loaded, p)
+        have = _doc_get(canon, p)
+        if have == want:
+            continue                  # the box already carries this change
+        elif have == _doc_get(base, p):
+            writes.append((p, want))
+        else:
+            conflicts.append(p)
+    if conflicts:
+        shown = ", ".join(".".join(str(k) for k in p) for p in conflicts[:6])
+        more = (f" (+{len(conflicts) - 6} more)" if len(conflicts) > 6
+                else "")
+        raise ValueError(
+            f"{len(conflicts)} path(s) were edited both in the box and in the "
+            f"loaded spec: {shown}{more}")
+
+    for p, want in writes:
+        parent = doc
+        for k in p[:-1]:
+            nxt = _doc_get(parent, (k,))
+            if nxt is _ABSENT and isinstance(k, str) and isinstance(parent,
+                                                                    dict):
+                parent[k] = nxt = {}
+            elif nxt is _ABSENT:
+                raise ValueError(
+                    f"the JSON box has no container at "
+                    f"{'.'.join(str(x) for x in p[:-1])} to receive "
+                    f"{'.'.join(str(x) for x in p)}")
+            parent = nxt
+        leaf = p[-1]
+        if want is _ABSENT and isinstance(parent, dict):
+            parent.pop(leaf, None)    # loaded dropped the key: drop it too
+        elif want is _ABSENT:
+            raise ValueError(
+                f"cannot remove list element {'.'.join(str(x) for x in p)} "
+                f"in place")
+        elif isinstance(parent, dict) or (isinstance(parent, list)
+                                          and isinstance(leaf, int)
+                                          and leaf < len(parent)):
+            parent[leaf] = want
+        else:
+            raise ValueError(
+                f"the JSON box cannot hold a value at "
+                f"{'.'.join(str(x) for x in p)}")
+    return json.dumps(doc, indent=indent)
+
+
 def spec_summary_rows(spec):
     """Human-readable summary of a SimSpec as (label, value) rows for a
     table (shown under the Config-tab JSON so a changed

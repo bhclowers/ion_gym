@@ -66,7 +66,10 @@ def _wave_py(g, t_us):
     if g.waveform == "sin":
         return math.sin(om * t_us + ph)
     if g.waveform == "square":
-        return 1.0 if math.sin(om * t_us + ph) >= 0.0 else -1.0
+        d = float(getattr(g, "duty", 0.5))
+        if d == 0.5:
+            return 1.0 if math.sin(om * t_us + ph) >= 0.0 else -1.0
+        return 1.0 if ((om * t_us + ph) / (2.0 * math.pi)) % 1.0 < d else -1.0
     tt = np.asarray(g.table_t_us, float)
     vv = np.asarray(g.table_v, float)
     if t_us <= tt[0]:
@@ -174,13 +177,14 @@ class PlanarModel:
             else:
                 others.append((B0, g))
 
-        chan_phi, kinds, oms, phs, tabs = [], [], [], [], []
+        chan_phi, kinds, oms, phs, duties, tabs = [], [], [], [], [], []
         for f0, (Bs, Bc) in sin_by_f.items():
             om = f0 * 1e-6 * 2 * math.pi                 # rad/us
             chan_phi += [Bs, Bc]
             kinds += [K_SIN, K_COS]
             oms += [om, om]
             phs += [0.0, 0.0]                            # folded into Bs/Bc
+            duties += [0.5, 0.5]                         # unused by sin/cos
             tabs += [([], []), ([], [])]
         for B0, g in others:
             om = g.frequency_hz * 1e-6 * 2 * math.pi
@@ -189,9 +193,11 @@ class PlanarModel:
             phs.append(math.radians(g.phase_deg))
             if g.waveform == "square":
                 kinds.append(K_SQUARE)
+                duties.append(float(g.duty))
                 tabs.append(([], []))
             else:
                 kinds.append(K_TAB_HOLD if g.interp == "hold" else K_TAB_LIN)
+                duties.append(0.5)                       # unused by tables
                 tabs.append((list(g.table_t_us), list(g.table_v)))
 
         self.chan_phi = chan_phi
@@ -210,6 +216,7 @@ class PlanarModel:
         self.ch_kind = np.array(kinds, np.int64)
         self.ch_om = np.array(oms, np.float64)
         self.ch_ph = np.array(phs, np.float64)
+        self.ch_duty = np.array(duties, np.float64)
         off = [0]
         tt, tv = [], []
         for (a, b) in tabs:
@@ -387,6 +394,58 @@ class PlanarModel:
             ex = ex + w * self.ExK[k]
             ey = ey + w * self.EyK[k]
         return np.hypot(ex, ey)
+
+
+def assemble_drive_groups(spec, bases, v_basis=V_BASIS):
+    """A (static) + per-GROUP drive potentials from per-electrode bases.
+
+    THE one 2-D assembly (planar and stl2d call it), so a drive feature
+    cannot be honoured on one route and dropped on the other:
+      * every electrode contributes el.dc * basis to A;
+      * an electrode in SEVERAL groups contributes its basis to each
+        (membership order preserved; the old first-group-only read is
+        the L-455 defect this replaces);
+      * a group's offset_v is a STATIC shift of its members
+        (V(t) = amplitude_v * w(t) + offset_v, sim_spec contract), so
+        offset * basis folds into A exactly, for every waveform kind
+        and even when amplitude_v is 0;
+      * a group with amplitude_v == 0 gets no drive channel (its offset
+        is already in A);
+      * frequency 0 is NOT skipped: sin/square at 0 Hz are constants the
+        kernel evaluates as such (the old silent skip dropped them).
+    Returns (A, drives) with drives = [(B_phi, RFGroupSpec)] in
+    first-appearance order; amplitude is baked into B_phi (the kernel's
+    w(t) is the UNIT waveform).
+    """
+    g = spec.geometry
+    shape = next(iter(bases.values())).shape
+    A = np.zeros(shape)
+    gm = {gr.name: gr for gr in (g.rf_groups or [])}
+    group_B, group_obj, order = {}, {}, []
+    for idx, el in enumerate(g.electrodes, start=1):
+        # positional basis keying, exactly as both 2-D builds always did
+        # (el.basis remapping is a 3-D/shared-basis concept; changing the
+        # 2-D keying here would silently re-map planar decks)
+        fa = bases[idx] / v_basis
+        A = A + el.dc * fa
+        for gname in el.group_names():
+            if gname not in gm:
+                raise ValueError(
+                    f"electrode {el.name!r} names drive group {gname!r} "
+                    f"not in geometry.rf_groups ({sorted(gm)})")
+            drv = gm[gname]
+            drv.validate()
+            off = float(getattr(drv, "offset_v", 0.0))
+            if off:
+                A = A + off * fa
+            if drv.amplitude_v == 0.0:
+                continue
+            if drv.name not in group_B:
+                group_B[drv.name] = np.zeros(shape)
+                group_obj[drv.name] = drv
+                order.append(drv.name)
+            group_B[drv.name] += drv.amplitude_v * fa
+    return A, [(group_B[n], group_obj[n]) for n in order]
 
 
 @njit(cache=True, nogil=True)
@@ -940,30 +999,11 @@ def build_planar_model(spec: SimSpec, tol=1e-4, verbose=False,
                       f"solve unaffected but NOT banked — this run's work "
                       f"will be repeated next process")
 
-    # assemble A (DC) + per-DRIVE-GROUP bases (re-weight). DC and drive
-    # independent: dc always applies; the drive via the electrode's
-    # resolved group. Amplitude is baked into the composed B, so the
-    # kernel's w(t) is the UNIT waveform (table values are multipliers of
-    # amplitude_v). Voltage/drive changes re-weight cached bases — never
-    # re-solve.
-    A = np.zeros((nx, ny))
-    group_B = {}                       # group name -> composed potential
-    group_obj = {}
-    order = []
-    for idx, el in enumerate(g.electrodes, start=1):
-        fa = bases[idx] / V_BASIS      # bases are solved at V_BASIS
-        A = A + el.dc * fa
-        drv = g.electrode_drive(el)
-        if drv is None or drv.amplitude_v == 0.0:
-            continue
-        if drv.waveform in ("sin", "square") and drv.frequency_hz == 0.0:
-            continue
-        if drv.name not in group_B:
-            group_B[drv.name] = np.zeros((nx, ny))
-            group_obj[drv.name] = drv
-            order.append(drv.name)
-        group_B[drv.name] += drv.amplitude_v * fa
-    drives = [(group_B[n], group_obj[n]) for n in order]
+    # assemble A (DC + drive offsets) + per-DRIVE-GROUP bases through
+    # the ONE shared 2-D assembly (multi-membership, offset_v, 0 Hz all
+    # honoured there — see assemble_drive_groups). A voltage or drive
+    # change re-weights cached bases — never re-solves.
+    A, drives = assemble_drive_groups(spec, bases)
     # back-compat Bk: the sin drives as (B, freq_hz, phase_deg) tuples
     Bk = [(B, gg.frequency_hz, gg.phase_deg) for B, gg in drives
           if gg.waveform == "sin"]
@@ -1018,17 +1058,24 @@ def _bilin(F, gx, gy, nx, ny):
 
 
 @njit(cache=True, fastmath=False, inline="always", nogil=True)
-def _wave_eval(kind, om, ph, tab_t, tab_v, o0, o1, t):
+def _wave_eval(kind, om, ph, duty, tab_t, tab_v, o0, o1, t):
     """Unit waveform w(t) of one drive channel at LAB time t (us).
-    kinds: 0 sin, 1 cos, 2 sign(sin), 3 table-hold, 4 table-linear.
-    Tables clamp to end values; interior lookup is binary search on the
-    channel's [o0, o1) slice of the shared breakpoint arrays."""
+    kinds: 0 sin, 1 cos, 2 square(duty), 3 table-hold, 4 table-linear.
+    `duty` (squares only): fraction of the period HIGH from phase 0.
+    duty == 0.5 evaluates as sign(sin) EXACTLY (the frozen historical
+    formula, same anchoring as tracer3d._wave_eval); any other duty is
+    the phase-fraction test. Tables clamp to end values; interior lookup
+    is binary search on the channel's [o0, o1) slice of the shared
+    breakpoint arrays."""
     if kind == 0:
         return math.sin(om * t + ph)
     if kind == 1:
         return math.cos(om * t + ph)
     if kind == 2:
-        return 1.0 if math.sin(om * t + ph) >= 0.0 else -1.0
+        if duty == 0.5:
+            return 1.0 if math.sin(om * t + ph) >= 0.0 else -1.0
+        frac = ((om * t + ph) / (2.0 * math.pi)) % 1.0
+        return 1.0 if frac < duty else -1.0
     n = o1 - o0
     if n == 0:
         return 0.0
@@ -1052,7 +1099,7 @@ def _wave_eval(kind, om, ph, tab_t, tab_v, o0, o1, t):
 
 @njit(cache=True, nogil=True)
 def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
-                ch_kind, ch_om, ch_ph, tab_t, tab_v, tab_off,
+                ch_kind, ch_om, ch_ph, ch_duty, tab_t, tab_v, tab_off,
                 ele, mm, acc, dt, t_max_us, collide_on, T_k, P_pa,
                 sigma, c_star, c_bar, sig1d, m_gas, rec, rec_every,
                 nch_flags, bnd_on, bnd_val, seed, z0, vz,
@@ -1087,8 +1134,8 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
         ex = _bilin(ExA, gx, gy, nx, ny)
         ey = _bilin(EyA, gx, gy, nx, ny)
         for k in range(K):
-            w = _wave_eval(ch_kind[k], ch_om[k], ch_ph[k], tab_t, tab_v,
-                           tab_off[k], tab_off[k + 1], tt)
+            w = _wave_eval(ch_kind[k], ch_om[k], ch_ph[k], ch_duty[k],
+                           tab_t, tab_v, tab_off[k], tab_off[k + 1], tt)
             ex = ex + w * _bilin(ExK[k], gx, gy, nx, ny)
             ey = ey + w * _bilin(EyK[k], gx, gy, nx, ny)
         return ex, ey
@@ -1522,7 +1569,7 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
         n, kind, ncol, _bface = _fly_planar(
             b[0], b[1], b[3], b[4], b[6], m_i,
             model.ExA, model.EyA, model.ExK, model.EyK,
-            model.ch_kind, model.ch_om, model.ch_ph,
+            model.ch_kind, model.ch_om, model.ch_ph, model.ch_duty,
             model.tab_t, model.tab_v, model.tab_off,
             model.ele.astype(np.float64),
             model.mm_per_gu, acc_i, dt, spec.integration.t_max_us,
@@ -1580,6 +1627,18 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
     return fly_fn, col_names
 
 
+def unsupported_drive_features(spec):
+    """Declared drive features the PLANAR kernel does NOT apply: NONE,
+    as of 2026-09-16 (L-455). assemble_drive_groups honours multi-group
+    membership and folds offset_v into the static field; the kernel
+    evaluates sin, cos, square (with duty) and table (hold and linear)
+    waveforms per channel, and 0 Hz drives are constants, not skips.
+    Kept as the route's contract statement for the field export door."""
+    return []
+
+
+
+
 def build_planar_run(spec: SimSpec, verbose=False, solve_dtype=None):
     """SimSpec (planar) -> (model, fly_fn, col_names, births). Fully
     independent — no external solver. solve_dtype: None -> float64; float32 is
@@ -1603,6 +1662,7 @@ def build_planar_run(spec: SimSpec, verbose=False, solve_dtype=None):
         route="planar",
         ExA=model.ExA, EyA=model.EyA, ExK=model.ExK, EyK=model.EyK,
         ch_kind=model.ch_kind, ch_om=model.ch_om, ch_ph=model.ch_ph,
+        ch_duty=model.ch_duty,
         tab_t=model.tab_t, tab_v=model.tab_v, tab_off=model.tab_off,
         ele=model.ele, h_mm=model.mm_per_gu,
         anchor_mm=tuple(float(v) for v in model.anchor_mm),

@@ -94,9 +94,9 @@ if _IMPORTMAP is None:
     _warnings.warn(
         "ion_gym.edit.viewer: vendored three.js files are MISSING under "
         f"{_VENDOR_DIR} — falling back to the jsdelivr CDN, so the "
-        "editor will NOT work offline. Re-vendor with "
-        "`python internal/tools/vendor_three.py --update "
-        + THREE_VERSION + "`.", stacklevel=2)
+        "editor will NOT work offline. Reinstall ion_gym to restore the "
+        f"bundled three {THREE_VERSION} files; a development checkout "
+        "re-vendors them with its own tooling.", stacklevel=2)
     _cdn = f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}"
     _IMPORTMAP = {"imports": {
         "three": f"{_cdn}/build/three.module.js",
