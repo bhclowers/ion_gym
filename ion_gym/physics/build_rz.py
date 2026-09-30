@@ -416,7 +416,11 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
     tau_gate = -1.0
     for idx, el in enumerate(g.electrodes, start=1):
         fa = bases[idx] / 1e4
-        A = A + el.dc * fa
+        # dc_effective, not el.dc: add-mode (float) DC groups contribute
+        # here; set-mode ladders were already resolved into el.dc. Note
+        # the gate comment above: dc holds the PRE-gate state, so a float
+        # shifts pre- and post-gate states together, as a real rail does.
+        A = A + spec.dc_effective(el) * fa
         for gr in (g.rf_groups or []):
             if gr.waveform != "table" or gr.name not in (el.rf_groups or []):
                 continue

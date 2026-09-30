@@ -491,11 +491,14 @@ def compose_drive_channels(spec, bases, verbose=False):
     _cdtype = np.float32 if getattr(g, "channel_dtype",
                                     "float64") == "float32" else np.float64
 
-    # ---- static A: DC on every electrode (ladders already resolved) ----
+    # ---- static A: DC on every electrode (set-mode ladders already
+    # resolved into el.dc; add-mode float groups ride in through
+    # dc_effective — the ONE authority for the static voltage) ----------
     A = np.zeros(shape, np.float32)
     for i, el in enumerate(g.electrodes, start=1):
-        if el.dc:
-            A += np.float32(el.dc) * bases[i]
+        _v = spec.dc_effective(el)
+        if _v:
+            A += np.float32(_v) * bases[i]
 
     # ---- per-group potential bases (which electrodes drive each) -------
     # Phase lives on the GROUP (clean drive model). A rod pair is two
@@ -945,8 +948,9 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
     # uses ALL channels above).
     A = np.zeros(ele.shape, np.float32)
     for i, el in enumerate(spec.geometry.electrodes, start=1):
-        if el.dc:
-            A += np.float32(el.dc) * bases[i]
+        _v = spec.dc_effective(el)   # add-mode floats included: the display
+        if _v:                       # model shows what the flight uses
+            A += np.float32(_v) * bases[i]
     disp_group, B = _display_rf_pair(spec, bases, ele.shape)
     rf_V = float(disp_group.amplitude_v) if disp_group else 0.0
     om = (2 * math.pi * float(disp_group.frequency_hz) * 1e-6

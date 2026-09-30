@@ -251,7 +251,9 @@ def build_voltage_field(spec: SimSpec, bases):
     for i, e in enumerate(els, start=1):
         idx = e.basis if e.basis is not None else i
         fa = bases[idx]
-        A = A + e.dc * fa
+        # dc_effective, not e.dc: add-mode (float) DC groups contribute
+        # here; set-mode ladders were already resolved into e.dc
+        A = A + spec.dc_effective(e) * fa
         for gname in e.group_names():
             if gname not in groups:
                 raise ValueError(

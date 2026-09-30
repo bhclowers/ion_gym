@@ -38,6 +38,17 @@ REFERRER_TARGET = [None]
 #   telemetry.REFERRER_TARGET[0] = "Stl3DModel"   # or "dict:res"
 VERBOSE = [False]
 
+# THRESHOLD-TRIGGERED HOLDER DIAGNOSTICS (PI, 2026-09-29, after a 16 GB
+# footprint flying the split-float deck): when set to a number of MB,
+# any heartbeat whose reading crosses it prints the array-holder table
+# for THAT reading even with VERBOSE off — so the quiet default stays
+# quiet and the one line that matters names WHO holds the memory the
+# moment it appears. A list toggle like the others, retargetable live:
+#   from ion_gym.ui import telemetry; telemetry.HOLDERS_ABOVE_MB[0] = 8000
+# From the command line: `ion-gym dashboard --mem-holders 8000`, or a
+# bare `--mem-holders` for the full VERBOSE diagnostics every reading.
+HOLDERS_ABOVE_MB = [None]
+
 
 def _macos_phys_footprint_mb():
     """macOS phys_footprint in MB, or None if unavailable.
@@ -291,15 +302,23 @@ def snapshot(collect: bool = True, **context) -> dict:
     _mem, _lbl = mem_reading()
     figs_pre = _live_figures()
     n_collected = gc.collect() if collect else None
+    # gather holders for VERBOSE (every reading) OR when this reading
+    # crossed the declared threshold (HOLDERS_ABOVE_MB) — the walk costs
+    # a gc pass, so it runs only when one of the two asks for it
+    _thr = HOLDERS_ABOVE_MB[0]
+    _want_holders = VERBOSE[0] or (_thr is not None and _mem > float(_thr))
     snap = {"t": time.strftime("%H:%M:%S"),
             "rss_mb": _mem, "rss_label": _lbl,
             "figures_pre": figs_pre,
             "figures": _live_figures() if collect else figs_pre,
             "collected": n_collected,
             "gc_objects": len(gc.get_objects()),
-            "holders": array_holders() if VERBOSE[0] else None,
+            "holders": array_holders() if _want_holders else None,
+            "holders_reason": ("verbose" if VERBOSE[0] else
+                               f"footprint over {float(_thr):.0f}MB"
+                               if _want_holders else None),
             "referrers": (referrers_of(REFERRER_TARGET[0])
-                          if (VERBOSE[0] and REFERRER_TARGET[0])
+                          if (_want_holders and REFERRER_TARGET[0])
                           else None)}
     snap.update(context)
     return snap
@@ -310,7 +329,7 @@ def format_line(snap: dict, delta_mb: float | None = None) -> str:
     ctx = " ".join(f"{k}={v}" for k, v in snap.items()
                    if k not in ("t", "rss_mb", "figures", "figures_pre",
                                 "collected", "gc_objects",
-                                "rss_label", "holders",
+                                "rss_label", "holders", "holders_reason",
                                 "referrers"))
     pre, post = snap.get("figures_pre"), snap["figures"]
     figs = (f"{post}" if pre is None or pre == post
@@ -323,15 +342,21 @@ def format_line(snap: dict, delta_mb: float | None = None) -> str:
             + (f" | {ctx}" if ctx else ""))
     # WHO is holding it, printed under the line. The whole point of this
     # build: a total tells you there is a problem, a holder tells you
-    # where to go.
-    if not VERBOSE[0]:
+    # where to go. Printed whenever the snapshot GATHERED them — every
+    # reading under VERBOSE, or the reading that crossed HOLDERS_ABOVE_MB
+    # (the reason is stated inline so a lone holder block in a quiet log
+    # explains itself).
+    hold = snap.get("holders")
+    if hold is None:
         return head
-    ref = snap.get("referrers") or []
-    hold = snap.get("holders") or []
-    if hold:
-        head += "\n       holders: " + "; ".join(
-            f"{k} {mb:.0f}MB x{n}" for k, mb, n in hold if mb >= 1.0)
-    for line in ref:
+    reason = snap.get("holders_reason")
+    head += ("\n       holders"
+             + (f" ({reason})" if reason and reason != "verbose" else "")
+             + ": "
+             + ("; ".join(f"{k} {mb:.0f}MB x{n}"
+                          for k, mb, n in hold if mb >= 1.0)
+                or "none over 1 MB"))
+    for line in (snap.get("referrers") or []):
         head += "\n       " + line
     return head
 

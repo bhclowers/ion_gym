@@ -10,6 +10,8 @@ Options:
     ion-gym dashboard --port 5007      # serve on another port
     ion-gym dashboard --no-show        # don't open a browser
     ion-gym dashboard path/to/spec.json    # open on a specific spec
+    ion-gym dashboard --mem-holders 8000   # name array holders past 8 GB
+    ion-gym dashboard --mem-holders        # holders on every heartbeat
 
 This replaces the README's old `python -m panel serve <path-to-
 sim_app.py>` incantation with the app's own sanctioned entry point.
@@ -20,6 +22,34 @@ import sys
 
 def _dashboard(args):
     from ion_gym.ui.sim_app import SimApp
+
+    if args.mem_holders is not None:
+        # Arm the memory-holder instrumentation BEFORE the app exists so
+        # the very first heartbeat obeys it. Bare `--mem-holders` (or any
+        # value <= 0) means "always": full VERBOSE telemetry, holders on
+        # every reading. A positive value is a threshold in MB: the
+        # heartbeat stays one quiet line until the process footprint
+        # crosses it, then the crossing reading carries the holder
+        # breakdown (see telemetry.HOLDERS_ABOVE_MB).
+        from ion_gym.ui import telemetry
+        if args.mem_holders <= 0:
+            telemetry.VERBOSE[0] = True
+        else:
+            telemetry.HOLDERS_ABOVE_MB[0] = float(args.mem_holders)
+
+    if args.mem_referrers is not None:
+        # The referrer walk only runs on readings that gather holders
+        # (telemetry.snapshot gates it on the same condition), so this
+        # flag is meaningless alone — refuse with the pairing named
+        # rather than silently never printing (no hidden branches).
+        if args.mem_holders is None:
+            raise SystemExit(
+                "--mem-referrers requires --mem-holders: referrers are "
+                "walked only on readings that gather holders (add "
+                "--mem-holders for every heartbeat, or --mem-holders "
+                "<MB> for the crossing reading)")
+        from ion_gym.ui import telemetry
+        telemetry.REFERRER_TARGET[0] = args.mem_referrers
 
     spec = None
     if args.spec:
@@ -57,6 +87,17 @@ def main(argv=None):
     d.add_argument("--port", type=int, default=5006)
     d.add_argument("--no-show", action="store_true",
                    help="don't open a browser tab")
+    d.add_argument("--mem-holders", type=float, nargs="?", const=0.0,
+                   default=None, metavar="MB",
+                   help="print who is holding array memory: bare flag = on "
+                        "every heartbeat (verbose telemetry); with a value "
+                        "= only once process footprint exceeds MB "
+                        "(e.g. --mem-holders 8000)")
+    d.add_argument("--mem-referrers", metavar="CLASS", default=None,
+                   help="with --mem-holders: also walk WHO still points at "
+                        "live instances of this class (e.g. Stl3DModel) or "
+                        "at dicts carrying a key (dict:res); printed under "
+                        "the holder line")
     d.set_defaults(fn=_dashboard)
 
     e = sub.add_parser("edit",

@@ -871,7 +871,8 @@ def _run_off_doc(build, apply_fn, on_error, join_timeout_s=120.0):
     import threading as _th
     import traceback as _tb
     import panel as pn
-    st = {"done": False, "res": None, "err": None, "tb": ""}
+    st = {"done": False, "res": None, "err": None, "tb": "",
+          "apply": apply_fn, "on_error": on_error}
 
     def _work():
         try:
@@ -886,11 +887,32 @@ def _run_off_doc(build, apply_fn, on_error, join_timeout_s=120.0):
     own = {"pcb": None}
 
     def _finish():
-        if st["err"] is not None:
-            on_error(st["err"], st["tb"])
+        # RELEASE EVERYTHING THE MOMENT IT IS CONSUMED. The stopped
+        # periodic callback outlives this call (the same retention that
+        # pinned solve results through st["res"] in sim_app), and it
+        # keeps _poll -> _finish -> st alive for the session. Anything
+        # st still references is therefore pinned too — including the
+        # CALLER'S apply/on_error closures and whatever THEY captured.
+        # Measured live 2026-09-29 on the split-float tetramer: each PE
+        # compute's prep pack (`p`, a SimpleNamespace) rode the apply
+        # closure and pinned a whole Stl3DModel (~1.6 GB) plus, on the
+        # 3-D tab, the draped IonResults — the referrer walk named
+        # SimpleNamespace.model directly. Popping the refs out of st
+        # before delivering frees the caller's closures the moment the
+        # work is done; a late tick after stop finds them gone and is a
+        # benign no-op (delivery already happened — documented skip,
+        # not a swallow).
+        apply_cb = st.pop("apply", None)
+        err_cb = st.pop("on_error", None)
+        if apply_cb is None and err_cb is None:
+            return                        # already delivered
+        res = st.pop("res", None)
+        err = st.pop("err", None)
+        tb = st.pop("tb", "")
+        if err is not None:
+            err_cb(err, tb)
         else:
-            apply_fn(st["res"])
-            st["res"] = None      # release once consumed; see sim_app 4594
+            apply_cb(res)
 
     def _poll():
         if not st["done"]:

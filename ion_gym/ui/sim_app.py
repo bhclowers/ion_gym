@@ -614,10 +614,17 @@ class SimApp:
                 _report_error(e, _tb.format_exc())
             return
 
-        base_obj = self.pane.object          # pinned: identity, not id()
         self._fig_loading_gen = gen
         self.pane.loading = True
-        state = {}
+        # EVERYTHING the finish path consumes lives in this dict and is
+        # POPPED OUT when consumed: the stopped periodic callback
+        # outlives the dispatch (the same retention that pinned solve
+        # results through st["res"]) and keeps poll -> finish -> state
+        # alive for the session, so a plain local would pin the PREVIOUS
+        # pane figure (base_obj) and the built payload forever — one
+        # stale figure pair per redraw, measured accumulating on the
+        # split-float tetramer 2026-09-29.
+        state = {"base_obj": self.pane.object}   # pinned: identity, not id()
 
         def work():
             try:
@@ -633,23 +640,32 @@ class SimApp:
         own = {}
 
         def finish():
+            if state.get("delivered"):
+                return               # late tick after stop: already done
+            state["delivered"] = True
             if self._fig_loading_gen == gen:
                 self.pane.loading = False
+            # pop before use: whatever stays in `state` is pinned by the
+            # retained stopped callback (see the dict's birth above)
+            base_obj = state.pop("base_obj", None)
+            payload = state.pop("payload", None)
+            err = state.pop("err", None)
+            tb = state.pop("tb", None)
             stale = (gen != self._fig_gen
                      or self.pane.object is not base_obj)
             if stale:
                 why = ("a newer redraw" if gen != self._fig_gen
                        else "another publisher (run/PE/assembly figure)")
-                note = (f"failed ({type(state['err']).__name__}: "
-                        f"{state['err']}) and was" if "err" in state
+                note = (f"failed ({type(err).__name__}: "
+                        f"{err}) and was" if err is not None
                         else "was")
                 print(f"[sim_app] {label}: build {note} superseded by "
                       f"{why} — result dropped")
                 return
-            if "err" in state:
-                _report_error(state["err"], state["tb"])
+            if err is not None:
+                _report_error(err, tb)
                 return
-            publish(state["payload"])
+            publish(payload)
 
         def poll():
             if not state.get("done"):
@@ -1254,12 +1270,27 @@ class SimApp:
                         "travelling wave' to change the drive with one edit "
                         "instead of N.")
         self.w_tw_retune.on_click(self._on_retune_tw)
+        # REVERSE the wave (PI 2026-09-29: "sometimes when you specify
+        # the TW it is going the wrong way"). Direction is the SIGN of
+        # the phase progression, so this negates every TW group's phase
+        # — amplitude/frequency/offset untouched, and phase is
+        # drive-side, so it is a re-weight, never a re-solve. Uses the
+        # SAME prefix box as build/retune; on a split ladder (TW1_a /
+        # TW1_b) both halves flip together, keeping the wave continuous
+        # across the seam.
+        self.w_tw_reverse = _mkw(
+            pn.widgets.Button, name="⇋ reverse TW direction", width=200,
+            description="Negate every phase of the ladder with this "
+                        "prefix, flipping the wave's travel direction. "
+                        "A drive-side change: cache hit, no re-solve. "
+                        "Press again to restore the original direction.")
+        self.w_tw_reverse.on_click(self._on_reverse_tw)
         grp_rows.append(pn.Column(
             pn.pane.Markdown("###### travelling-wave builder"),
             self.w_tw_members,
             pn.Row(self.w_tw_nphase, self.w_tw_wave, self.w_tw_freq,
                    self.w_tw_amp, self.w_tw_off, self.w_tw_prefix),
-            pn.Row(self.w_tw_build, self.w_tw_retune)))
+            pn.Row(self.w_tw_build, self.w_tw_retune, self.w_tw_reverse)))
         ["(none)"] + [g.name for g in s.geometry.rf_groups]
 
         # --- DC groups (resistor-divider ladders) ------------------------
@@ -1338,14 +1369,36 @@ class SimApp:
                                     "be in a drive group at the same time.")
             derived = pn.pane.Markdown("", sizing_mode="stretch_width",
                                        margin=(0, 0, 4, 6))
+            # SET vs ADD (PI ruling 2026-09-29): 'set' is the ladder —
+            # the group OWNS member DC (boxes read-only, today's
+            # behaviour); 'add' is a FLOAT rail — the group's value is
+            # ADDED to each member's own, still-editable DC. The selector
+            # is per group and switching it re-enables/derives the member
+            # boxes IN PLACE (no tab rebuild, no scroll-to-top).
+            modew = _mkw(
+                pn.widgets.Select, name=f"{grp.name} — mode", width=210,
+                options={"set — group owns member DC": "set",
+                         "add — floats on member DC": "add"},
+                value=getattr(grp, "mode", "set"),
+                description="set: member DC is DERIVED from the group "
+                            "(ladder/divider). add: the group's value is "
+                            "ADDED on top of each member's own DC (a "
+                            "float rail) — member DC stays editable. "
+                            "Either way a change is a re-weight, never "
+                            "a re-solve.")
             self._dcg_widgets[grp.name] = dict(v_in=vin, v_out=vout,
                                                derived=derived, pick=pick,
+                                               mode=modew,
                                                uniform=is_uni)
             vin.param.watch(self._refresh_dc_derived, "value")
             if vout is not None:
                 vout.param.watch(self._refresh_dc_derived, "value")
+            modew.param.watch(
+                lambda e, g=grp.name: self._on_dcg_mode_change(g, e),
+                "value")
             pick.param.watch(self._on_dc_member_pick, "value")
-            row = pn.Row(vin) if vout is None else pn.Row(vin, vout)
+            row = (pn.Row(vin, modew) if vout is None
+                   else pn.Row(vin, vout, modew))
             dcg_rows.append(pn.Column(row, pick, derived))
         dcg_rows.append(pn.Row(self.w_dcg_new, self.w_dcg_kind, self.w_dcg_add,
                                self.w_dcg_del_pick, self.w_dcg_del,
@@ -1354,18 +1407,27 @@ class SimApp:
 
         self._v_widgets = {}
         rows = [pn.pane.Markdown("**Per-electrode** — DC always applies; "
-                                 "assign an RF group or (none). A DC-group "
-                                 "member's DC is DERIVED from the ladder "
-                                 "(read-only) — set its *number* instead:")]
+                                 "assign an RF group or (none). A SET-mode "
+                                 "DC-group member's DC is DERIVED from the "
+                                 "ladder (read-only); an ADD-mode (float) "
+                                 "member's DC stays editable and the group "
+                                 "adds on top:")]
+        _set_groups = {g.name for g in s.geometry.dc_groups
+                       if getattr(g, "mode", "set") == "set"}
         for i, el in enumerate(s.geometry.electrodes):
-            in_ladder = el.dc_group is not None
+            in_set = el.dc_group in _set_groups        # group owns the DC
+            in_add = (el.dc_group is not None) and not in_set
             dcw = _mkw(
                 pn.widgets.FloatInput,
-                name=("DC (V) — from ladder" if in_ladder else "DC (V)"),
-                value=el.dc, width=150, disabled=in_ladder,
-                description="Static (DC) potential on this electrode. When "
-                            "the electrode belongs to a DC group this is "
-                            "DERIVED from the group's in/out and its number.")
+                name=("DC (V) — from ladder" if in_set
+                      else "DC (V) + group float" if in_add
+                      else "DC (V)"),
+                value=el.dc, width=150, disabled=in_set,
+                description="Static (DC) potential on this electrode. In a "
+                            "SET-mode DC group this is DERIVED from the "
+                            "group's in/out and its number; in an ADD-mode "
+                            "(float) group it stays YOURS and the group's "
+                            "value is added on top at composition.")
             grp_choices = [g.name for g in s.geometry.rf_groups]
             grpw = _mkw(
                 pn.widgets.MultiChoice, name="drive groups", width=180,
@@ -2801,6 +2863,33 @@ class SimApp:
             active = self.tabs.active
             self.tabs[:] = new_tabs
             self.tabs.active = min(active, len(new_tabs) - 1)
+            # REPAINT KICK (PI report 2026-09-29: after add/remove of a
+            # drive group the new controls only appeared after switching
+            # tabs). Bokeh's Tabs does not reliably repaint the ACTIVE
+            # pane when its contents are replaced without an `active`
+            # change. Before v548 this was masked by ACCIDENT: the
+            # containment pass ran after this install and its
+            # Row->FlexBox swaps patched the freshly attached tree,
+            # which forced the repaint. Moving that pass pre-install
+            # (correct: 223 ms detached vs 5.8 s attached) removed the
+            # accidental kick — so here is the deliberate one: hop to a
+            # neighbouring tab and restore on the next tick, which is
+            # exactly the manual tab-switch the PI used as a workaround,
+            # automated. Skipped with no live document (headless: nothing
+            # renders, nothing to kick).
+            _doc = None
+            try:
+                _doc = getattr(pn.state, "curdoc", None)
+            except (RuntimeError, AttributeError):
+                _doc = None
+            if (_doc is not None and len(new_tabs) > 1
+                    and hasattr(_doc, "add_next_tick_callback")):
+                _target = self.tabs.active
+                self.tabs.active = (_target + 1) % len(new_tabs)
+
+                def _restore(t=_target):
+                    self.tabs.active = t
+                _doc.add_next_tick_callback(_restore)
         # initial summary population (safe if the pane exists)
         self._refresh_spec_summary()
 
@@ -3371,6 +3460,40 @@ class SimApp:
         except Exception as e:
             self.status.object = self._err_status("retune TW", e)
 
+    def _on_reverse_tw(self, _=None):
+        """Flip the TW ladder's travel direction: negate every phase of
+        the groups matching the prefix box (reverse_travelling_wave).
+        Same in-place idiom as retune — a value-only change updates the
+        per-group phase boxes directly, never rebuilds the tab — and the
+        same refusal when no ladder matches the prefix."""
+        try:
+            from ion_gym.io.sim_spec import reverse_travelling_wave
+            self._sync_spec()
+            prefix = (self.w_tw_prefix.value or "TW").strip()
+            names = reverse_travelling_wave(self.spec, prefix=prefix)
+            self._merge_loaded_into_box()
+            for g in self.spec.geometry.rf_groups:
+                if g.name not in names:
+                    continue
+                w = self._grp_widgets.get(g.name)
+                if w is None:
+                    raise RuntimeError(
+                        f"reverse: group {g.name!r} has no editor row — "
+                        f"the group editors and the spec have diverged "
+                        f"structurally; reload the deck (refusing a "
+                        f"silent partial refresh)")
+                w["phase"].value = float(g.phase_deg)
+            self.status.object = (
+                f"**reversed TW direction** — negated the phase of "
+                f"{len(names)} group(s) ({', '.join(names)}). Drive-side "
+                f"only: Fly reuses the solved field. Press again to "
+                f"restore the original direction.")
+        except ValueError as e:
+            self.status.object = (
+                f"**no travelling wave to reverse** — {e}")
+        except Exception as e:
+            self.status.object = self._err_status("reverse TW", e)
+
     def _on_dc_member_pick(self, event=None):
         """Inverted assignment: the group's member multiselect changed.
         Rewrite el.dc_group from the picker sets, number any newly-added
@@ -3416,7 +3539,9 @@ class SimApp:
                     tgt_idx = 0 if el.dc_index is None else int(el.dc_index)
                     if w["dc_index"].value != tgt_idx:
                         w["dc_index"].value = tgt_idx
-                    w["dc"].disabled = el.dc_group is not None
+                    # only a SET-mode group owns the box; an ADD-mode
+                    # (float) member keeps an editable authored DC
+                    w["dc"].disabled = self._dcg_owns_dc(s, el.dc_group)
                 for gname, gw in self._dcg_widgets.items():
                     mem = [f"e{i+1} — {e.name}"
                            for i, e in enumerate(s.geometry.electrodes)
@@ -3428,6 +3553,63 @@ class SimApp:
             self._refresh_dc_derived()
         except Exception as e:
             self.status.object = self._err_status("member pick", e)
+
+    @staticmethod
+    def _dcg_owns_dc(s, gname):
+        """True when membership in DC group `gname` DERIVES the member's
+        dc (mode='set', the ladder) — the box is then read-only and never
+        read back. False for no group and for mode='add' (float), where
+        the member's dc stays authored and editable."""
+        if gname is None:
+            return False
+        grp = next((g for g in s.geometry.dc_groups if g.name == gname),
+                   None)
+        return grp is not None and getattr(grp, "mode", "set") == "set"
+
+    def _on_dcg_mode_change(self, gname, event=None):
+        """A DC group's set/add mode selector changed. IN PLACE, like the
+        member picker (a tab rebuild scrolls to the top and detaches the
+        fired widget): write the mode into the spec, then re-derive each
+        member box's enabled state and label. Switching add -> set hands
+        the boxes to the ladder (next refresh writes the derived values);
+        set -> add leaves the current values in place as the authored
+        baselines, which is the least surprising handoff — the field is
+        unchanged at the moment of the switch when the float is 0."""
+        if getattr(self, "_suspend_live", False):
+            return
+        try:
+            s = self.spec
+            grp = next((g for g in s.geometry.dc_groups
+                        if g.name == gname), None)
+            if grp is None:
+                self.status.object = (f"**mode change failed** — DC group "
+                                      f"{gname!r} is not in the live spec")
+                return
+            grp.mode = (event.new if event is not None
+                        else self._dcg_widgets[gname]["mode"].value)
+            self.spec = s
+            self._merge_loaded_into_box()
+            self._suspend_live = True
+            try:
+                for i, el in enumerate(s.geometry.electrodes):
+                    w = self._v_widgets.get(i)
+                    if w is None or el.dc_group != gname:
+                        continue
+                    owns = grp.mode == "set"
+                    w["dc"].disabled = owns
+                    w["dc"].name = ("DC (V) — from ladder" if owns
+                                    else "DC (V) + group float")
+            finally:
+                self._suspend_live = False
+            self._refresh_dc_derived()
+            self.status.object = (
+                f"**{gname}: mode = {grp.mode}** — "
+                + ("the group now OWNS its members' DC (ladder)"
+                   if grp.mode == "set" else
+                   "the group now ADDS its value on top of each member's "
+                   "own DC (float rail); member boxes are editable"))
+        except Exception as e:
+            self.status.object = self._err_status("DC-group mode change", e)
 
     def _on_drive_member_pick(self, event=None):
         """Inverted assignment for DRIVE (RF) groups: the group's member
@@ -3628,9 +3810,12 @@ class SimApp:
             el.dc_group = None if dg == "(none)" else dg
             el.dc_index = (int(w["dc_index"].value)
                            if el.dc_group is not None else None)
-            if el.dc_group is None:
-                el.dc = w["dc"].value          # authored
-            # else: DERIVED below — never read from the (disabled) box
+            if not self._dcg_owns_dc(s, el.dc_group):
+                # ungrouped OR an ADD-mode (float) member: the box is the
+                # AUTHORED baseline and must be read
+                el.dc = w["dc"].value
+            # else: SET-mode member — DERIVED below, never read from the
+            # (disabled) box
         for name, w in getattr(self, "_dcg_widgets", {}).items():
             for grp in s.geometry.dc_groups:
                 if grp.name == name:
@@ -3639,7 +3824,10 @@ class SimApp:
                         grp.v_out = float(w["v_out"].value)
                     elif getattr(grp, "uniform", False):
                         grp.v_out = grp.v_in
-        s.resolve_dc_groups()                  # ladders/uniform -> member dc
+                    if w.get("mode") is not None:
+                        grp.mode = w["mode"].value
+        s.resolve_dc_groups()   # SET ladders/uniform -> member dc;
+        #                         ADD (float) groups apply at composition
         s.collisions.enabled = self.w_gas_on.value
         s.collisions.gas = self.w_gas.value
         s.collisions.T_k = self.w_T.value
@@ -4251,15 +4439,37 @@ class SimApp:
                         grp.v_out = float(w["v_out"].value)
                     elif getattr(grp, "uniform", False):
                         grp.v_out = grp.v_in     # uniform: mirror
+                    if w.get("mode") is not None:
+                        grp.mode = w["mode"].value
         s.resolve_dc_groups()
         for i, el in enumerate(s.geometry.electrodes):
-            if el.dc_group is not None and i in self._v_widgets:
+            # push the DERIVED value back only for SET-mode members; an
+            # ADD-mode (float) box is the user's AUTHORED baseline and a
+            # write-back here would stomp it mid-edit
+            if self._dcg_owns_dc(s, el.dc_group) and i in self._v_widgets:
                 self._v_widgets[i]["dc"].value = round(float(el.dc), 6)
         for name, w in getattr(self, "_dcg_widgets", {}).items():
             mem = sorted((e for e in s.geometry.electrodes
                           if e.dc_group == name),
                          key=lambda e: (e.dc_index if e.dc_index is not None
                                         else 0))
+            _grp = next((g for g in s.geometry.dc_groups if g.name == name),
+                        None)
+            if _grp is not None and getattr(_grp, "mode", "set") == "add":
+                # FLOAT rail: the group ADDS to each member's own DC —
+                # the summary states the addition, not a derived ladder
+                if not mem:
+                    w["derived"].object = "_float (add): no members yet_"
+                elif w.get("uniform"):
+                    w["derived"].object = (
+                        f"_float (add): +{_grp.v_in:g} V on top of each of "
+                        f"{len(mem)} member(s)' own DC_")
+                else:
+                    w["derived"].object = (
+                        f"_float ladder (add): +{_grp.v_in:g} V → "
+                        f"+{_grp.v_out:g} V across the taps, on top of "
+                        f"each member's own DC_")
+                continue
             if w.get("uniform"):
                 if mem:
                     w["derived"].object = (

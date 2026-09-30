@@ -443,7 +443,9 @@ def assemble_drive_groups(spec, bases, v_basis=V_BASIS):
         # (el.basis remapping is a 3-D/shared-basis concept; changing the
         # 2-D keying here would silently re-map planar decks)
         fa = bases[idx] / v_basis
-        A = A + el.dc * fa
+        # dc_effective, not el.dc: add-mode (float) DC groups contribute
+        # here; set-mode ladders were already resolved into el.dc
+        A = A + spec.dc_effective(el) * fa
         for gname in el.group_names():
             if gname not in gm:
                 raise ValueError(

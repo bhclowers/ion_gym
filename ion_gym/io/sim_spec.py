@@ -433,6 +433,36 @@ def travelling_wave_groups(n, frequency_hz=5e5, amplitude_v=50.0,
             for k in range(n)]
 
 
+def reverse_travelling_wave(spec, *, prefix="TW"):
+    """Flip the propagation DIRECTION of an existing travelling-wave
+    ladder (PI, 2026-09-29: "sometimes when you specify the TW it is
+    going the wrong way").
+
+    Each TW group drives waveform(w*t + phase_k); the wave's direction
+    lives entirely in the SIGN of the phase progression across the
+    groups, so negating every phase reverses the travel while leaving
+    amplitude, frequency, waveform, duty and offset untouched. Phase is
+    drive-side, so the reversed deck is a basis-cache HIT — never a
+    re-solve. Applying it twice restores the original ladder exactly.
+
+    Selection matches retune_travelling_wave: every rf_group whose name
+    starts with `prefix` (which also catches split ladders named
+    TW1_a/TW1_b — both halves flip together, keeping the wave continuous
+    across a seam). Mutates `spec` in place and returns the reversed
+    group names. Raises (not a silent no-op) if no group matches, so a
+    mis-prefixed call is caught rather than quietly doing nothing."""
+    g = spec.geometry
+    tw = [gr for gr in g.rf_groups if gr.name.startswith(prefix)]
+    if not tw:
+        raise ValueError(
+            "reverse_travelling_wave: no groups with prefix {0!r} — "
+            "nothing to reverse (build the ladder first, or pass the "
+            "ladder's actual prefix)".format(prefix))
+    for gr in tw:
+        gr.phase_deg = -float(gr.phase_deg)
+    return [gr.name for gr in tw]
+
+
 def retune_travelling_wave(spec, *, amplitude_v=None, frequency_hz=None,
                            waveform=None, duty=None, offset_v=None,
                            phase_step_deg=None, prefix="TW"):
@@ -611,11 +641,28 @@ class DCGroupSpec(_StrictAttrs):
       'linear'  -- equal rungs (an ideal divider with identical resistors)
       'weights' -- per-member `dc_weight` in [0,1] positions each tap along
                    the ramp, for an unequal ladder. Set exactly one.
+
+    mode (PI ruling 2026-09-29: "I want groups to be additive"):
+      'set' -- everything above: the group OWNS the member voltage, the
+               member dc is derived, not authored. The ladder/divider
+               semantics every shipped deck uses; the default, so every
+               existing deck is unchanged.
+      'add' -- a FLOAT rail: the member dc stays AUTHORED and editable,
+               and the group's per-member value (v_in for uniform, the
+               interpolated tap for a ladder) is ADDED on top at
+               composition time. Physically a supply riding on a common
+               float. The addition is applied by SimSpec.dc_effective()
+               inside the static-field composers and is NEVER written
+               into the member: an additive resolve_dc_groups() would
+               compound on every call and leak summed voltages into
+               saved decks. Sweeping the float is a basis re-weight,
+               never a re-solve.
     """
     name: str = "LADDER"
     v_in: float = 0.0
     v_out: float = 0.0
     interp: str = "linear"          # 'linear' | 'weights'
+    mode: str = "set"               # 'set' (group owns dc) | 'add' (float)
     uniform: bool = False           # plain equal-V set: all members at v_in
     # A 'uniform' group is a non-ladder DC group — every
     # member sits at the SAME voltage (v_in); v_out tracks it. It is exactly
@@ -629,6 +676,44 @@ class DCGroupSpec(_StrictAttrs):
     def from_dict(cls, d):
         return cls(**{k: v for k, v in (d or {}).items()
                       if k in cls.__dataclass_fields__})
+
+
+def dc_group_member_values(grp, mem):
+    """{member electrode name: the GROUP's per-member voltage}.
+
+    THE one implementation of a DC group's value distribution — uniform,
+    linear ladder, weighted ladder — factored out of resolve_dc_groups()
+    so that 'set' mode (which WRITES these values into member dc) and
+    'add' mode (which ADDS them at composition, via dc_effective) cannot
+    drift into two interpolation rules. The refusals are the resolve
+    originals, verbatim in meaning: a weighted ladder with an unweighted
+    member and an indexed ladder with an unindexed member are refused by
+    name, never silently parked at v_in."""
+    if grp.uniform:
+        return {e.name: float(grp.v_in) for e in mem}
+    if grp.interp == "weights":
+        _now = [e.name for e in mem if e.dc_weight is None]
+        if _now:
+            raise ValueError(
+                f"dc_group {grp.name!r} (interp='weights'): "
+                f"member(s) {_now} have no dc_weight — a "
+                f"weighted ladder needs every tap placed")
+        return {e.name: float(grp.v_in)
+                + (float(grp.v_out) - float(grp.v_in)) * float(e.dc_weight)
+                for e in mem}
+    idx = [e.dc_index for e in mem]
+    _noi = [e.name for e in mem if e.dc_index is None]
+    if _noi:
+        raise ValueError(
+            f"dc_group {grp.name!r} (interp="
+            f"{grp.interp!r}): member(s) {_noi} have no "
+            f"dc_index — an indexed ladder needs every "
+            f"rung numbered")
+    lo, hi = min(idx), max(idx)
+    span = (hi - lo) or 1
+    return {e.name: float(grp.v_in)
+            + (float(grp.v_out) - float(grp.v_in)) * (e.dc_index - lo) / span
+            for e in mem}
 
 
 @dataclass
@@ -714,8 +799,10 @@ class ElectrodeSpec(_StrictAttrs):
         if self.dc_group is not None:
             tap = (f"weight {self.dc_weight:g}" if self.dc_weight is not None
                    else f"index {self.dc_index}")
-            parts.append(f"DC ladder '{self.dc_group}' tap {tap} "
-                         "(dc derived, not authored)")
+            # mode lives on the GROUP, which this per-electrode view
+            # cannot see: 'set' derives the dc, 'add' floats on top of it
+            parts.append(f"DC group '{self.dc_group}' tap {tap} "
+                         "(set mode derives dc; add mode floats it)")
         if self.metal_depth_mm is not None:
             parts.append(f"metal depth {self.metal_depth_mm:g} mm "
                          "(overrides the stage declaration)")
@@ -1614,46 +1701,44 @@ class SimSpec(_StrictAttrs):
             mem = [e for e in g.electrodes if e.dc_group == grp.name]
             if not mem:
                 continue
+            if getattr(grp, "mode", "set") == "add":
+                # ADDITIVE (float) group: the member dc stays AUTHORED —
+                # nothing is written here. The group's contribution is
+                # applied at composition through dc_effective(), because
+                # an additive write here would compound on every resolve
+                # call and a save after resolve would leak the summed
+                # voltage into the deck.
+                continue
+            vals = dc_group_member_values(grp, mem)
             if grp.uniform:
-                # plain equal-V group: every member at v_in (v_out mirrors)
+                # plain equal-V group: v_out mirrors v_in
                 grp.v_out = grp.v_in
-                for e in mem:
-                    e.dc = float(grp.v_in)
-                continue
-            if grp.interp == "weights":
-                # weights mode: dc_weight IS the tap position;
-                # dc_index is not consulted (it may be None). A
-                # member without a weight is REFUSED by name — the
-                # old silent default of 0.0 parked it at v_in, a
-                # hidden branch (caught 2026-09-12 when per-plate
-                # weighted ladders first exercised this path with
-                # index-free members).
-                _now = [e.name for e in mem if e.dc_weight is None]
-                if _now:
-                    raise ValueError(
-                        f"dc_group {grp.name!r} (interp='weights'): "
-                        f"member(s) {_now} have no dc_weight — a "
-                        f"weighted ladder needs every tap placed")
-                for e in mem:
-                    f = float(e.dc_weight)
-                    e.dc = float(grp.v_in) + (float(grp.v_out)
-                                              - float(grp.v_in)) * f
-                continue
-            idx = [e.dc_index for e in mem]
-            _noi = [e.name for e in mem if e.dc_index is None]
-            if _noi:
-                raise ValueError(
-                    f"dc_group {grp.name!r} (interp="
-                    f"{grp.interp!r}): member(s) {_noi} have no "
-                    f"dc_index — an indexed ladder needs every "
-                    f"rung numbered")
-            lo, hi = min(idx), max(idx)
-            span = (hi - lo) or 1
             for e in mem:
-                f = (e.dc_index - lo) / span
-                e.dc = float(grp.v_in) + (float(grp.v_out)
-                                          - float(grp.v_in)) * f
+                e.dc = vals[e.name]
         return self
+
+    def dc_effective(self, el):
+        """The static voltage this electrode contributes to the field:
+        its authored dc PLUS any additive (mode='add') DC-group value.
+
+        THE one authority the static-field composers consult (planar,
+        r-z, and both 3-D assemblers) — displayed == solver input means
+        any surface that states an electrode's voltage states THIS
+        number, not el.dc alone. For a set-mode member el.dc is already
+        the resolved value and the group adds nothing here; for an
+        add-mode member el.dc is the authored baseline and the group's
+        per-member value (dc_group_member_values) rides on top. Never
+        mutates anything, so calling it any number of times is safe."""
+        base = float(el.dc or 0.0)
+        if el.dc_group is None:
+            return base
+        grp = next((x for x in self.geometry.dc_groups
+                    if x.name == el.dc_group), None)
+        if grp is None or getattr(grp, "mode", "set") != "add":
+            return base
+        mem = [e for e in self.geometry.electrodes
+               if e.dc_group == grp.name]
+        return base + dc_group_member_values(grp, mem)[el.name]
 
     def validate(self):
         errs = []
@@ -1923,6 +2008,11 @@ class SimSpec(_StrictAttrs):
             if gr.interp not in ("linear", "weights"):
                 errs.append(f"dc_group {gr.name}: interp must be "
                             f"'linear'|'weights', got {gr.interp!r}")
+            if getattr(gr, "mode", "set") not in ("set", "add"):
+                errs.append(f"dc_group {gr.name}: mode must be "
+                            f"'set' (group owns member dc) or 'add' "
+                            f"(float rail added to authored dc), got "
+                            f"{gr.mode!r}")
         seen = {}
         for e in g.electrodes:
             if e.dc_group is None:

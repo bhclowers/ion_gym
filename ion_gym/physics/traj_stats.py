@@ -185,9 +185,12 @@ def operating_point(spec) -> str:
             n=g.name, a=g.amplitude_v, f=g.frequency_hz / 1e3,
             p=g.phase_deg)
         for g in (spec.geometry.rf_groups or []))
-    dcs = ", ".join("{0} {1:g}V".format(e.name, e.dc)
+    # dc_effective, not e.dc: a certified number's operating point must
+    # state the voltage the solver RECEIVED, and an add-mode (float) DC
+    # group contributes at composition, not in e.dc
+    dcs = ", ".join("{0} {1:g}V".format(e.name, spec.dc_effective(e))
                     for e in spec.geometry.electrodes
-                    if e.dc not in (None, 0.0))
+                    if spec.dc_effective(e) not in (None, 0.0))
     mz = "/".join("{0:g}".format(m) for m in (spec.source.mz_list or []))
     return ("RF[{gs}] DC[{dcs}] {p:g} Torr {gas} m/z {mz} "
             "n={n} t_max {tm:g}us dt {dt:g}ns").format(
