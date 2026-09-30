@@ -489,7 +489,7 @@ def save_trajectories(results, spec, path=None, label=None):
                 mz_da=_mz_per_ion(spec, index),
                 n_skipped=n_skipped)
     if path is None:
-        path = str(paths.fields_dir() /
+        path = str(paths.trajectories_dir() /
                    f"{_slug(meta['spec_name'])}__"
                    f"{meta['geometry_key'][:8]}.traj.npz")
     # PLAIN-ARRAY MIRROR of the display metadata (a

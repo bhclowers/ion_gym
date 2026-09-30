@@ -48,7 +48,6 @@ from ion_gym.io.spec_io import load_any_spec
 from ion_gym.physics.sim_build import build_run, build_needs_solve, build_route
 from ion_gym.physics.ensemble_driver import run_threaded
 from ion_gym.ui.widget_options import set_options
-from ion_gym.viz.viz_core import VizError
 from ion_gym.viz import viz_core as V
 
 # bound for the headless (no-server) build wait — a pathological-stall
@@ -117,6 +116,29 @@ def _mz_color_map(mz_values):
 # too so the pre-run estimate does not over-promise.
 NUMBA_JIT_FIRST_FLY_S = 39.0   # [measured on an einzel fly]
 
+# Nominal np.savez_compressed throughput for float64 trajectory data, used
+# ONLY for the pre-save time hint in the status pane. It is a rough figure
+# (zlib level-6 on scientific float64 runs ~20-60 MB/s, machine- and
+# compressibility-dependent); the completion line reports the MEASURED
+# elapsed, which supersedes it. Not a physics value and not on any hot path.
+SAVE_COMPRESS_MB_PER_S = 40.0
+
+# DECLARED-BLOCK BUDGETS, in seconds. Two places hold the event loop on
+# purpose and tell the user so; these are the numbers they advertise, named
+# once so the status text the user reads and the window the watchdog checks
+# cannot drift apart. They are UI-latency expectations, not physics: a
+# stall inside one is the app doing what it said, a stall past one is a
+# defect and the watchdog reports it as an overrun.
+#
+# Both are upper ends, chosen to sit above the largest shipped example
+# rather than tuned to any single deck (surround SLIM is the reference for
+# the render; a many-electrode Voltages tab is the reference for the
+# rebuild, measured at ~5.8 s for 1571 Panel nodes in-container and
+# assumed up to ~4x slower on a student laptop). Raise one only when the
+# work itself got slower, and change the advertised text with it.
+GEOMETRY_RENDER_BUDGET_S = 30.0
+CONTROL_REBUILD_BUDGET_S = 25.0
+
 
 # ------------------------------------------------- control-column containment
 def required_width(obj, default_widget_px: int = DEFAULT_WIDGET_PX) -> int:
@@ -128,6 +150,18 @@ def required_width(obj, default_widget_px: int = DEFAULT_WIDGET_PX) -> int:
     width takes Panel's default (`default_widget_px`) -- undeclared is not
     zero, and treating it as zero is how a row of three bare Buttons reads as
     "narrow" while needing 960 px.
+
+    NOT MEMOIZED, and that is a measured decision rather than an omission.
+    `fit_to_column` asks about every node of a tree and this function
+    re-descends each node's subtree, which is O(N * depth) and looks worth
+    caching. A per-pass {id(obj): (obj, need)} table was built and timed on
+    a 1571-node column: 258/202/204/211/215 ms without it against
+    270/205/201/208/277 ms with it, i.e. a wash, because the control column
+    is shallow (Tabs > Column > Column > Row > widget) so `depth` is about
+    5 and the dict traffic costs what the re-descent saves. The real cost
+    of the containment pass is Panel model construction, not this
+    arithmetic -- see fit_to_column. Do not add the table back without a
+    deeper tree and a measurement that shows it paying.
     """
     kids = list(getattr(obj, "objects", None) or [])
     margin = getattr(obj, "margin", None)
@@ -177,6 +211,16 @@ def fit_to_column(root, budget_px: int, *, label: str = "column"):
 
     Returns the list of `(path, needed_px)` it rewrapped.  Every swap is
     a reported decision, not a silent reshuffle.
+
+    CALL THIS ON A DETACHED TREE. Every swap is a live mutation of a Panel
+    container, and once the container has a Bokeh document root each one
+    rebuilds models under the document lock. Measured on a 1571-node
+    column: 223 ms detached against 5.8 s attached, and neither
+    `pn.io.hold` nor the width table below changes the attached figure,
+    because the cost is model construction and not event dispatch. The
+    swap is idempotent (a `pn.FlexBox` is not a `pn.Row`), so calling this
+    again on an already-fitted tree is free -- which is what makes it safe
+    on the panels that persist across rebuilds.
     """
     rewrapped: list[tuple[str, int]] = []
 
@@ -197,12 +241,17 @@ def fit_to_column(root, budget_px: int, *, label: str = "column"):
     for path, need in rewrapped:
         print(f"[sim_app] {label}: wrapped a {need}px row into {budget_px}px "
               f"at {path} (pn.Row -> pn.FlexBox)")
-    over = required_width(root, DEFAULT_WIDGET_PX) - budget_px
+    # ONCE, into a local. This used to be three separate full descents of
+    # the tree for one comparison: one for the test and two more inside the
+    # warning's own f-string, both discarded. Small, but computing the same
+    # number three times and throwing two away is waste at any size.
+    total = required_width(root, DEFAULT_WIDGET_PX)
+    over = total - budget_px
     if over > 0:
         # A single leaf wider than the whole column cannot be wrapped. Say so
         # by name rather than letting it paint over the plot unannounced.
         print(f"[sim_app] WARNING: {label} still needs "
-              f"{required_width(root, DEFAULT_WIDGET_PX)}px against a "
+              f"{total}px against a "
               f"{budget_px}px budget ({over}px over) — a single widget is "
               f"wider than the column; give it a width or split it.")
     return rewrapped
@@ -463,6 +512,177 @@ class SimApp:
                               "value")
         self._update_dt_advice()
         self._draw_geometry_only()
+
+    def _expect_block(self, label: str, budget_s: float):
+        """Declare a deliberate, advertised block of the event loop.
+
+        A thin accessor so call sites read as one `with` line instead of
+        carrying a watchdog-exists check each. `contextlib.nullcontext` is
+        the honest no-op when no watchdog is armed: NOTHING is being
+        skipped or masked — the block still happens exactly as before, and
+        there is simply no watchdog to annotate. See
+        LoopStallWatchdog.expect_block for what the annotation does.
+
+        `budget_s` is what the caller TOLD THE USER it would take, so the
+        two live next to each other and cannot drift apart silently."""
+        import contextlib
+        wd = getattr(self, "_watchdog", None)
+        if wd is None:
+            return contextlib.nullcontext()
+        return wd.expect_block(label, budget_s)
+
+    # --------------------------------------------- off-loop figure builds
+    #
+    # WHY (a student's Windows hang dump, 2026-09-29): building the main
+    # pane's figure — el_mask_fills, potential_contours, the geometry
+    # preview's rasters — ran on the Bokeh document lock and held the UI
+    # for the length of the compute, 15 s+ on his decks. The build is the
+    # right thing to move and the assignment is the right thing to keep:
+    # a detached go.Figure is plain Python (measured builds 8-129 ms and
+    # scaling with content, against a flat 2-4 ms to assign to a live
+    # Plotly pane — a Plotly pane ships data, not a Bokeh model tree, so
+    # it does not pay the control-column attach cost). The heavy inner
+    # work is numpy, which releases the GIL, so a worker genuinely frees
+    # the loop.
+    #
+    # THE HAZARD this dispatcher exists to close is not the threading, it
+    # is STALENESS: a build that finishes after the user changed the
+    # view, loaded a deck, or flew ions must be DROPPED, or the app
+    # trades a visible stall for an intermittently wrong picture — worse,
+    # because nothing says so. Two guards, both cheap:
+    #   * a generation counter: every dispatch bumps it, a result whose
+    #     generation is no longer current is dropped (with a console
+    #     line, never silently);
+    #   * pane identity: the figure the pane held at dispatch is pinned
+    #     in the closure, and if the pane holds a DIFFERENT object at
+    #     publish time then some non-dispatched path (a flight redraw,
+    #     a PE figure) published meanwhile and this result is stale even
+    #     though no newer dispatch bumped the counter.
+    # Two purity regimes, stated rather than implied:
+    #   * the geometry preview snapshots EVERY input on the loop and
+    #     builds through a staticmethod that cannot see a widget — the
+    #     strict form;
+    #   * _base_figure still reads display widgets internally (~370
+    #     lines of them), which is tolerated on the worker because of an
+    #     invariant the app already depends on: every widget that feeds
+    #     the figure triggers a redraw when changed (otherwise the
+    #     figure could not track the widget even synchronously), and
+    #     that redraw dispatches a NEWER generation, so a build that
+    #     read a mid-change mix is dropped at publish. A mid-build spec
+    #     swap likewise raises or goes stale and is reported, never
+    #     shown. Anyone adding a widget that feeds _base_figure without
+    #     wiring a redraw watcher breaks that invariant for the
+    #     synchronous case too — the async case just inherits it.
+
+    def _dispatch_figure(self, label, build, publish, on_error=None):
+        """Build the main figure off the event loop; publish only if
+        still current.
+
+        `build` () -> payload, runs on a WORKER and must not touch
+        widgets or panes (callers close over loop-side snapshots).
+        `publish` (payload) -> None, runs on the LOOP, does the pane
+        assignment and any follow-up UI refreshes.
+        `on_error` (exc) -> None, loop side, replaces the default status
+        splash when a call site owes a more specific message.
+
+        FAST PATH: after starting the worker the loop waits up to 50 ms;
+        a build that finishes inside it publishes synchronously with no
+        poll latency, so a plane switch on a small deck feels exactly as
+        it did. Heavy decks miss the window and go through the 200 ms
+        poll, which is the case that used to be a 15 s freeze.
+
+        Headless (no server session): synchronous, same behaviour as
+        before this dispatcher existed — there is no loop to protect and
+        no session to go stale."""
+        import traceback as _tb
+
+        import panel as pn
+        gen = self._fig_gen = getattr(self, "_fig_gen", 0) + 1
+
+        def _report_error(e, tb_text):
+            print(tb_text, end="")
+            if on_error is not None:
+                on_error(e)
+            else:
+                self.status.object = (
+                    f"**{label} error:** {type(e).__name__}: {e}")
+
+        if pn.state.curdoc is None:
+            try:
+                publish(build())
+            except Exception as e:
+                _report_error(e, _tb.format_exc())
+            return
+
+        base_obj = self.pane.object          # pinned: identity, not id()
+        self._fig_loading_gen = gen
+        self.pane.loading = True
+        state = {}
+
+        def work():
+            try:
+                state["payload"] = build()
+            except Exception as e:           # transport, not a swallow:
+                state["err"] = e             # re-surfaced on the loop,
+                state["tb"] = _tb.format_exc()   # traceback and all
+            finally:
+                state["done"] = True
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        own = {}
+
+        def finish():
+            if self._fig_loading_gen == gen:
+                self.pane.loading = False
+            stale = (gen != self._fig_gen
+                     or self.pane.object is not base_obj)
+            if stale:
+                why = ("a newer redraw" if gen != self._fig_gen
+                       else "another publisher (run/PE/assembly figure)")
+                note = (f"failed ({type(state['err']).__name__}: "
+                        f"{state['err']}) and was" if "err" in state
+                        else "was")
+                print(f"[sim_app] {label}: build {note} superseded by "
+                      f"{why} — result dropped")
+                return
+            if "err" in state:
+                _report_error(state["err"], state["tb"])
+                return
+            publish(state["payload"])
+
+        def poll():
+            if not state.get("done"):
+                if not worker.is_alive():
+                    # died without reporting (interpreter-level only:
+                    # work() sets done in a finally) — say so, stop
+                    pcb = own.pop("pcb", None)
+                    if pcb is not None:
+                        pcb.stop()
+                    if self._fig_loading_gen == gen:
+                        self.pane.loading = False
+                    self.status.object = (
+                        f"**{label} error:** the build thread died "
+                        f"without reporting — see the console")
+                    return
+                # keep the spinner asserted: _finish_render's finally
+                # clears pane.loading the moment the (now immediate)
+                # dispatch returns, so the long-build case re-raises it
+                if self._fig_loading_gen == gen and not self.pane.loading:
+                    self.pane.loading = True
+                return
+            pcb = own.pop("pcb", None)
+            if pcb is not None:
+                pcb.stop()
+            finish()
+
+        # fast path: a small build publishes with zero poll latency
+        worker.join(timeout=0.05)
+        if state.get("done"):
+            finish()
+            return
+        own["pcb"] = pn.state.add_periodic_callback(poll, 200)
+        self._ensure_watchdog_pulse()
 
     def _ensure_watchdog_pulse(self):
         """Arm the 1 s loop-side pulse once a server session exists.
@@ -914,12 +1134,30 @@ class SimApp:
             _tsum = ("" if _is_step else
                      f"table: {len(_tt)} pts, t {_tt[0]:g}..{_tt[-1]:g} µs "
                      f"(read-only)" if _tt else "")
-            tau_row = pn.Row(tau, pn.pane.Markdown(_tsum, width=220))
+            # STATIC DC OFFSET of this group: V(t)=amplitude*shape(t)+offset,
+            # folded into the static field (build_planar/build_rz/build_stl3d)
+            # — always applied, but previously with no per-group editor (only
+            # the TW builder set it, invisibly). amplitude 0 + nonzero offset
+            # is a pure DC electrode.
+            off = pn.widgets.FloatInput(
+                name=f"{grp.name} offset (V)",
+                value=float(getattr(grp, "offset_v", 0.0)),
+                width=DRIVE_W["amp"], description="Static DC offset added to "
+                "this group's waveform: V(t) = amplitude*shape(t) + offset "
+                "(volts). Folds into the static field. Amplitude 0 with a "
+                "non-zero offset is a pure DC electrode.")
+            tau_row = pn.Row(off, tau, pn.pane.Markdown(_tsum, width=220))
             def _tau_gate(ev, _tau=tau, _n=len(_tt)):
                 _tau.disabled = not (ev.new == "table" and _n in (0, 2))
             wave.param.watch(_tau_gate, "value")
+            # keep the dt-adequacy advice live: amplitude gates whether a
+            # group counts as an enabled RF drive, frequency sets its period,
+            # and both feed the steps-per-period estimate.
+            amp.param.watch(lambda _e: self._update_dt_advice(), "value")
+            freq.param.watch(lambda _e: self._update_dt_advice(), "value")
             self._grp_widgets[grp.name] = dict(amp=amp, freq=freq, phase=ph,
-                                               wave=wave, duty=duty, tau=tau)
+                                               wave=wave, duty=duty, tau=tau,
+                                               off=off)
             # INVERTED PICKER for the drive group: choose
             # members from the group side. An electrode can be in several
             # drive groups AND a DC group at once, so this is additive.
@@ -2521,6 +2759,37 @@ class SimApp:
             ("Multi FA", multifa_tab),
             ("Config", config_tab)]
 
+        # CONTAINMENT BELONGS HERE, NOT IN panel() (the
+        # sidebar still crossed into the plot after
+        # LOADING AN EXAMPLE).  panel() runs once, at construction; the
+        # install below repopulates the same container on every spec load
+        # with FRESH pn.Row objects, so a containment pass done at layout
+        # time is discarded by the first reload.  Fitting at BUILD time
+        # covers the first build and every rebuild by construction --
+        # there is no second place a tab can enter the column from.
+        #
+        # BEFORE THE INSTALL, NOT AFTER (2026-09-29). This pass used to run
+        # on self.tabs once the content was already in it, which on a
+        # reload means every pn.Row -> pn.FlexBox swap mutates a
+        # document-attached container and rebuilds Bokeh models under the
+        # document lock. Measured on a 1571-node column: 223 ms fitting the
+        # detached content against 5.8 s fitting the attached tree, and
+        # pn.io.hold does not help because the cost is model construction
+        # rather than event dispatch. Fitting each tab's content while it
+        # is still detached is the same work on the same objects -- the
+        # invariant above is unchanged, only the moment is earlier.
+        #
+        # Per TAB rather than per column, which also makes the over-budget
+        # warning name the tab it came from. A pn.Tabs stacks, so its own
+        # requirement is the max over the tabs and nothing is lost.
+        # Idempotent on the panels that persist across rebuilds
+        # (_ionsrc_col, _geomimp_tabs, the status tab): their rows are
+        # already pn.FlexBox from the first build, so no swap fires and the
+        # attached-tree cost is never paid for them.
+        for _title, _content in new_tabs:
+            fit_to_column(_content, CONTROL_COL_PX,
+                          label=f"control column/{_title}")
+
         if getattr(self, "tabs", None) is None:
             # first build: create the persistent container
             self.tabs = pn.Tabs(*new_tabs, width=CONTROL_COL_PX,
@@ -2532,15 +2801,6 @@ class SimApp:
             active = self.tabs.active
             self.tabs[:] = new_tabs
             self.tabs.active = min(active, len(new_tabs) - 1)
-        # CONTAINMENT BELONGS HERE, NOT IN panel() (the
-        # sidebar still crossed into the plot after
-        # LOADING AN EXAMPLE).  panel() runs once, at construction; the line
-        # above repopulates the same container on every spec load with FRESH
-        # pn.Row objects, so a containment pass done at layout time is
-        # discarded by the first reload.  Fitting at BUILD time covers the
-        # first build and every rebuild by construction -- there is no second
-        # place a tab can enter the column from.
-        fit_to_column(self.tabs, CONTROL_COL_PX, label="control column")
         # initial summary population (safe if the pane exists)
         self._refresh_spec_summary()
 
@@ -2677,6 +2937,16 @@ class SimApp:
                                                width=130)
         self.reset_btn = pn.widgets.Button(name="Reset app",
                                            button_type="warning", width=90)
+        # Persistent coarse-dt warning in the top bar, next to Reset. Empty
+        # when the step resolves the current RF/gas physics; shows the
+        # recommended dt when it does not. Written by _update_dt_advice, the
+        # SAME estimate the gas-tab advice uses (one computation, two homes).
+        self.w_dt_warn = pn.pane.Markdown("", margin=(6, 8),
+                                          styles={"color": "#b00"})
+        # refresh now that the top-bar warning exists: the startup call ran
+        # before it was created, so a deck loaded with a coarse dt would show
+        # no top warning until the first edit without this.
+        self._update_dt_advice()
         self.view_xy = pn.widgets.Button(name="xy", width=50)
         self.view_xz = pn.widgets.Button(name="xz", width=50)
         self.view_yz = pn.widgets.Button(name="yz", width=50)
@@ -2762,8 +3032,10 @@ class SimApp:
         """Reset the app to the spec it was created with; drop stored
         runs and displayed ions."""
         self._fly_chip("idle")
-        if self._handle is not None and not self._handle.done:
-            self._handle.stop("reset")
+        # stops the flight AND any running solve (the per-site
+        # handle-only stop this replaces left the solve running through
+        # a Reset)
+        self._abort_inflight("Reset")
         # Reset ALWAYS recovers the run machinery: a wedged or dead
         # handle cannot survive it.
         self._handle = None
@@ -2829,6 +3101,7 @@ class SimApp:
         top = pn.Row(self.start_btn,
                      self.stop_btn, self.clear_btn,
                      self.recompute_btn, self.reset_btn,
+                     self.w_dt_warn,
                      self.fly_chip,
                      pn.layout.HSpacer(), editor_link, flight_link,
                      # ping / mem-autolog moved to the Status tab (PI
@@ -3082,6 +3355,8 @@ class SimApp:
                         f"silent partial refresh)")
                 w["amp"].value = float(g.amplitude_v)
                 w["freq"].value = float(g.frequency_hz)
+                if "off" in w:
+                    w["off"].value = float(getattr(g, "offset_v", 0.0))
                 w["wave"].value = g.waveform
             self.status.object = (
                 f"**retuned {len(names)} TW phase groups** "
@@ -3316,6 +3591,8 @@ class SimApp:
                     grp.amplitude_v = gw["amp"].value
                     grp.frequency_hz = gw["freq"].value
                     grp.phase_deg = gw["phase"].value
+                    if "off" in gw:
+                        grp.offset_v = float(gw["off"].value)
                     if "wave" in gw:
                         grp.waveform = gw["wave"].value
                     if "duty" in gw:
@@ -3389,6 +3666,17 @@ class SimApp:
             setattr(s.bounds, f"{axis}_max_on", w["max_on"].value)
             setattr(s.bounds, f"{axis}_max", w["max"].value)
         self._merge_loaded_into_box()
+        # THE dt VERDICT IS RECOMPUTED HERE, not only from the four widget
+        # watchers (dt, per-group amp/freq, the gas controls). The
+        # recommendation also depends on the source m/z and KE (they set the
+        # characteristic speed, hence the collision time), on each group's
+        # WAVEFORM, and on everything a deck load or a TW ladder retune
+        # replaces wholesale -- none of which carried a watcher. Without this
+        # the top-bar warning kept showing the PREVIOUS verdict, which reads
+        # to the user as a warning that neither updates nor goes away.
+        # _sync_spec is the one funnel every spec-affecting change passes
+        # through, so the verdict cannot go stale behind it.
+        self._update_dt_advice()
 
     # --------------------------------------------------- rendering
     def _update_dt_advice(self):
@@ -3439,7 +3727,15 @@ class SimApp:
                     from ion_gym.physics import sds as _sds_mod
                     _sdir = os.path.dirname(os.path.abspath(
                         _sds_mod.__file__))
-                    md = _sds_load_mass(os.path.join(_sdir, _sds_mod.MOBILITY_FILE))
+                    # MEMOISED: the mobility table is a shipped data file that
+                    # never changes in-session, and this advice now recomputes
+                    # on every _sync_spec, so re-reading it per call would be a
+                    # file read on the document thread for no new information.
+                    md = getattr(self, "_sds_massdata", None)
+                    if md is None:
+                        md = _sds_load_mass(
+                            os.path.join(_sdir, _sds_mod.MOBILITY_FILE))
+                        self._sds_massdata = md
                     prm = _sds_ion_params(mz, 1.0, mg,
                                           float(self.w_gdiam.value), T,
                                           float(self.w_P.value), md)
@@ -3462,6 +3758,8 @@ class SimApp:
                 self.w_dt_advice.object = (
                     "*no RF drive or collisions enabled — dt is "
                     "unconstrained by gas/RF physics*")
+                if getattr(self, "w_dt_warn", None) is not None:
+                    self.w_dt_warn.object = ""       # nothing to resolve
                 return
             rec = min(recs)
             cur = float(self.spec.integration.dt_ns
@@ -3473,8 +3771,17 @@ class SimApp:
                 "**&Delta;t guidance** &mdash; " + "; ".join(lines)
                 + f". Recommended **dt &le; {rec:.2f} ns**; current "
                   f"dt = {cur:g} ns {mark}")
+            # Top-bar warning next to Reset: silent when the step resolves the
+            # physics, loud with the recommended step when it does not.
+            if getattr(self, "w_dt_warn", None) is not None:
+                self.w_dt_warn.object = (
+                    "" if ok else
+                    f"&#9888;&#65039; **dt too coarse** — {cur:g} ns; "
+                    f"use dt &le; {rec:.2f} ns")
         except Exception as e:
             self.w_dt_advice.object = f"**dt guidance error:** {e}"
+            if getattr(self, "w_dt_warn", None) is not None:
+                self.w_dt_warn.object = ""
 
     def _el_style(self):
         """Widget state -> renderer kwargs. sim_app marshals; viz_core
@@ -4471,11 +4778,15 @@ class SimApp:
 
         self._solve_gen = getattr(self, "_solve_gen", 0) + 1
         gen = self._solve_gen
-        # Re-arm the cooperative solve-stop flag: a PRIOR Stop leaves
-        # multigrid3d._STOP set, which would otherwise abort this fresh
-        # solve immediately.
+        # The stop-flag RE-ARM that used to sit here moved into the worker,
+        # under SOLVE_EXCLUSIVE. On the loop it was a defect twice over: a
+        # new request cleared the very flag that was ending the PREVIOUS
+        # solve (disarming both the Stop button and any supersede), and
+        # nothing prevented two solves from being inside the numba
+        # parallel kernels at once — which numba's workqueue layer answers
+        # by terminating the process (hit live, 2026-09-29, second Fly
+        # during a first solve).
         from ion_gym.physics import multigrid3d
-        multigrid3d.clear_stop()
 
         # ALL builds go off-thread (a heavy 3-D build dropped the GUI).
         # There USED to be an inline "fast path" here for cache-hit builds
@@ -4519,33 +4830,54 @@ class SimApp:
                 def flush(self):
                     self._live.flush()
 
-            buf = io.StringIO()
-            tee_out = _Tee(_sys.stdout, buf)
-            tee_err = _Tee(_sys.stderr, buf)
-            try:
-                with contextlib.redirect_stdout(tee_out), \
-                        contextlib.redirect_stderr(tee_err):
-                    # Pass the DECLARED budget through. Without it the
-                    # app's guard would use the user's ceiling while
-                    # build_run used the machine fraction, so a declared
-                    # 40 GB on a 48 GB box would pass the click and then
-                    # be refused by the library underneath it -- two
-                    # ceilings for one decision. None = the widget is at
-                    # 0, which means "derive from RAM" in both places.
-                    _w = getattr(self, "w_ram_budget", None)
-                    _budget = (float(_w.value)
-                               if (_w is not None and _w.value) else None)
-                    st["res"] = build_run(spec, verbose=vb,
-                                          record_budget_gb=_budget)
-            except Exception as e:
-                st["err"] = e
-                st["tb"] = _tb.format_exc()
-            finally:
-                st["out"] = buf.getvalue()
+            # SOLVE EXCLUSIVITY PROLOGUE (see multigrid3d.SOLVE_EXCLUSIVE).
+            # Ask any in-flight solve to bail, then wait for it to have
+            # actually exited before touching the numba parallel kernels.
+            # The wait happens HERE, on this worker — never on the event
+            # loop. Once inside, a request that was itself superseded
+            # while queueing skips the build entirely (its poll has
+            # already dropped it); only the CURRENT generation re-arms
+            # the stop flag, so a Stop or a supersede aimed at an older
+            # solve can no longer be disarmed by a newer request.
+            multigrid3d.request_stop()
+            with multigrid3d.SOLVE_EXCLUSIVE:
+                if gen != self._solve_gen:
+                    print(f"[solve] request superseded while waiting for "
+                          f"the previous solve to stop (gen {gen} < "
+                          f"{self._solve_gen}) — not built", flush=True)
+                    st["done"] = True
+                    return
+                multigrid3d.clear_stop()
+                buf = io.StringIO()
+                tee_out = _Tee(_sys.stdout, buf)
+                tee_err = _Tee(_sys.stderr, buf)
+                try:
+                    with contextlib.redirect_stdout(tee_out), \
+                            contextlib.redirect_stderr(tee_err):
+                        # Pass the DECLARED budget through. Without it the
+                        # app's guard would use the user's ceiling while
+                        # build_run used the machine fraction, so a declared
+                        # 40 GB on a 48 GB box would pass the click and then
+                        # be refused by the library underneath it -- two
+                        # ceilings for one decision. None = the widget is at
+                        # 0, which means "derive from RAM" in both places.
+                        _w = getattr(self, "w_ram_budget", None)
+                        _budget = (float(_w.value)
+                                   if (_w is not None and _w.value) else None)
+                        st["res"] = build_run(spec, verbose=vb,
+                                              record_budget_gb=_budget)
+                except Exception as e:
+                    st["err"] = e
+                    st["tb"] = _tb.format_exc()
+                finally:
+                    st["out"] = buf.getvalue()
             st["done"] = True
 
         worker = threading.Thread(target=work, daemon=True)
         worker.start()
+        # the abort authority (_abort_inflight) asks this worker's solve
+        # to stop when a load/reset/edit invalidates it
+        self._solve_worker = worker
 
         def _stop_own():
             if own["pcb"] is not None:
@@ -4810,22 +5142,35 @@ class SimApp:
         def done(model, fly, cols, births):
             self._model, self._cols, self._births = model, cols, births
             self._rebuild_scene(model)
-            try:
-                # respect the selected view plane (an xy-only background
-                # made the view appear locked until ions were flown)
-                _, _, _, _, la, lb = self._plane_cols()
-                self.pane.object = self._base_figure(model, la, lb)
-            except Exception as e:
+            # respect the selected view plane (an xy-only background
+            # made the view appear locked until ions were flown).
+            # `done` runs on the solve's poll callback, i.e. ON the
+            # document loop, and el_mask_fills / potential_contours were
+            # caught holding it in the 2026-09-29 dump — so the figure
+            # build goes through the off-loop dispatcher; the follow-up
+            # tab refreshes belong to a PUBLISHED figure and ride in the
+            # publish callback (a superseded build rightly skips them:
+            # newer state has its own).
+            _, _, _, _, la, lb = self._plane_cols()
+
+            def _publish(fig):
+                self.pane.object = fig
+                if done_msg:
+                    self.status.object = done_msg
+                if getattr(self, "_pe_tab", None) is not None:
+                    self._pe_tab.refresh()
+                if getattr(self, "_fs_tab", None) is not None:
+                    self._fs_tab.refresh()
+                if getattr(self, "_cache_tab", None) is not None:
+                    self._refresh_cache_tab()
+
+            def _on_err(e):
                 self.status.object = self._err_status("draw error", e)
-                return
-            if done_msg:
-                self.status.object = done_msg
-            if getattr(self, "_pe_tab", None) is not None:
-                self._pe_tab.refresh()
-            if getattr(self, "_fs_tab", None) is not None:
-                self._fs_tab.refresh()
-            if getattr(self, "_cache_tab", None) is not None:
-                self._refresh_cache_tab()
+
+            self._dispatch_figure(
+                "field draw",
+                build=lambda: self._base_figure(model, la, lb),
+                publish=_publish, on_error=_on_err)
         self._solve_then(done)
 
     def _show_field(self, _=None):
@@ -4861,15 +5206,20 @@ class SimApp:
             # exactly the duplicated-view-logic disease `_axis_range`'s own
             # docstring complains about: patch one copy, the other keeps lying.
             _, _, _, _, la, lb = self._plane_cols()
-            try:
-                self.pane.object = self._base_figure(self._model, la, lb)
-            except (VizError, ValueError, TypeError, AttributeError,
-                    KeyError, IndexError) as e:
+            _model = self._model      # pinned on the loop at dispatch
+
+            def _on_err(e):
                 self.status.object = (
                     f"**draw error ({la}{lb}):** {type(e).__name__}: {e} — the "
                     f"field is NOT shown. (The geometry-only preview is a "
                     f"different picture, not a degraded one; press Recompute "
                     f"or pick a plane the model has.)")
+
+            self._dispatch_figure(
+                "field redraw",
+                build=lambda: self._base_figure(_model, la, lb),
+                publish=lambda fig: setattr(self.pane, "object", fig),
+                on_error=_on_err)
         else:
             self._draw_geometry_only()
 
@@ -4954,6 +5304,10 @@ class SimApp:
         if not live:
             import gc
             gc.collect()
+            # Warm the download-NPZ cache off the event loop for this settled
+            # run, so a later "Download run (NPZ)" click serves bytes instead
+            # of compressing on the document thread. No-op if already warm.
+            self._pregen_npz()
         return out
 
     def _redraw_impl(self, results, live=False):
@@ -5407,9 +5761,15 @@ class SimApp:
         # quantity the caller can state is the defect; the swallow only hid it.
         if getattr(self, "_model", None) is not None:
             _, _, _, _, la, lb = self._plane_cols()
-            self.pane.object = self._base_figure(self._model, la, lb)
+            _model = self._model      # pinned on the loop at dispatch
+            self._dispatch_figure(
+                "field redraw",
+                build=lambda: self._base_figure(_model, la, lb),
+                publish=lambda fig: setattr(self.pane, "object", fig))
         else:
             self._draw_geometry_only()
+        # stated up front rather than after the redraw lands: the CLEAR
+        # already happened above; only the figure is still in flight.
         self.status.object = "**stored runs cleared** — trajectory memory freed."
 
     # -------------------------------------- solved-field / traj persistence
@@ -5445,12 +5805,19 @@ class SimApp:
                      f"({r['spec_name']})"] = r["path"]
         set_options(self.w_fieldpick, opts)
         self._field_rows = {r["path"]: r for r in rows}
-        d = str(_paths.fields_dir())
+        # Trajectories now live in trajectories_dir; scan fields_dir too so
+        # .traj.npz files saved before the split still load (label the folder
+        # when a name collides across the two dirs).
         topts = {}
-        if os.path.isdir(d):
+        _traj_dirs = [str(_paths.trajectories_dir()), str(_paths.fields_dir())]
+        for d in _traj_dirs:
+            if not os.path.isdir(d):
+                continue
             for name in sorted(os.listdir(d)):
-                if name.endswith(".traj.npz"):
-                    topts[name] = os.path.join(d, name)
+                if not name.endswith(".traj.npz"):
+                    continue
+                key = name if name not in topts else f"{name} ({d})"
+                topts[key] = os.path.join(d, name)
         set_options(self.w_trajpick, topts)
 
     def _on_save_field(self, _=None):
@@ -5564,26 +5931,138 @@ class SimApp:
         self.status.object = f"**relabeled** → {label} (local registry)."
 
     def _on_save_traj(self, _=None):
+        """Save trajectories to disk WITHOUT blocking the event loop.
+
+        np.savez_compressed can run for many seconds on a large run;
+        performed on the Bokeh document thread it freezes the whole UI and
+        reads as a hang (the pulse watchdog catches the loop blocked in
+        zipfile.write). So the compression runs on a daemon worker and a
+        periodic poll reports completion on the document thread -- the same
+        worker+poll idiom the field solve uses. Both the start and the
+        finish are written to the status pane; the start line carries a size
+        and a rough time estimate, the finish line the MEASURED elapsed
+        (which supersedes the estimate). zlib releases the GIL while
+        compressing, so the worker genuinely frees the loop.
+        """
         from ion_gym.io import field_io
         if self._active not in self._runs:
             self.status.object = ("**no run to save** — Fly some ions "
                                   "first.")
             return
-        res = self._runs[self._active].results
-        try:
-            path = field_io.save_trajectories(
-                res, self.spec,
-                label=(self.w_fieldlabel.value or "").strip() or None)
-        except OSError as e:
-            self.status.object = f"**trajectory save failed:** {e}"
+        # Refuse a second concurrent save with a diagnostic rather than
+        # silently starting two writers into the same directory.
+        prev = getattr(self, "_save_state", None)
+        if prev is not None and not prev.get("done"):
+            self.status.object = ("**a trajectory save is already running** "
+                                  "— wait for it to finish before saving "
+                                  "again.")
             return
-        self._refresh_field_picker()
-        meta = field_io.read_trajectory_meta(path)
-        skipped = (f" ({meta['n_skipped']} ions had no recorded "
-                   f"trajectory and were skipped)"
-                   if meta.get("n_skipped") else "")
-        self.status.object = (f"**trajectories saved** → "
-                              f"`{os.path.abspath(path)}`{skipped}.")
+
+        # Snapshot what the worker needs NOW; a later Fly must not mutate it
+        # mid-write (flights create new arrays, they do not touch these).
+        res = list(self._runs[self._active].results)
+        spec = self.spec
+        label = (self.w_fieldlabel.value or "").strip() or None
+
+        # Uncompressed payload estimate (the summary table is negligible next
+        # to the float64 paths). The file on disk is smaller; the time hint
+        # uses a nominal throughput and the finish line reports the truth.
+        n_traj = sum(1 for r in res if getattr(r, "traj", None) is not None)
+        nbytes = sum(int(r.traj.nbytes) for r in res
+                     if getattr(r, "traj", None) is not None)
+        mb = nbytes / 1e6
+        t_est = mb / SAVE_COMPRESS_MB_PER_S
+        self.status.object = (
+            f"**saving {n_traj} trajectories** (~{mb:,.0f} MB uncompressed, "
+            f"est. ~{t_est:0.0f}s) to `trajectories/` — the UI stays "
+            f"responsive; a completion message will appear here.")
+
+        st = {"done": False, "err": None, "path": None, "elapsed": 0.0}
+        self._save_state = st
+
+        def work():
+            _t0 = time.time()
+            try:
+                st["path"] = field_io.save_trajectories(res, spec,
+                                                        label=label)
+            except Exception as e:              # recorded + surfaced in poll
+                st["err"] = e
+            finally:
+                st["elapsed"] = time.time() - _t0
+                st["done"] = True
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+
+        own = {"pcb": None}
+        t0 = time.time()
+
+        def _stop_own():
+            if own["pcb"] is not None:
+                try:
+                    own["pcb"].stop()          # already-stopped: benign
+                except (ValueError, RuntimeError):
+                    pass
+                own["pcb"] = None
+
+        def poll():
+            if not st["done"]:
+                # a worker that dies without setting done (OOM, C-level crash)
+                # must not leave this ticking forever.
+                if not worker.is_alive():
+                    _stop_own()
+                    self.status.object = (
+                        "**trajectory save stopped unexpectedly** — the "
+                        "writer thread ended without finishing (most likely "
+                        "out of memory or disk space). Nothing was saved.")
+                    return
+                el = time.time() - t0
+                self.status.object = (
+                    f"**saving {n_traj} trajectories… {el:0.0f}s elapsed** "
+                    f"(~{mb:,.0f} MB) — the UI stays responsive.")
+                return
+            _stop_own()
+            if st["err"] is not None:
+                self.status.object = (
+                    f"**trajectory save failed:** {st['err']}")
+                return
+            path = st["path"]
+            try:
+                meta = field_io.read_trajectory_meta(path)
+                skipped = (f" ({meta['n_skipped']} ions had no recorded "
+                           f"trajectory and were skipped)"
+                           if meta.get("n_skipped") else "")
+            except (OSError, ValueError, field_io.TrajectoryFormatError):
+                skipped = ""     # file is written; a meta re-read hiccup is
+                #                  not a save failure, so do not claim one
+            try:
+                size_note = f", {os.path.getsize(path) / 1e6:,.1f} MB on disk"
+            except OSError:
+                size_note = ""
+            self._refresh_field_picker()
+            self.status.object = (
+                f"**trajectories saved** in {st['elapsed']:0.1f}s"
+                f"{size_note} → `{os.path.abspath(path)}`{skipped}.")
+
+        # Drive the poll on Panel's loop when in a server session; otherwise
+        # (headless) there is no loop to keep responsive, so wait and report
+        # once. Mirrors the field-solve scheduling.
+        started = False
+        in_server = False
+        try:
+            in_server = pn.state.curdoc is not None
+        except (RuntimeError, AttributeError):
+            in_server = False
+        if in_server:
+            try:
+                own["pcb"] = pn.state.add_periodic_callback(poll, 200)
+                self._ensure_watchdog_pulse()
+                started = True
+            except (RuntimeError, ValueError):
+                started = False
+        if not started:
+            worker.join()
+            poll()
 
     def _on_load_traj(self, _=None):
         """Load a .traj.npz as a STORED RUN — plugs into the existing
@@ -7119,6 +7598,57 @@ class SimApp:
         if self._subject_is_assembly():
             self._redraw_subject()
 
+    def _abort_inflight(self, reason: str):
+        """Stop in-flight work that the caller is about to invalidate.
+
+        THE ONE SUPERSEDE AUTHORITY (PI ruling 2026-09-29: "when the user
+        loads a new deck a stop is called on any existing solve or fly").
+        A new spec — load, Reset, or a structural edit — makes both an
+        in-flight SOLVE and an in-flight FLIGHT unusable: the rebuild
+        drops `_model`/`_built` regardless, so their results were already
+        headed for the bin; letting them run only burns cores and, for
+        two solves, risks the numba workqueue termination
+        (SOLVE_EXCLUSIVE's docstring has the crash).
+
+        Three actions, none blocking the loop:
+        1. BUMP `_solve_gen` unconditionally. This closes a delivery race
+           that stopping alone cannot: a solve that finishes before its
+           next stop check would otherwise deliver the OLD spec's model
+           under the NEW spec's controls — a displayed-field/spec
+           mismatch, the invariant failure, and it needed no thread
+           collision at all, just unlucky timing on a load.
+        2. Ask a live solve to stop (cooperative; it exits at its next
+           check raising SolveInterrupted, which its own poll reports as
+           a clean stop or drops if superseded).
+        3. Ask a live flight to stop, with the reason, via the driver's
+           own stop().
+
+        Reports exactly what it aborted and stays silent when nothing was
+        in flight — an abort that did not happen is not announced.
+        Idempotent, so an early call at a click handler (acknowledgment
+        before slow spec construction) plus the authoritative call in
+        `_rebuild_for_new_spec` is fine: the second finds nothing live.
+        The user's Stop button (`_on_stop`) keeps its own path — it stops
+        without superseding, so its solve reports "**solve stopped**"
+        rather than vanishing."""
+        self._solve_gen = getattr(self, "_solve_gen", 0) + 1
+        aborted = []
+        _sw = getattr(self, "_solve_worker", None)
+        if _sw is not None and _sw.is_alive():
+            from ion_gym.physics import multigrid3d
+            multigrid3d.request_stop()
+            aborted.append("the running field solve")
+        h = getattr(self, "_handle", None)
+        if h is not None and not h.done:
+            h.stop(reason)
+            aborted.append("the running flight")
+        if aborted:
+            what = " and ".join(aborted)
+            print(f"[sim_app] {reason}: stopping {what}", flush=True)
+            self.status.object = (f"**stopping {what}** — {reason} makes "
+                                  f"its result unusable")
+        return aborted
+
     def _on_stop(self, _=None):
         self._stop = True
         # A long FIELD SOLVE runs on a background thread through the
@@ -7147,8 +7677,11 @@ class SimApp:
         name = self.w_examples.value
         specs = _example_specs()
         if name in specs:
-            if self._handle is not None and not self._handle.done:
-                self._handle.stop("loading new spec")
+            # early acknowledgment: spec construction below can take real
+            # time (an STL example generates meshes), so stop in-flight
+            # work NOW; the authority in _rebuild_for_new_spec then finds
+            # nothing live (idempotent by design).
+            self._abort_inflight("loading a new example")
             try:
                 # spec construction can do real work (an STL example
                 # generates + reads meshes via trimesh); a failure here
@@ -7211,7 +7744,15 @@ class SimApp:
         #   False -> an EDIT of the loaded spec: the caller has already
         #            merged the edit into the box (_merge_loaded_into_box),
         #            which may hold staged work; the rebuild leaves it alone.
-        # A NEW SPEC IS A NEW SUBJECT: retire flight-derived overlays
+        # A NEW SPEC IS A NEW SUBJECT — and that starts with work still IN
+        # FLIGHT for the old one. This is the supersede AUTHORITY: every
+        # path that changes the spec (load, Reset, structural edits) comes
+        # through here, so the abort lives here once instead of at each
+        # click handler. It also bumps the solve generation, which closes
+        # the delivery race where a solve finishing right now would hand
+        # the OLD spec's model to the NEW spec's controls.
+        self._abort_inflight("the spec changed (load/reset/edit)")
+        # Retire flight-derived overlays
         # (detections/impacts, assembly traces, live figure bank) so the
         # previous instrument's arrivals cannot draw on this one
         # (same rule as the
@@ -7230,7 +7771,18 @@ class SimApp:
         # on a SPEC change, so plotly faithfully preserved a viewport
         # sized for the old geometry. Bump here: every load autoscales.
         self._view_rev = getattr(self, "_view_rev", 0) + 1
-        self._build_controls()
+        # DECLARED BLOCK: the rebuild replaces every widget in the control
+        # column and Panel constructs a Bokeh model for each, on the
+        # document lock. That is the dominant cost of a deck load or a
+        # Reset and it cannot be moved off the loop, because the document
+        # update IS the work. Declaring it stops the watchdog reporting a
+        # known cost as an unexplained stall, and turns an overrun into the
+        # loud case.
+        with self._expect_block(
+                f"control column rebuild, "
+                f"{len(getattr(self.spec.geometry, 'electrodes', []) or [])} "
+                f"electrodes", CONTROL_REBUILD_BUDGET_S):
+            self._build_controls()
         # reflect the loaded scene's declared mirror into the control (so a
         # SLIM example that ships mirror='y' shows y ticked, and editing it
         # round-trips); inert for non-scene specs.
@@ -7266,15 +7818,30 @@ class SimApp:
         _n_ele = len(getattr(self.spec.geometry, "electrodes", []) or [])
         self.status.object = (
             f"**loading {self.spec.name}…** rendering geometry "
-            f"({_n_ele} electrodes) — large models can take ~10-30 s.")
+            f"({_n_ele} electrodes) — large models can take "
+            f"~{GEOMETRY_RENDER_BUDGET_S:.0f} s.")
         self.pane.loading = True
 
         def _finish_render():
+            # DECLARED BLOCK, now covering only the residue. The heavy
+            # geometry build itself moved off the loop (_dispatch_figure,
+            # 2026-09-29), so what this window covers is the loop-side
+            # remainder: _sync_planes / snapshotting inside the draw
+            # calls, the dispatcher's 50 ms fast-path join (a small deck
+            # builds inside it, synchronously, and keeps its instant
+            # feel), and _draw_background's solve scheduling. The status
+            # line's advertised number stays: on a large deck the USER
+            # still waits about that long for the picture — the wait just
+            # happens with a live UI and a spinner instead of a dead one,
+            # and the watchdog now only speaks if the loop itself stalls.
             try:
-                if solve:
-                    self._draw_background()
-                else:
-                    self._draw_geometry_only()
+                with self._expect_block(
+                        f"geometry render, {_n_ele} electrodes",
+                        GEOMETRY_RENDER_BUDGET_S):
+                    if solve:
+                        self._draw_background()
+                    else:
+                        self._draw_geometry_only()
                 self.status.object = (
                     f"**loaded:** {self.spec.name} — press *Recompute "
                     f"field* to solve, or *Fly* to run.")
@@ -7302,191 +7869,216 @@ class SimApp:
 
     def _draw_geometry_only(self):
         """Show just the electrode outlines for the current spec, in the
-        SELECTED view plane, without solving the field — instant, so loading
-        never blocks and the geometry can be checked in xy/xz/yz first. For
+        SELECTED view plane, without solving the field, so loading never
+        blocks and the geometry can be checked in xy/xz/yz first. For
         the 3-D SLIM the transport (xz/yz) views use the exact imported
-        outlines; xy uses the across×gap footprint raster."""
-        try:
-            import plotly.graph_objects as go
-            g = self.spec.geometry
-            _, _, _, _, la, lb = self._plane_cols()
-            fig = go.Figure()
-            # pre-solve 3-D transport geometry, dispatched by the ROUTE
-            # (sim_build.preview_masks3d) — the `is_slim3d` special case
-            # that sat here is gone; a new 3-D builder gets a
-            # preview by adding a route entry, not by editing the UI
-            from ion_gym.physics.sim_build import (build_route,
-                                                   preview_masks3d)
-            mk3 = preview_masks3d(self.spec)
+        outlines; xy uses the across×gap footprint raster.
 
-            # ROUTE-DISPATCHED xy footprint (found on a
-            # native SLIM spec): the 2-D shape raster below is valid exactly
-            # for routes whose shapes ARE x-y cross-sections (planar, rz,
-            # the slim3d confinement plane). A shapes3d spec carries
-            # EXTRUDED shapes — possibly non-z axes, possibly
-            # partial-depth cutouts — so its xy view must come from the
-            # SAME 3-D masks the solve uses (mk3, single source of
-            # truth), like every other plane. Before this dispatch the
-            # 2-D raster refused loudly here (electrode_mask's extrude
-            # guard) — correct refusal, wrong path.
-            _is_shapes3d = build_route(self.spec).builder == "shapes3d"
-            if V.plane_of(la, lb) == "xy" and not _is_shapes3d:
-                # transverse footprint: raster the electrode shapes
-                # (counts through THE counting function —
-                # identical for conforming decks, refusal otherwise)
-                # NODES, not cells. This used gu_cells and then rastered
-                # `arange(n)`, which is one point SHORT in each direction:
-                # a domain of N cells has N+1 nodes, so the preview
-                # stopped a full cell inside the solved domain. Measured
-                # Measured against anchored_grid, the axes the solve
-                # actually builds: oa_12plate drew 929 x 400 spanning
-                # x[0, 92.8] where the solve is 930 x 401 spanning
-                # x[0, 92.9]; other planar decks
-                # were short by one node on both axes too. A preview that
-                # draws a different domain than the one solved is the
-                # "displayed equals solver input" invariant broken, even
-                # though it only ever looked like a slightly cropped
-                # picture. This block had never executed under test (the
-                # v436 uncertainty register listed it as NOT EXERCISED).
-                from ion_gym.io.lattice import gu_nodes
-                h = g.mm_per_gu
-                nx = gu_nodes(g.width_mm, h, axis="x",
-                              what="width_mm domain extent")
-                ny = gu_nodes(g.height_mm, h, axis="y",
-                              what="height_mm domain extent")
-                # DECK FRAME, not kernel frame (signed-frame
-                # decks previewed as a SECOND ladder
-                # offset from the solved one, looking like electrodes
-                # "extending to infinity"). Shapes are stored in the
-                # deck's signed frame -- e.g. CAP at x_mm = -226.4 with
-                # origin_mm = [-226.4, -19.9] -- so a raster starting at
-                # 0 both mis-samples electrode_mask and draws the result
-                # a whole origin off the solved view. origin_mm is [0,0]
-                # on every legacy deck, so this is a no-op for them.
-                # None means "no anchor declared" (the STARTUP default
-                # spec ships that way) and is the default anchor, not a
-                # crash — long pre-existing, found in a
-                # startup report.
-                _og = g.origin_mm if g.origin_mm is not None else (0.0,
-                                                                   0.0)
-                ox, oy = (float(_og[0]), float(_og[1]))
-                xs = ox + np.arange(nx) * h
-                ys = oy + np.arange(ny) * h
-                # plane_grid_views, not meshgrid: zero-copy
-                # views for a pure comparison, and it REFUSES a runaway
-                # grid with the numbers rather than dying inside numpy.
-                from ion_gym.physics.raster2d import (electrode_mask,
-                                                      plane_grid_views)
-                X, Y = plane_grid_views(xs, ys, "preview footprint")
-                ele = np.zeros((nx, ny), bool)
-                for el in g.electrodes:
-                    # grids draw DASHED (below), not as solid metal: the
-                    # raster is "what the solver treats as metal", and a
-                    # grid is not that -- preview and solved view now tell
-                    # the same story about them.
-                    if el.shapes and not getattr(el, "is_grid", False):
-                        ele |= electrode_mask(el, X, Y)
-                # r-z geometry is described on the HALF-plane (y = radius >= 0)
-                # but it IS a body of revolution: the SOLVED view mirrors it
-                # across the axis (see viz_core.el_mask_fills /
-                # potential_image), so
-                # the PREVIEW must mirror it too. It did not -- which is why
-                # a freshly loaded funnel showed only its top half in a
-                # half-height box (aspect wrong), and snapped to the full
-                # picture the moment you solved. Two display paths, one
-                # convention: they agree now.
-                ys_v, ele_v = ys, ele
-                if g.symmetry.coords == "rz":
-                    ys_v = np.concatenate([-ys[::-1], ys[1:]])
-                    ele_v = np.concatenate([ele[:, ::-1], ele[:, 1:]], axis=1)
-                if ele_v.any():
-                    V.metal_boundary(fig, xs, ys_v, ele_v)
-                V.grid_overlays(fig, self.spec, la, lb, label=bool(self.w_ellabel.value))
-                V.station_overlays(fig, self.spec, la, lb,
-                                   label=bool(self.w_ellabel.value))
-            elif mk3 is not None:
-                # transport view: NAMED electrode voxels straight from the
-                # solve masks (single source of truth — display == solved
-                # metal), drawn by the ONE renderer with per-electrode
-                # colours + labels, exactly like every other example
-                masks3, h3, org3, mir3 = mk3
-                _st = self._el_style()
-                V.el_mask_fills(fig, masks3, h3, "xyz", la, lb,
-                                alpha=_st["alpha"], fill=_st["fill"],
-                                label=_st["label"], palette=_st["palette"],
-                                origin=org3, mirror=mir3)
-            elif (V.plane_of(la, lb) == "yz"
-                  and self.spec.geometry.symmetry.coords == "rz"):
-                # axisymmetric end-on view: concentric ring circles
-                if V.rz_rings(fig, self._model, self.spec.geometry,
-                              **self._el_style()):
-                    fig.update_layout(
-                        xaxis_title="y (mm)",
-                        yaxis=dict(title="z (mm)"),
-                        margin=dict(l=50, r=10, t=30, b=40),
-                        uirevision=self._uirev(la, lb, "geo"))
-                    self._finish_preview(fig, "y", "z")
-                    return
-            # per-plane autoscale (transverse spans geometry; transport
-            # spans the masks' true axial extent when the domain rule has
-            # no answer)
-            _zext = None
-            if mk3 is not None:
-                _m3, _h3, _o3, _mir3 = mk3
-                _nz = next(iter(_m3.values())).shape[2]
-                # UNFOLD-AWARE (found on a surround-SLIM load
-                # report): the stored masks are the FOLDED half on a
-                # declared-mirror axis, but el_mask_fills draws the
-                # unfold — so the extent must count the full body
-                # ((n-1)·h per half, node extent not node count), or the
-                # +z board sits outside the initial view until manual
-                # autoscale.
-                _span = (_nz - 1) * _h3
-                if _mir3 and "z" in _mir3:
-                    _span *= 2
-                _zext = (_o3[2], _o3[2] + _span)
+        LOOP SIDE ONLY here: every input the build needs — the spec and
+        model pinned by reference, the plane, the uirevision (whose
+        reader MUTATES the view counter), the label toggle, the electrode
+        style, the two domain ranges — is snapshotted on the document
+        loop, and the raster itself runs on a worker via
+        _dispatch_figure. On the student decks that raster was the 15 s+
+        the UI went dark for (the 2-D `_polygon_mask` scanline and the
+        3-D `_shape_volume` broadcast, both caught holding the document
+        lock in the 2026-09-29 Windows dump)."""
+        _, _, _, _, la, lb = self._plane_cols()
+        uirev = self._uirev(la, lb, "geo")
+        spec = self.spec
+        model = getattr(self, "_model", None)
+        label_on = bool(self.w_ellabel.value)
+        st = self._el_style()
+        dr = {la: self._domain_range(la), lb: self._domain_range(lb)}
+        self._dispatch_figure(
+            "geometry preview",
+            build=lambda: self._build_geometry_preview(
+                spec, model, la, lb, uirev, label_on, st, dr),
+            publish=lambda payload: self._finish_preview(*payload))
 
-            def _rng(lbl):
-                dr = self._domain_range(lbl)      # ONE rule (mirrors incl.)
-                # dr WINS whenever it has an answer: the old
-                # `_zext`-override preferred the stored-half extent over
-                # the canonical [-H,+H] frame on a declared z-mirror —
-                # the exact range-vs-drawing disagreement _domain_range's
-                # own docstring exists to prevent. The mask extent is the
-                # FALLBACK for depth==0 z-transport geometries, where the
-                # body's z extent is not in the spec and dr is honestly
-                # None pre-solve.
-                if dr is not None:
-                    lo, hi = dr
-                elif lbl == "x":
-                    lo, hi = 0.0, g.width_mm
-                elif lbl == "y":
-                    lo, hi = 0.0, g.height_mm
-                elif lbl == "z" and _zext is not None:
-                    lo, hi = _zext
-                else:
-                    return None
-                pad = 0.04 * (hi - lo)
-                return [lo - pad, hi + pad]
+    @staticmethod
+    def _build_geometry_preview(spec, model, la, lb, uirev, label_on, st,
+                                dr):
+        """WORKER-SIDE geometry-preview build: (fig, la, lb, ra, rb).
 
-            fig.update_layout(
-                height=560, xaxis_title=f"{la} (mm)",
-                yaxis=dict(title=f"{lb} (mm)"), dragmode="zoom",
-                margin=dict(l=50, r=10, t=30, b=40),
-                # ONE autoscale authority (switching
-                # views kept the stale zoom): the plane-string-only
-                # revision this replaced is the exact documented _uirev
-                # failure mode — RETURNING to a plane reused its string
-                # and plotly restored the old zoom.
-                uirevision=self._uirev(la, lb, "geo"))
-            self._finish_preview(fig, la, lb, _rng(la), _rng(lb))
-        except Exception as e:
-            # the STATUS names the failure; the CONSOLE keeps the
-            # traceback (a startup report where the status
-            # line alone buried where the None came from).
-            import traceback
-            traceback.print_exc()
-            self.status.object = f"**geometry preview error:** {e}"
+        A staticmethod on purpose — it can see no widget and no pane, so
+        the discipline `_dispatch_figure` documents (snapshot on the
+        loop, compute off it) is enforced by the signature rather than by
+        review. `spec` and `model` are the caller's pinned references, so
+        a deck load mid-build cannot tear this picture; the load's own
+        redraw supersedes it at publish instead."""
+        import plotly.graph_objects as go
+        g = spec.geometry
+        fig = go.Figure()
+        # pre-solve 3-D transport geometry, dispatched by the ROUTE
+        # (sim_build.preview_masks3d) — the `is_slim3d` special case
+        # that sat here is gone; a new 3-D builder gets a
+        # preview by adding a route entry, not by editing the UI
+        from ion_gym.physics.sim_build import (build_route,
+                                               preview_masks3d)
+        mk3 = preview_masks3d(spec)
+
+        # ROUTE-DISPATCHED xy footprint (found on a
+        # native SLIM spec): the 2-D shape raster below is valid exactly
+        # for routes whose shapes ARE x-y cross-sections (planar, rz,
+        # the slim3d confinement plane). A shapes3d spec carries
+        # EXTRUDED shapes — possibly non-z axes, possibly
+        # partial-depth cutouts — so its xy view must come from the
+        # SAME 3-D masks the solve uses (mk3, single source of
+        # truth), like every other plane. Before this dispatch the
+        # 2-D raster refused loudly here (electrode_mask's extrude
+        # guard) — correct refusal, wrong path.
+        _is_shapes3d = build_route(spec).builder == "shapes3d"
+        if V.plane_of(la, lb) == "xy" and not _is_shapes3d:
+            # transverse footprint: raster the electrode shapes
+            # (counts through THE counting function —
+            # identical for conforming decks, refusal otherwise)
+            # NODES, not cells. This used gu_cells and then rastered
+            # `arange(n)`, which is one point SHORT in each direction:
+            # a domain of N cells has N+1 nodes, so the preview
+            # stopped a full cell inside the solved domain. Measured
+            # Measured against anchored_grid, the axes the solve
+            # actually builds: oa_12plate drew 929 x 400 spanning
+            # x[0, 92.8] where the solve is 930 x 401 spanning
+            # x[0, 92.9]; other planar decks
+            # were short by one node on both axes too. A preview that
+            # draws a different domain than the one solved is the
+            # "displayed equals solver input" invariant broken, even
+            # though it only ever looked like a slightly cropped
+            # picture. This block had never executed under test (the
+            # v436 uncertainty register listed it as NOT EXERCISED).
+            from ion_gym.io.lattice import gu_nodes
+            h = g.mm_per_gu
+            nx = gu_nodes(g.width_mm, h, axis="x",
+                          what="width_mm domain extent")
+            ny = gu_nodes(g.height_mm, h, axis="y",
+                          what="height_mm domain extent")
+            # DECK FRAME, not kernel frame (signed-frame
+            # decks previewed as a SECOND ladder
+            # offset from the solved one, looking like electrodes
+            # "extending to infinity"). Shapes are stored in the
+            # deck's signed frame -- e.g. CAP at x_mm = -226.4 with
+            # origin_mm = [-226.4, -19.9] -- so a raster starting at
+            # 0 both mis-samples electrode_mask and draws the result
+            # a whole origin off the solved view. origin_mm is [0,0]
+            # on every legacy deck, so this is a no-op for them.
+            # None means "no anchor declared" (the STARTUP default
+            # spec ships that way) and is the default anchor, not a
+            # crash — long pre-existing, found in a
+            # startup report.
+            _og = g.origin_mm if g.origin_mm is not None else (0.0,
+                                                               0.0)
+            ox, oy = (float(_og[0]), float(_og[1]))
+            xs = ox + np.arange(nx) * h
+            ys = oy + np.arange(ny) * h
+            # plane_grid_views, not meshgrid: zero-copy
+            # views for a pure comparison, and it REFUSES a runaway
+            # grid with the numbers rather than dying inside numpy.
+            from ion_gym.physics.raster2d import (electrode_mask,
+                                                  plane_grid_views)
+            X, Y = plane_grid_views(xs, ys, "preview footprint")
+            ele = np.zeros((nx, ny), bool)
+            for el in g.electrodes:
+                # grids draw DASHED (below), not as solid metal: the
+                # raster is "what the solver treats as metal", and a
+                # grid is not that -- preview and solved view now tell
+                # the same story about them.
+                if el.shapes and not getattr(el, "is_grid", False):
+                    ele |= electrode_mask(el, X, Y)
+            # r-z geometry is described on the HALF-plane (y = radius >= 0)
+            # but it IS a body of revolution: the SOLVED view mirrors it
+            # across the axis (see viz_core.el_mask_fills /
+            # potential_image), so
+            # the PREVIEW must mirror it too. It did not -- which is why
+            # a freshly loaded funnel showed only its top half in a
+            # half-height box (aspect wrong), and snapped to the full
+            # picture the moment you solved. Two display paths, one
+            # convention: they agree now.
+            ys_v, ele_v = ys, ele
+            if g.symmetry.coords == "rz":
+                ys_v = np.concatenate([-ys[::-1], ys[1:]])
+                ele_v = np.concatenate([ele[:, ::-1], ele[:, 1:]], axis=1)
+            if ele_v.any():
+                V.metal_boundary(fig, xs, ys_v, ele_v)
+            V.grid_overlays(fig, spec, la, lb, label=label_on)
+            V.station_overlays(fig, spec, la, lb,
+                               label=label_on)
+        elif mk3 is not None:
+            # transport view: NAMED electrode voxels straight from the
+            # solve masks (single source of truth — display == solved
+            # metal), drawn by the ONE renderer with per-electrode
+            # colours + labels, exactly like every other example
+            masks3, h3, org3, mir3 = mk3
+            _st = st
+            V.el_mask_fills(fig, masks3, h3, "xyz", la, lb,
+                            alpha=_st["alpha"], fill=_st["fill"],
+                            label=_st["label"], palette=_st["palette"],
+                            origin=org3, mirror=mir3)
+        elif (V.plane_of(la, lb) == "yz"
+              and spec.geometry.symmetry.coords == "rz"):
+            # axisymmetric end-on view: concentric ring circles
+            if V.rz_rings(fig, model, spec.geometry,
+                          **st):
+                fig.update_layout(
+                    xaxis_title="y (mm)",
+                    yaxis=dict(title="z (mm)"),
+                    margin=dict(l=50, r=10, t=30, b=40),
+                    uirevision=uirev)
+                return (fig, "y", "z", None, None)
+        # per-plane autoscale (transverse spans geometry; transport
+        # spans the masks' true axial extent when the domain rule has
+        # no answer)
+        _zext = None
+        if mk3 is not None:
+            _m3, _h3, _o3, _mir3 = mk3
+            _nz = next(iter(_m3.values())).shape[2]
+            # UNFOLD-AWARE (found on a surround-SLIM load
+            # report): the stored masks are the FOLDED half on a
+            # declared-mirror axis, but el_mask_fills draws the
+            # unfold — so the extent must count the full body
+            # ((n-1)·h per half, node extent not node count), or the
+            # +z board sits outside the initial view until manual
+            # autoscale.
+            _span = (_nz - 1) * _h3
+            if _mir3 and "z" in _mir3:
+                _span *= 2
+            _zext = (_o3[2], _o3[2] + _span)
+
+        def _rng(lbl):
+            dr_ax = dr[lbl]   # ONE rule (mirrors incl.), snapshotted on
+            #                   the loop by _draw_geometry_only
+            # dr_ax WINS whenever it has an answer: the old
+            # `_zext`-override preferred the stored-half extent over
+            # the canonical [-H,+H] frame on a declared z-mirror —
+            # the exact range-vs-drawing disagreement _domain_range's
+            # own docstring exists to prevent. The mask extent is the
+            # FALLBACK for depth==0 z-transport geometries, where the
+            # body's z extent is not in the spec and the range is
+            # honestly None pre-solve.
+            if dr_ax is not None:
+                lo, hi = dr_ax
+            elif lbl == "x":
+                lo, hi = 0.0, g.width_mm
+            elif lbl == "y":
+                lo, hi = 0.0, g.height_mm
+            elif lbl == "z" and _zext is not None:
+                lo, hi = _zext
+            else:
+                return None
+            pad = 0.04 * (hi - lo)
+            return [lo - pad, hi + pad]
+
+        fig.update_layout(
+            height=560, xaxis_title=f"{la} (mm)",
+            yaxis=dict(title=f"{lb} (mm)"), dragmode="zoom",
+            margin=dict(l=50, r=10, t=30, b=40),
+            # ONE autoscale authority (switching
+            # views kept the stale zoom): the plane-string-only
+            # revision this replaced is the exact documented _uirev
+            # failure mode — RETURNING to a plane reused its string
+            # and plotly restored the old zoom.
+            uirevision=uirev)
+        return (fig, la, lb, _rng(la), _rng(lb))
 
     def _on_add_rf_group(self, _=None):
         """Add a drive group with a chosen waveform. Rebuilds the Voltages
@@ -10763,42 +11355,42 @@ summary{{cursor:pointer;font-weight:600;color:#555}}</style></head>
         buf.seek(0)
         return buf
 
-    def _export_npz_bytes(self):
-        """Compact per-ion NPZ: one array per ion (columns = channels) plus a
-        summary table, far smaller than CSV for long trajectories.
+    def _npz_key(self):
+        """Cache identity for the download NPZ: the active run name plus the
+        identity of its results list. A new fly builds a new results list
+        (new id), which invalidates the cache; a redraw of the same run does
+        not, so repeated redraws never rebuild."""
+        if self._active not in self._runs:
+            return None
+        return (self._active, id(self._runs[self._active].results))
+
+    @staticmethod
+    def _build_npz_bytes(results, cols, spec):
+        """Compress a run to NPZ bytes (one array per ion + a summary table).
 
         PRECISION: trajectories are cast to float32 here (~7 significant
-        digits), NOT the float64 the kernel records. This docstring used
-        to claim it "preserves full float precision", which was wrong and
-        is the kind of wrong that only shows up in someone's arrival-time
-        difference. The trade is deliberate — this is the in-browser
-        download, where size is the binding constraint — but it is a
-        trade, so it is stated: for plotting and inspection float32 is
-        ample; for sub-nanosecond timing differences or anything
-        differentiated along a path, use **Save trajectories**, which
-        writes the same paths at full float64 to disk. The summary table
-        stays float64 in both.
+        digits), NOT the float64 the kernel records — this is the in-browser
+        download, where size is the binding constraint. For sub-nanosecond
+        timing differences or anything differentiated along a path, use
+        **Save trajectories**, which writes the same paths at full float64 to
+        disk. The summary table stays float64 in both. Per-ion m/z is stored
+        (a plain `mz_da` array and a `summary` column) so absolute KE /
+        temperature is recoverable, and NaN marks genuinely-unknown mass so a
+        reader can tell "massless" from "0".
 
-        Per-ion m/z is stored (both a plain `mz_da` array and a `summary`
-        column) so absolute KE / temperature is recoverable downstream —
-        the Save-trajectories path already did this; the export path did
-        not, which left exported runs massless."""
-        if self._active not in self._runs:
-            return io.BytesIO(b"")
+        PURE COMPUTE on its arguments — no self, no widgets, no UI — so it is
+        safe to run on a worker thread (see _pregen_npz)."""
         from ion_gym.physics.sim_build import mz_of
         arrs = {}
         summ_rows = []
         mz_list = []
-        for r in self._runs[self._active].results:
+        for r in results:
             if r.traj is not None:
                 arrs[f"ion_{r.index:04d}"] = r.traj.astype(np.float32)
-            # per-ion m/z: prefer the value the run recorded, else derive it
-            # from the spec (same source as save_trajectories); NaN only if
-            # genuinely unknown, so a reader can tell "massless" from "0".
             mz = r.summary.get("mz")
             if mz is None:
                 try:
-                    mz = float(mz_of(self.spec, int(r.index)))
+                    mz = float(mz_of(spec, int(r.index)))
                 except (ValueError, TypeError, IndexError, AttributeError):
                     mz = np.nan
             mz_list.append(float(mz) if mz is not None else np.nan)
@@ -10810,14 +11402,104 @@ summary{{cursor:pointer;font-weight:600;color:#555}}</style></head>
                               mz_list[-1]])
         buf = io.BytesIO()
         np.savez_compressed(
-            buf, columns=np.array(self._cols),
+            buf, columns=np.array(cols),
             summary=np.array(summ_rows, float),
             summary_cols=np.array(["ion", "fate", "tof",
                                    "x_end", "y_end", "z_end", "mz_da"]),
             mz_da=np.array(mz_list, float),
             **arrs)
-        buf.seek(0)
-        return buf
+        return buf.getvalue()
+
+    def _pregen_npz(self):
+        """Build the download NPZ for the active run OFF the event loop and
+        cache the bytes, so the FileDownload click serves them instantly
+        rather than compressing on the document thread — the hang the
+        2026-09-28 dump caught in _export_npz_bytes. Triggered from _redraw
+        for every settled run; a no-op when the cache is already warm for
+        this run or a build for the same key is already running. Uses the
+        worker+poll idiom (worker compresses, a periodic poll installs the
+        result on the document thread)."""
+        key = self._npz_key()
+        if key is None:
+            return
+        cache = getattr(self, "_npz_cache", None)
+        if cache is not None and cache.get("key") == key:
+            return                               # already warm
+        if getattr(self, "_npz_building", None) == key:
+            return                               # a build for this key is live
+        self._npz_building = key
+        results = list(self._runs[self._active].results)
+        cols = list(self._cols)
+        spec = self.spec
+        st = {"buf": None, "done": False}
+
+        def work():
+            try:
+                st["buf"] = self._build_npz_bytes(results, cols, spec)
+            except Exception:                    # a failed pre-gen leaves the
+                st["buf"] = None                 # cache cold; the click rebuilds
+            finally:
+                st["done"] = True
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        own = {"pcb": None}
+
+        def _stop_own():
+            if own["pcb"] is not None:
+                try:
+                    own["pcb"].stop()            # already-stopped: benign
+                except (ValueError, RuntimeError):
+                    pass
+                own["pcb"] = None
+
+        def poll():
+            if not st["done"]:
+                if not worker.is_alive():        # died without finishing
+                    _stop_own()
+                    if self._npz_building == key:
+                        self._npz_building = None
+                return
+            _stop_own()
+            if st["buf"] is not None and self._npz_building == key:
+                self._npz_cache = {"key": key, "buf": st["buf"]}
+            if self._npz_building == key:
+                self._npz_building = None
+
+        in_server = False
+        try:
+            in_server = pn.state.curdoc is not None
+        except (RuntimeError, AttributeError):
+            in_server = False
+        if in_server:
+            try:
+                own["pcb"] = pn.state.add_periodic_callback(poll, 200)
+                self._ensure_watchdog_pulse()
+                return
+            except (RuntimeError, ValueError):
+                pass
+        # headless / unschedulable: no loop to protect, so build and store now
+        worker.join()
+        poll()
+
+    def _export_npz_bytes(self):
+        """FileDownload callback. Serves the pre-generated bytes when the
+        cache is warm (the common case, primed by _pregen_npz on redraw).
+        Only a click in the small window before pre-generation finishes
+        falls through to building here, and that one caches too, so a second
+        click is instant. The compression itself lives in _build_npz_bytes."""
+        if self._active not in self._runs:
+            return io.BytesIO(b"")
+        key = self._npz_key()
+        cache = getattr(self, "_npz_cache", None)
+        if cache is not None and cache.get("key") == key \
+                and cache.get("buf") is not None:
+            return io.BytesIO(cache["buf"])
+        data = self._build_npz_bytes(
+            list(self._runs[self._active].results),
+            list(self._cols), self.spec)
+        self._npz_cache = {"key": key, "buf": data}
+        return io.BytesIO(data)
 
     def _export_bytes(self):
         import pandas as pd

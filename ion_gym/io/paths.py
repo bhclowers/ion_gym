@@ -92,15 +92,53 @@ def data_dir(name):
 
 
 def fields_dir():
-    """Home for USER-SAVED solved-field / trajectory NPZs and the label
+    """Home for USER-SAVED solved-field NPZs and the label
     registry (fields_registry.json). Distinct from data_root(): that is the
     reference-data corpus (geometry/), this is user output that must be easy
     to find, rename, and send. Resolution: ION_GYM_FIELDS env override, else
-    <repo_root>/fields. Created on first use by the writer, not here."""
+    <repo_root>/fields. Created on first use by the writer, not here.
+
+    Trajectory NPZs used to land here too; they now have their own home
+    (trajectories_dir) so a folder full of solved fields is not intermixed
+    with flight output. Old .traj.npz files left in fields/ still load: the
+    picker scans both directories."""
     env = os.environ.get("ION_GYM_FIELDS")
     if env:
         return Path(env).expanduser().resolve()
     return _repo_root() / "fields"
+
+
+def trajectories_dir():
+    """Home for USER-SAVED trajectory NPZs (<name>__<key8>.traj.npz), split
+    out from fields_dir so flight output and solved fields do not share one
+    folder. Resolution: ION_GYM_TRAJECTORIES env override, else
+    <repo_root>/trajectories. Created on first use by the writer, not here."""
+    env = os.environ.get("ION_GYM_TRAJECTORIES")
+    if env:
+        return Path(env).expanduser().resolve()
+    return _repo_root() / "trajectories"
+
+
+def panels_dir(*parts):
+    """Home for the BANKED notebook instrument panels (panel_<family>.png).
+
+    SHIPPED CONTENT, not regenerable state, and that is the whole point:
+    every teaching notebook opens by displaying its instrument, and when
+    the bank is absent the panel is rebuilt live -- a solve plus a short
+    flight -- before the reader sees anything. The bank used to sit under
+    notebooks/out/_panels, which no zip and no checkout carries, so the
+    fast path never once fired outside the tree that built it and every
+    notebook paid the rebuild on open.
+
+    Both the writer (internal/tools/panel_batch.py) and the reader
+    (ion_gym.viz.nb_panels) resolve here, so the location is stated once
+    rather than as matching literals in two files.
+
+    PURE -- no mkdir; the writer creates what it needs."""
+    p = _repo_root() / "notebooks" / "panels"
+    for q in parts:
+        p = p / q
+    return p
 
 
 def data_path(name, *parts):

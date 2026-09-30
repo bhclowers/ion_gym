@@ -14,6 +14,7 @@ Linux but BYTES on macOS — the old ping mislabeled it; psutil removes the
 ambiguity)."""
 from __future__ import annotations
 
+import contextlib
 import gc
 import os
 import sys
@@ -437,6 +438,65 @@ class LoopStallWatchdog:
         self._pulse_tid = None   # thread id of the loop that beats pulse()
         self._thread = None
         self._stop = threading.Event()
+        # DECLARED BLOCKS (see expect_block): a stack of
+        # (label, budget_s, t0), innermost last. A list because the
+        # declarations nest -- a spec rebuild declares, and the geometry
+        # render inside it declares again.
+        self._declared = []
+        self._declared_lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def expect_block(self, label: str, budget_s: float):
+        """Declare that the caller is ABOUT to block the loop ON PURPOSE.
+
+        WHY: some work legitimately holds the loop, says so in the UI, and
+        takes longer than `stall_s`. The geometry render is the example --
+        it sets a spinner, writes "large models can take ~10-30 s" to the
+        status pane, and then blocks for exactly that. The watchdog then
+        wrote a full all-thread dump reporting the app's own advertised
+        behaviour as a stall. A student's dump read as eleven hangs, of
+        which three were this.
+
+        The wrong fix is raising `stall_s`, which hides real hangs by
+        exactly as much as it hides advertised ones. So the app declares
+        the window instead, and the verdict LABELS the stall rather than
+        suppressing it:
+
+          * inside the declared budget -> benign, one line naming the
+            label and the budget. Nothing is hidden: the event is still
+            written, with the reason it was expected.
+          * PAST the declared budget -> not benign. Full stack dump, and
+            the verdict says which declaration was overrun and by how
+            much. This is the case that matters and it now reads louder
+            than an undeclared stall, not quieter.
+          * no declaration -> exactly as before.
+
+        A budget is a statement about the loop, so it is not a physics
+        value and carries no default: the caller passes what it told the
+        user, and the two cannot drift apart without someone editing both.
+        """
+        entry = (str(label), float(budget_s), time.time())
+        with self._declared_lock:
+            self._declared.append(entry)
+        try:
+            yield
+        finally:
+            with self._declared_lock:
+                # by identity, not by pop(): declarations on different
+                # threads can leave in any order.
+                try:
+                    self._declared.remove(entry)
+                except ValueError:
+                    # Already gone. Nothing to undo, but it means something
+                    # else mutated the stack, so say so rather than passing.
+                    print(f"[watchdog] declaration {entry[0]!r} was already "
+                          f"removed from the expected-block stack",
+                          flush=True)
+
+    def _active_declaration(self):
+        """The innermost live declaration, or None."""
+        with self._declared_lock:
+            return self._declared[-1] if self._declared else None
 
     def pulse(self):
         """Called from the EVENT LOOP (periodic callback). A fresh pulse
@@ -447,7 +507,7 @@ class LoopStallWatchdog:
         self._dumped_this_stall = False
         self._pulse_tid = threading.get_ident()
 
-    def _verdict(self):
+    def _verdict(self, stale: float = 0.0):
         """Verdict on a stale pulse, read off the PULSE OWNER's own live
         stack. Exactly three causes are possible and each has a distinct
         signature on that one thread:
@@ -471,9 +531,25 @@ class LoopStallWatchdog:
         beneath select forever). This verdict contains no path test, no
         package-location assumption, and no launch-style dependence: the
         thread is identified by pulse() itself, and the idle test is on
-        frame FUNCTION identity — `select` called from `_run_once` —
-        which is how both the selector loop (Linux/macOS) and the
-        proactor loop (Windows) park between callbacks."""
+        frame FUNCTION identity, not on paths or launch style.
+
+        THE IDLE TEST, CORRECTED 2026-09-29. It used to require the
+        INNERMOST frame to be named `select` with `_run_once` as its direct
+        caller — two fixed levels. On Windows that misses, because
+        `SelectorEventLoop` parks through `selectors.select` which calls the
+        module-level `selectors._select` helper, so the innermost frame is
+        `_select` and `_run_once` sits two levels up instead of one. A
+        student's dump on Windows 11 carried two such stalls, both reported
+        as PULSE OWNER EXECUTING with a full all-thread dump, when the loop
+        was in fact parked and the real event was a dead session.
+
+        The corrected test asks the question directly: find `_run_once` in
+        the chain and look at what it CALLED. asyncio runs a callback as
+        `handle._run()` and parks as `self._selector.select(...)`, so the
+        callee's name is `_run` when executing and anything else when
+        parked. That is one name test on one frame, it enumerates no
+        selector implementation, and it holds for the selector loop on
+        every platform as well as the proactor loop."""
         import sys
         import traceback
         if self._pulse_tid is None:
@@ -490,21 +566,56 @@ class LoopStallWatchdog:
                     "that was beating pulse() has terminated: the server "
                     "stopped or the process is winding down. The "
                     "timestamp above is when it died.\n")
-        code = frame.f_code
-        caller = frame.f_back
-        parked = (code.co_name == "select"
-                  and caller is not None
-                  and caller.f_code.co_name == "_run_once")
+        # innermost-first chain, so `_run_once`'s callee is the entry just
+        # before it. Bounded: a parked loop is 2-4 frames deep below
+        # `_run_once`, while an executing callback is far deeper, so there
+        # is nothing to gain from walking a blocked app's whole stack here.
+        chain, f, _LIMIT = [], frame, 8
+        while f is not None and len(chain) < _LIMIT:
+            chain.append(f)
+            f = f.f_back
+        callee_of_run_once = None
+        for i, fr in enumerate(chain):
+            if fr.f_code.co_name == "_run_once":
+                callee_of_run_once = chain[i - 1] if i > 0 else None
+                break
+        parked = (callee_of_run_once is not None
+                  and callee_of_run_once.f_code.co_name != "_run")
         if parked:
             return (True,
-                    "PULSE OWNER IDLE (loop parked in select under "
-                    "_run_once) — the loop is alive but running no "
+                    f"PULSE OWNER IDLE (loop parked in "
+                    f"{callee_of_run_once.f_code.co_name} under _run_once) "
+                    "— the loop is alive but running no "
                     "callbacks, so the PULSE SOURCE DIED (the server "
                     "session owning the 1 s callback ended: tab closed, "
                     "websocket dropped), NOT a blocked loop. The "
                     "timestamp above is when the session died. A new "
                     "session's pulse re-arms the watchdog.\n")
         stack = "".join(traceback.format_stack(frame))
+        # A DECLARED BLOCK (expect_block): the app said it was going to
+        # hold the loop and for how long. Inside that budget this is the
+        # app doing what it told the user it would do; past it, the
+        # declaration is evidence rather than an excuse and is reported
+        # beside the stack.
+        decl = self._active_declaration()
+        if decl is not None:
+            dlabel, budget, t0 = decl
+            held = time.time() - t0
+            if held <= budget:
+                return (True,
+                        f"EXPECTED BLOCK — {dlabel}: {held:.0f}s into a "
+                        f"declared {budget:.0f}s window, pulse stale "
+                        f"{stale:.0f}s. The loop IS blocked, and on "
+                        f"purpose; no stack dump. Raise the declared "
+                        f"budget only if the work itself got slower.\n")
+            return (False,
+                    f"DECLARED BLOCK OVERRUN — {dlabel}: {held:.0f}s "
+                    f"against a declared {budget:.0f}s budget "
+                    f"({held - budget:.0f}s over), pulse stale "
+                    f"{stale:.0f}s. The app expected to block here and has "
+                    f"taken far longer than it told the user, so this "
+                    f"stack is the overrun, not routine slowness:\n"
+                    + stack)
         return (False,
                 "PULSE OWNER EXECUTING (a BLOCKED loop or a long "
                 "compute) — the stack below is the code holding the "
@@ -517,7 +628,7 @@ class LoopStallWatchdog:
             stale = time.time() - self._last
             if stale > self.stall_s and not self._dumped_this_stall:
                 self._dumped_this_stall = True
-                benign, verdict = self._verdict()
+                benign, verdict = self._verdict(stale)
                 try:
                     with open(self.dump_path, "a") as fh:
                         fh.write(

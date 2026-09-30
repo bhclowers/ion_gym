@@ -8,8 +8,11 @@ state and do not ship — so on a public checkout every notebook's first
 figure raised FileNotFoundError. The fix is a single framework entry
 point with two paths:
 
-* FAST PATH — the banked panel PNG, when present (a dev tree, or any
-  tree where the panels have been rebuilt): display it directly.
+* FAST PATH — the banked panel PNG from paths.panels_dir()
+  (notebooks/panels/), which SHIPS: display it directly. The bank used to
+  live under notebooks/out/_panels, regenerable state that no zip and no
+  checkout carries, so this path never fired outside the tree that built
+  it and every notebook paid a live rebuild on open (PI 2026-09-22).
 * SELF-CONTAINED PATH — build the deck, fly a few example ions, and
   render through viz_core, exactly the content the bank carries,
   generated live. DISPLAY == SOLVER INPUT holds on both paths; the live
@@ -29,8 +32,8 @@ def show_instrument_panel(deck, *, banked=None, height=520, n_ions=24,
 
     deck    : repo-relative path to the JSON deck of record.
     banked  : banked panel filename (e.g. "panel_einzel.png") to prefer
-              when notebooks/out/_panels/ carries it; None disables the
-              fast path.
+              when paths.panels_dir() carries it; None disables the fast
+              path and always rebuilds live.
     height  : displayed pixel height (aspect preserved).
     n_ions  : example ions flown on the live path (display-only; the
               seed is pinned so the figure is deterministic — stated
@@ -47,11 +50,11 @@ def show_instrument_panel(deck, *, banked=None, height=520, n_ions=24,
               multi-axis for 3-D scenes).
     """
     from IPython.display import Image as _PNG, display as _display
-    from ion_gym.io.paths import repo_root
+    from ion_gym.io.paths import repo_root, panels_dir
 
     root = Path(repo_root())
     if banked:
-        png = root / "notebooks" / "out" / "_panels" / banked
+        png = panels_dir(banked)
         if png.exists():
             _display(_PNG(str(png), height=height))
             return

@@ -41,6 +41,22 @@ class SolveInterrupted(Exception):
 
 _STOP = threading.Event()
 
+# PROCESS-WIDE SOLVE EXCLUSIVITY (2026-09-29, from a live crash). The
+# solve kernels here and in solver3d are @njit(parallel=True), and
+# numba's default `workqueue` threading layer TERMINATES the process if
+# two Python threads enter parallel regions concurrently ("Concurrent
+# access has been detected") — hit for real when a second Fly started a
+# second solve while the first was mid-multigrid. Any driver that can
+# run builds from more than one thread (the Panel app's _solve_then)
+# must hold this lock for the duration of the build. The pairing that
+# makes it cheap: call request_stop() BEFORE acquiring, so the old
+# solve bails at its next _STOP check (raising SolveInterrupted, a
+# clean outcome) instead of running to a discarded completion — the
+# stop makes the wait short, the lock makes the overlap impossible.
+# Single-threaded drivers (scripts, panel_batch, notebooks) need not
+# take it; there is nothing for them to collide with.
+SOLVE_EXCLUSIVE = threading.Lock()
+
 
 def request_stop():
     """Ask any in-flight solve to stop at the next cycle boundary."""
@@ -48,7 +64,10 @@ def request_stop():
 
 
 def clear_stop():
-    """Re-arm the solver after a stop (call before the next solve)."""
+    """Re-arm the solver after a stop. Call before the next solve — and
+    if solves can OVERLAP (the app), only while holding SOLVE_EXCLUSIVE:
+    a clear issued while another solve is still winding down would
+    disarm the very stop that is ending it."""
     _STOP.clear()
 
 from ion_gym.physics.solver3d import solve3d, optimal_omega, _sweep
