@@ -47,6 +47,8 @@ CONVENTIONS
 from dataclasses import dataclass
 import numpy as np
 
+from ion_gym.physics.constants import ACC  # mm/us^2 per (V/mm / Da)
+
 
 
 @dataclass(frozen=True)
@@ -159,5 +161,5 @@ def derive_K(recording, field, mz):
     """Ledger helper: total energy (eV, gauge of `field`) per crossing
     from the recorded kinematics -- K = m(vs^2+vu^2)/2q + phi(s, u)."""
     a = recording.arrays()
-    return mz * (a["vs"]**2 + a["vu"]**2) / (2 * 96.485) \
+    return mz * (a["vs"]**2 + a["vu"]**2) / (2 * ACC) \
         + field.pot(a["s"], a["u"])

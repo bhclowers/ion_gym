@@ -35,13 +35,28 @@ import shutil
 import tempfile
 import numpy as np
 
+from ion_gym.io.paths import cache_root
+
 CACHE_VERSION = 2                       # bump to invalidate all entries
 # v2: planar bases now solved by the DIRECT engine
 # (sparse LU, exact) instead of multigrid (tol-approximate, residual
 # ~7e-4 of V_BASIS). Banked mg bases must not be served next to
 # direct solves — engine change is a result change.
-DEFAULT_ROOT = os.environ.get("ION_GYM_CACHE",
-                              os.path.expanduser("~/.ion_gym_cache"))
+
+
+def _root(root):
+    """The cache root a call uses: the caller's, else paths.cache_root()
+    resolved NOW (never frozen at import -- L-551)."""
+    return str(cache_root()) if root is None else root
+
+
+def __getattr__(name):
+    # DEFAULT_ROOT is kept as a public name (notebooks 01-05 and V01-V06
+    # and internal tools read it) but resolved on every access, so it
+    # always agrees with what store/load use.
+    if name == "DEFAULT_ROOT":
+        return str(cache_root())
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # ---------------------------------------------------------------- key / spec
@@ -77,12 +92,34 @@ def _sha_head(a, n=4096):
     return hashlib.sha256(np.ascontiguousarray(a).view(np.uint8)[:n].tobytes()).hexdigest()[:16]
 
 
-def store(spec, arrays, root=DEFAULT_ROOT):
+def _entry_complete(dest):
+    """True when every array meta.json lists is on disk. Unreadable
+    meta.json counts as incomplete (the entry cannot be served)."""
+    try:
+        with open(os.path.join(dest, "meta.json")) as f:
+            names = list((json.load(f).get("arrays") or {}))
+    except (OSError, ValueError, AttributeError):
+        return False
+    return all(os.path.exists(os.path.join(dest, n + ".npy"))
+               for n in names)
+
+
+def store(spec, arrays, root=None):
     """Atomically write {name: ndarray} under the spec's key. Returns the key."""
+    root = _root(root)
     key = spec_key(spec)
     dest = os.path.join(root, key)
     if os.path.isdir(dest) and os.path.exists(os.path.join(dest, "meta.json")):
-        return key                                   # already cached
+        if _entry_complete(dest):
+            return key                               # already cached
+        # meta.json present but an array it lists is not: a partial entry
+        # (e.g. a pre-fix in-place import that crashed). Served as complete
+        # it would fail every load; replaced by this solve instead (L-537)
+        fail = remove_tree(dest)
+        if fail:
+            raise CachePurgeIncomplete(0, 0, fail)
+        print(f"fa_cache: entry {key} was INCOMPLETE (arrays listed in "
+              f"meta.json missing); replacing it with this solve")
     os.makedirs(root, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix=f".{key}.", dir=root)
     ok = False
@@ -115,10 +152,11 @@ def store(spec, arrays, root=DEFAULT_ROOT):
     return key
 
 
-def load(spec_or_key, root=DEFAULT_ROOT, mmap=True, names=None):
+def load(spec_or_key, root=None, mmap=True, names=None):
     """Load a cache entry. Returns (arrays_dict, meta) or (None, None) on miss.
     arrays are memmapped read-only by default (zero-copy). Integrity: the
     sidecar's shape/dtype/sha_head must match each loaded array or it raises."""
+    root = _root(root)
     key = spec_or_key if isinstance(spec_or_key, str) and len(spec_or_key) == 16 \
         else spec_key(spec_or_key)
     dest = os.path.join(root, key)
@@ -150,7 +188,7 @@ def load(spec_or_key, root=DEFAULT_ROOT, mmap=True, names=None):
     return out, meta
 
 
-def verify(spec_or_key, root=DEFAULT_ROOT):
+def verify(spec_or_key, root=None):
     """Full integrity check (reads arrays, recomputes head sha). Returns bool;
     a missing, truncated, or tampered entry returns False rather than raising."""
     try:
@@ -165,7 +203,7 @@ def verify(spec_or_key, root=DEFAULT_ROOT):
     return True
 
 
-def annotate(spec_or_key, name, label=None, root=DEFAULT_ROOT,
+def annotate(spec_or_key, name, label=None, root=None,
              spec_json=None):
     """DESCRIPTIVE provenance: record which named spec
     produced or resolved a cache entry, in a `provenance.json` SIDECAR —
@@ -183,7 +221,7 @@ def annotate(spec_or_key, name, label=None, root=DEFAULT_ROOT,
     name = (name or "").strip()
     if not name:
         return                      # nothing to record — not an error
-    dest = os.path.join(os.path.expanduser(root), key)
+    dest = os.path.join(os.path.expanduser(_root(root)), key)
     if not os.path.isdir(dest):
         return                      # entry gone (cleared mid-flight) — moot
     ppath = os.path.join(dest, "provenance.json")
@@ -221,14 +259,14 @@ def annotate(spec_or_key, name, label=None, root=DEFAULT_ROOT,
               f"is affected.")
 
 
-def entries(root=DEFAULT_ROOT):
+def entries(root=None):
     """Inventory of the disk basis cache: a list of dicts, one per entry,
     with key, size in bytes, array count, mtime, and the entry's stored
     spec name/shape when available. Read-only — powers the Cache tab's
     per-item view so a user can see what is on disk and how big each item
     is before deciding what to remove. Never raises on a malformed entry;
     it is reported with what could be read."""
-    root = os.path.expanduser(root)
+    root = os.path.expanduser(_root(root))
     out = []
     if not os.path.isdir(root):
         return out
@@ -236,20 +274,14 @@ def entries(root=DEFAULT_ROOT):
         p = os.path.join(root, name)
         if not os.path.isdir(p) or name.startswith("."):
             continue
-        size = 0
-        n_arr = 0
-        for dirpath, _dn, fn in os.walk(p):
-            for f in fn:
-                fp = os.path.join(dirpath, f)
-                try:
-                    size += os.path.getsize(fp)
-                except OSError:
-                    pass
-                if f.endswith(".npy"):
-                    n_arr += 1
-        rec = dict(key=name, bytes=size, arrays=n_arr,
-                   mtime=os.path.getmtime(p), spec_name=None, shape=None,
-                   produced_by=[])
+        size, unsized = _tree_bytes(p)
+        n_arr = sum(f.endswith(".npy") for _dp, _dn, fn in os.walk(p)
+                    for f in fn)
+        # unsized_files > 0 means `bytes` is a LOWER BOUND (L-543: an
+        # unreadable file used to vanish from the count silently)
+        rec = dict(key=name, bytes=size, unsized_files=unsized,
+                   arrays=n_arr, mtime=os.path.getmtime(p), spec_name=None,
+                   shape=None, produced_by=[])
         ppath = os.path.join(p, "provenance.json")
         if os.path.exists(ppath):
             try:
@@ -288,45 +320,127 @@ def entries(root=DEFAULT_ROOT):
     return out
 
 
-def remove(key, root=DEFAULT_ROOT):
+class CachePurgeIncomplete(OSError):
+    """A purge that could not delete everything (L-543). Raised AFTER
+    every deletable entry is gone, carrying what WAS removed and each path
+    that was not, so the caller reports a partial purge as partial."""
+
+    def __init__(self, n_removed, bytes_freed, failures):
+        self.n_removed = n_removed
+        self.bytes_freed = bytes_freed
+        self.failures = dict(failures)        # {path: reason}
+        shown = "; ".join(f"{p} ({w})" for p, w in
+                          list(self.failures.items())[:5])
+        more = (f" (+{len(self.failures) - 5} more)"
+                if len(self.failures) > 5 else "")
+        super().__init__(
+            f"cache purge incomplete: {n_removed} entries removed "
+            f"({bytes_freed / 1e6:.1f} MB); could not delete "
+            f"{len(self.failures)} path(s): {shown}{more}")
+
+
+def remove_tree(path):
+    """Delete a directory tree; return {path: reason} for every file or
+    directory that could NOT be deleted ({} = fully gone; a missing tree
+    is already gone). The reporting counterpart of
+    shutil.rmtree(ignore_errors=True), which made failed deletes look
+    like successes (L-543)."""
+    path = str(path)
+    failures = {}
+    if not os.path.lexists(path):
+        return failures
+    for dirpath, dirnames, filenames in os.walk(path, topdown=False):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
+                os.remove(fp)
+            except OSError as e:
+                failures[fp] = f"{type(e).__name__}: {e.strerror or e}"
+        for d in dirnames:
+            dp = os.path.join(dirpath, d)
+            if os.path.islink(dp):
+                try:
+                    os.remove(dp)
+                except OSError as e:
+                    failures[dp] = f"{type(e).__name__}: {e.strerror or e}"
+            elif os.path.isdir(dp) and dp not in failures:
+                try:
+                    os.rmdir(dp)
+                except OSError as e:
+                    if not any(k.startswith(dp + os.sep) for k in failures):
+                        failures[dp] = (f"{type(e).__name__}: "
+                                        f"{e.strerror or e}")
+    try:
+        os.rmdir(path)
+    except OSError as e:
+        if not any(k.startswith(path + os.sep) for k in failures):
+            failures[path] = f"{type(e).__name__}: {e.strerror or e}"
+    return failures
+
+
+def _tree_bytes(path):
+    """(bytes, n_unsized): total size of the files under `path`, and how
+    many could not be sized -- reported, never silently dropped."""
+    size = unsized = 0
+    for dirpath, _dn, fn in os.walk(path):
+        for f in fn:
+            try:
+                size += os.path.getsize(os.path.join(dirpath, f))
+            except OSError:
+                unsized += 1
+    return size, unsized
+
+
+def remove(key, root=None):
     """Remove ONE cache entry by key. Returns (removed_bool, bytes_freed).
     Selective counterpart to clear_all for the Cache tab. A missing key is
-    reported (removed=False), not an error."""
-    import shutil
-    root = os.path.expanduser(root)
+    reported (removed=False), not an error; an entry that cannot be fully
+    deleted RAISES CachePurgeIncomplete naming each path (it used to
+    report success after rmtree(ignore_errors=True))."""
+    root = os.path.expanduser(_root(root))
     p = os.path.join(root, key)
     if not os.path.isdir(p):
         return False, 0
-    freed = 0
-    for dirpath, _dn, fn in os.walk(p):
-        for f in fn:
-            try:
-                freed += os.path.getsize(os.path.join(dirpath, f))
-            except OSError:
-                pass
-    shutil.rmtree(p, ignore_errors=True)
+    freed, unsized = _tree_bytes(p)
+    failures = remove_tree(p)
+    if failures:
+        raise CachePurgeIncomplete(0, 0, failures)
+    if unsized:
+        print(f"fa_cache: {unsized} file(s) in {key} could not be sized; "
+              f"{freed / 1e6:.1f} MB freed is a lower bound")
     return True, freed
 
 
-def clear_all(root=DEFAULT_ROOT):
+def clear_all(root=None):
     """Remove every cached basis set under `root`. Returns (n_entries,
-    bytes_freed). Used by the app's 'clear cache' control."""
-    import shutil
-    root = os.path.expanduser(root)
+    bytes_freed), counting ONLY entries actually deleted. If any entry
+    could not be fully deleted, every other entry is still removed and
+    then CachePurgeIncomplete (an OSError) is raised with the counts and
+    each failed path -- a failed delete is never counted as a purge
+    (L-543). Used by the app's 'clear cache' control."""
+    root = os.path.expanduser(_root(root))
     if not os.path.isdir(root):
         return 0, 0
-    n = bytes_freed = 0
+    n = bytes_freed = unsized = 0
+    failures = {}
     for name in os.listdir(root):
         p = os.path.join(root, name)
-        try:
-            for dirpath, _dn, fn in os.walk(p):
-                for f in fn:
-                    try:
-                        bytes_freed += os.path.getsize(os.path.join(dirpath, f))
-                    except OSError:
-                        pass
-            shutil.rmtree(p, ignore_errors=True)
-            n += 1
-        except OSError:
-            pass
+        if not os.path.isdir(p) or os.path.islink(p):
+            # an ENTRY is a directory; loose files at the root are not
+            # cache entries and are kept (e.g. sizing's per-machine
+            # solve_rates.json) -- the old rmtree failed on them silently
+            continue
+        size, n_uns = _tree_bytes(p)
+        fail = remove_tree(p)
+        if fail:
+            failures.update(fail)
+            continue
+        n += 1
+        bytes_freed += size
+        unsized += n_uns
+    if failures:
+        raise CachePurgeIncomplete(n, bytes_freed, failures)
+    if unsized:
+        print(f"fa_cache: {unsized} file(s) could not be sized; "
+              f"{bytes_freed / 1e6:.1f} MB freed is a lower bound")
     return n, bytes_freed

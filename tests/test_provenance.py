@@ -40,7 +40,11 @@ NEEDS_PROVENANCE = [
     # provenance cannot name files the package no longer ships.
     # The five recovered legacy modules, provenance backfilled at
     # reconciliation (the list grows by adding provenance, never shrinks)
-    "tracer_tdep.py", "tracer_gas.py",
+    # tracer_gas.py REMOVED 2026-10-16 (D13, L-545, PI: "Delete dead
+    # modules"): no live importer -- only the retired
+    # validate_collisions_c2 -- so it no longer ships, and a list of
+    # shipped modules cannot require it (same reasoning as q3r_geom above).
+    "tracer_tdep.py",
     # quad_scene_build.py removed from the package (zero live callers).
 ]
 FIELDS = ("origin", "derived", "extracted", "authored", "verified", "note")

@@ -238,11 +238,16 @@ p3 = propose_sizing_scene(sc.at_resolution(0.4), pitch=0.4,
                           min_feature_mm=0.5)
 gate("S5.warns", any("smeared" in w for w in p3.warnings),
      "under-resolved feature (0.5 mm at 0.4 mm/gu) is warned about")
-gate("S5.fold", propose_sizing_scene(
-    fixture_a().at_resolution(0.25, margin_mm=1.0), pitch=0.25).n_voxels_solved
-    == propose_sizing_scene(fixture_a().at_resolution(0.25, margin_mm=1.0),
-                            pitch=0.25).n_voxels // 4,
-    "declared mirror xy is credited as a 4x reduction in the estimate")
+# L-565 (PI-approved contract change 2026-10-15): a scene's grid is the
+# STORED/FOLDED frame, so its declared mirror is already cut away -- the
+# estimate reports it and solves the stored grid as-is. This gate used to
+# assert a further 4x credit, which under-quoted mirrored scenes.
+_pf = propose_sizing_scene(fixture_a().at_resolution(0.25, margin_mm=1.0),
+                           pitch=0.25)
+gate("S5.fold", _pf.n_voxels_solved == _pf.n_voxels
+     and _pf.mirror_stored == "xy",
+     f"declared mirror {_pf.mirror_stored!r} reported, stored grid solved "
+     f"as-is ({_pf.n_voxels_solved:,} of {_pf.n_voxels:,} nodes)")
 
 print("\nS6  the DOMAIN is preserved across a pitch change")
 # This is the invariant that failed on the Q3: re-gridding re-derived the box

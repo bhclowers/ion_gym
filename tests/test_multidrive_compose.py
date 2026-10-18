@@ -47,13 +47,12 @@ def check(name, fn):
         print(f"  [FAIL] {name}: {e}")
 
 
-class _D(dict):
-    pass
-
-
 def _solved_bases():
-    """Real 3-rod scene -> unit bases (÷v_basis, as build_stl3d_run does),
-    with the label grid stashed for edge-aware gradients."""
+    """Real 3-rod scene -> (unit bases (÷v_basis, as build_stl3d_run
+    does), the rastered label grid). The label grid is passed to the
+    composer EXPLICITLY (L-518: production stashed it as an attribute on
+    a plain dict, which always failed; this fixture's dict subclass hid
+    that)."""
     rods = [(1, 3), (6, 3), (3.5, 5)]
     sc = GeomScene(
         grid=GridSpec(nx=90, ny=70, nz=61, mm_per_gu=0.1),
@@ -65,9 +64,8 @@ def _solved_bases():
     lab = rasterize(sc)
     raw = solve_bases({i: (lab == i) for i in range(1, 4)},
                       v_basis=1e4, verbose=False)
-    bases = _D({i: (raw[i] / 1e4).astype(np.float32) for i in raw})
-    bases.ele = lab.astype(np.int16)
-    return bases
+    bases = {i: (raw[i] / 1e4).astype(np.float32) for i in raw}
+    return bases, lab.astype(np.int16)
 
 
 def _spec(rf_groups, memberships):
@@ -83,7 +81,7 @@ def _spec(rf_groups, memberships):
 
 
 def main():
-    bases = _solved_bases()
+    bases, ele = _solved_bases()
 
     def m1():
         rf = [RFGroupSpec(name="RF", frequency_hz=1e6, amplitude_v=200.0,
@@ -91,7 +89,7 @@ def main():
         # ONE rod driven, the others are the grounded return -> a real
         # field gradient (all rods in one group = uniform, no field)
         ch = B.compose_drive_channels(
-            _spec(rf, [(0, ["RF"]), (0, []), (0, [])]), bases)
+            _spec(rf, [(0, ["RF"]), (0, []), (0, [])]), bases, ele)
         assert list(ch["ch_kind"]) == [0], ch["ch_kind"]
         assert abs(ch["ch_om"][0] - 2 * np.pi * 1e6 * 1e-6) < 1e-9
         assert abs(ch["ch_amp"][0] - 200.0) < 1e-9
@@ -106,7 +104,7 @@ def main():
                           waveform="square")]
         ch = B.compose_drive_channels(
             _spec(rf, [(5.0, ["RF", "AC"]), (0, ["RF"]),
-                       (0, ["RF"])]), bases)
+                       (0, ["RF"])]), bases, ele)
         assert len(ch["ch_kind"]) == 2, ch["ch_kind"]
         assert set(ch["ch_kind"]) == {0, 2}, ch["ch_kind"]
         assert np.abs(ch["EAx"]).max() > 1e-3, "DC bias absent from EA"
@@ -119,7 +117,7 @@ def main():
                           waveform="sin")]
         ch = B.compose_drive_channels(
             _spec(rf, [(0, ["RF", "AC"]), (0, ["RF"]),
-                       (0, ["AC"])]), bases)
+                       (0, ["AC"])]), bases, ele)
         oms = sorted(ch["ch_om"])
         assert len(oms) == 2 and oms[0] != oms[1], oms
         # the frequency the OLD path would have refused is present
@@ -132,7 +130,7 @@ def main():
                           table_v=[0.0, 1.0])]
         ch = B.compose_drive_channels(
             _spec(rf, [(0, ["TAB"]), (0, []), (0, [])]),
-            bases)
+            bases, ele)
         assert list(ch["ch_kind"]) == [3], ch["ch_kind"]
         assert len(ch["tab_t"]) == 2 and ch["tab_v"][-1] == 1.0
     check("M4 table waveform -> kind 3 with (t,v) carried", m4)
@@ -143,7 +141,7 @@ def main():
             B.compose_drive_channels(_spec(
                 [RFGroupSpec(name="X", frequency_hz=1e6, amplitude_v=1.0,
                              waveform="triangle")],
-                [(0, ["X"]), (0, []), (0, [])]), bases)
+                [(0, ["X"]), (0, []), (0, [])]), bases, ele)
             raise AssertionError("unknown waveform not refused")
         except ValueError as e:
             assert "waveform" in str(e)
@@ -151,7 +149,7 @@ def main():
         try:
             B.compose_drive_channels(_spec(
                 [RFGroupSpec(name="RF", frequency_hz=1e6, amplitude_v=1.0)],
-                [(0, ["NOPE"]), (0, []), (0, [])]), bases)
+                [(0, ["NOPE"]), (0, []), (0, [])]), bases, ele)
             raise AssertionError("undefined group not refused")
         except ValueError as e:
             assert "not defined" in str(e) or "NOPE" in str(e)
@@ -160,7 +158,7 @@ def main():
             B.compose_drive_channels(_spec(
                 [RFGroupSpec(name="ORPHAN", frequency_hz=1e6,
                              amplitude_v=5.0)],
-                [(0, []), (0, []), (0, [])]), bases)
+                [(0, []), (0, []), (0, [])]), bases, ele)
             raise AssertionError("orphan group not refused")
         except ValueError as e:
             assert "no electrode" in str(e) or "nothing to drive" in str(e)
@@ -173,7 +171,7 @@ def main():
               RFGroupSpec(name="RF", frequency_hz=1e6, amplitude_v=50.0,
                           waveform="sin")]
         ch = B.compose_drive_channels(
-            _spec(rf, [(0, ["TW"]), (0, ["RF"]), (0, [])]), bases)
+            _spec(rf, [(0, ["TW"]), (0, ["RF"]), (0, [])]), bases, ele)
         {int(k): float(v) for k, v in
              zip(ch["ch_kind"], ch["ch_duty"])}
         assert abs(ch["ch_duty"][list(ch["ch_kind"]).index(2)] - 0.25)             < 1e-12, ch["ch_duty"]
@@ -183,7 +181,7 @@ def main():
             bad = [RFGroupSpec(name="X", frequency_hz=1e3, amplitude_v=1.0,
                                waveform="square", duty=1.5)]
             B.compose_drive_channels(_spec(bad, [(0, ["X"]), (0, []),
-                                                 (0, [])]), bases)
+                                                 (0, [])]), bases, ele)
             raise AssertionError("duty 1.5 not refused")
         except ValueError as e:
             assert "duty" in str(e)

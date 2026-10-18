@@ -88,6 +88,13 @@ def _pack_3d(model):
     if not isinstance(f, dict) or f.get("route") != "3d":
         raise ValueError("3-D field export needs the built model's fly_fields "
                          "channel pack (route '3d'); this model has none")
+    # L-540: the duty and the world offset are READ, never defaulted -- a
+    # pack without them exported 50% duty and stored-frame coordinates
+    # (world_off (0,0,0)) with no sign anything was assumed
+    missing = [k for k in ("ch_duty", "world_off_mm") if k not in f]
+    if missing:
+        raise ValueError(f"3-D field export: the model's channel pack lacks "
+                         f"{missing}; rebuild the model with this ion_gym")
     return f
 
 
@@ -107,7 +114,7 @@ def field_at(spec, model, t_us):
         Ey = np.asarray(f["EAy"], np.float64).copy()
         Ez = np.asarray(f["EAz"], np.float64).copy()
         kinds = np.asarray(f["ch_kind"])
-        duty = np.asarray(f.get("ch_duty", np.full(len(kinds), 0.5)))
+        duty = np.asarray(f["ch_duty"])
         tab_t, tab_v = np.asarray(f["tab_t"]), np.asarray(f["tab_v"])
         tab_off = np.asarray(f["tab_off"])
         for k in range(len(kinds)):
@@ -166,7 +173,7 @@ def field_axes_mm(spec, model):
     if builder in _3D_BUILDERS:
         f = _pack_3d(model)
         h = float(f["h_mm"])
-        off = np.asarray(f.get("world_off_mm", (0.0, 0.0, 0.0)), float)
+        off = np.asarray(f["world_off_mm"], float)
         nx, ny, nz = np.asarray(f["EAx"]).shape
         return (off[0] + np.arange(nx) * h, off[1] + np.arange(ny) * h,
                 off[2] + np.arange(nz) * h, ("x", "y", "z"))
@@ -205,8 +212,12 @@ def _switch_count(kind, om, ph, duty, t0, t1, tab_t=None):
             # window start is the state the window opens in, not a change
             n += max(0, int(np.ceil(b) - np.floor(a) - 1))
         return n
-    tt = np.asarray(tab_t if tab_t is not None else [], float)
-    return int(np.count_nonzero((tt > t0) & (tt < t1)))
+    if kind in (3, 4):                      # table_hold / table_linear
+        tt = np.asarray(tab_t if tab_t is not None else [], float)
+        return int(np.count_nonzero((tt > t0) & (tt < t1)))
+    # L-540: every other kind used to be counted as a table
+    raise ValueError(f"field export: waveform kind {kind!r} is not known "
+                     f"(known: {_WAVE_NAMES})")
 
 
 def channel_table(spec, model, t0_us, span_us):
@@ -219,7 +230,7 @@ def channel_table(spec, model, t0_us, span_us):
         f = _pack_3d(model)
         kinds = np.asarray(f["ch_kind"])
         names = f.get("ch_name") or [f"channel_{k}" for k in range(len(kinds))]
-        duty = np.asarray(f.get("ch_duty", np.full(len(kinds), 0.5)))
+        duty = np.asarray(f["ch_duty"])
         for k in range(len(kinds)):
             o0, o1 = int(f["tab_off"][k]), int(f["tab_off"][k + 1])
             om = float(f["ch_om"][k])

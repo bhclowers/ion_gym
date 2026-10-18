@@ -38,8 +38,7 @@ import numpy as np
 
 from ion_gym.physics.tracer_numba import _sample
 
-E_CHG = 1.602176634e-19
-AMU = 1.66053907e-27
+from ion_gym.physics.constants import E_CHG, KG_AMU as AMU  # noqa: E402
 
 
 def build_field_aware(Z_mm, U_mm, phi, ele, symmetry="cylindrical"):

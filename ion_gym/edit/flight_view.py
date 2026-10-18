@@ -226,10 +226,21 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                 _t3 = (list(off) + [0.0, 0.0, 0.0])[:3]
                 _g = st["spec"]["geometry"]
                 _th = _np.linspace(0, 2 * _np.pi, 48, endpoint=False)
+                # Only an (axial, radial) RECT revolves to an annulus, the
+                # one solid this z-extruding viewer can draw. Any other
+                # section (ellipse, polygon, a cutout's hole) revolves to a
+                # shape it cannot express, and drawing its bounding annulus
+                # would show metal that is not there -- so it is NAMED in
+                # the stage note. It used to be skipped with no word, which
+                # made that metal simply absent from /flight (L-542).
+                _not_drawn = []
                 for _ei, _el in enumerate(_g.get("electrodes", [])):
                     _solids = []
                     for _sh in (_el.get("shapes") or []):
                         if _sh.get("type") != "rect":
+                            _not_drawn.append(
+                                f"{_el.get('name', _ei)}:"
+                                f"{_sh.get('type', '?')}")
                             continue
                         _x0 = float(_sh["x_mm"]); _dx = float(_sh["width_mm"])
                         _ri = float(_sh["y_mm"])
@@ -266,7 +277,10 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                         drew_any = True
                 stage_notes.append(
                     f"stage {nm}: r-z drawn as revolved annuli (axial "
-                    f"local x posed on world z)")
+                    f"local x posed on world z)"
+                    + (f"; NOT DRAWN — {len(_not_drawn)} non-rect "
+                       f"section(s) that do not revolve to an annulus: "
+                       f"{', '.join(_not_drawn)}" if _not_drawn else ""))
                 continue
             if any(abs(float(r)) > 1e-9 for r in rot):
                 stage_notes.append(

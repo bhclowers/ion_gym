@@ -118,8 +118,9 @@ def _fit_circle(P, region=None):
                 m = hi - lo
                 if best is None or m > best[0]:
                     best = (m, cx, cy, lo, hi)
-        if best[0] <= 0 and span is None:
-            pass  # keep refining; margin may appear
+        # a non-positive margin after the coarse pass is NOT final: the
+        # finer passes may still find one (the infeasible case is refused
+        # below). A dead `if ...: pass` said this; L-556.
     m, cx, cy, lo, hi = best
     if m <= 1e-9:
         return None
@@ -293,8 +294,7 @@ def _desc_to_prims(desc, z_hi, length):
 def fit_electrode(mask):
     """mask (nx,ny,nz) bool -> list[Shape], or raise with a slice report."""
     nz = mask.shape[2]
-    [z for z in range(nz) if mask[:, :, z].any()]
-    shapes, z = [], 0
+    shapes = []
     runs = []
     z = 0
     while z < nz:

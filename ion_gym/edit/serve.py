@@ -18,13 +18,7 @@ from typing import List, Optional, Sequence
 
 import panel as pn
 
-import ion_gym
-
-
-def repo_root() -> Path:
-    """The working-tree root, derived from the package location (no
-    hardcoded machine paths — standing rule)."""
-    return Path(ion_gym.__file__).resolve().parents[1]
+from ion_gym.io.paths import repo_root   # THE repo root (L-551)
 
 
 def available_decks() -> List[str]:

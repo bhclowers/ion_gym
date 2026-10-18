@@ -39,6 +39,10 @@ N_LEVELS_DEFAULT = 15
 MAX_TOTAL_POINTS = 150_000
 # a DC range smaller than this is a flat field, not a contourable one
 FLAT_RANGE_EV = 1e-9
+# r-z contours keep the stored half r >= 0; a point this far below the
+# axis is round-off from contourpy's interpolation ON the axis, not the
+# mirrored half (L-552: was a literal in the clip)
+R_CLIP_TOL_MM = 1e-9
 
 
 def contour_primitives(session: EditSession,
@@ -71,6 +75,7 @@ def contour_primitives(session: EditSession,
         # it and the failure is named here instead of at module import
         from ion_gym.physics.sim_build import build_run
         from ion_gym.viz.pe_view import compute_component
+        from ion_gym.viz.viz_core import VizError
         import contourpy
     except ImportError as e:
         return {"refused": f"contour dependencies unavailable: {e}"}
@@ -82,8 +87,12 @@ def contour_primitives(session: EditSession,
     try:
         model, *_ = build_run(spec)
         x, y, PE, ele = compute_component(model, None, 1, "dc")
-    except Exception as e:
-        return {"refused": f"field build failed: "
+    except (ValueError, VizError) as e:
+        # the build's and the viewer's REFUSALS (ValueError, which covers
+        # MissingPhysicsKey and BirthInMetal; VizError): displayable. A
+        # malfunction is anything else and raises, as the docstring says
+        # -- it was `except Exception`, so a bug read as "refused" (L-541).
+        return {"refused": f"field build refused: "
                            f"{type(e).__name__}: {e}"}
     build_s = time.time() - t0
 
@@ -117,7 +126,7 @@ def contour_primitives(session: EditSession,
             arr = np.asarray(arr, float)
             runs = [arr]
             if clip_r:
-                keep = arr[:, 1] >= -1e-9
+                keep = arr[:, 1] >= -R_CLIP_TOL_MM
                 runs = []
                 start = None
                 for i, k in enumerate(keep):

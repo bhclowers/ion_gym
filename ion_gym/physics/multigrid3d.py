@@ -272,6 +272,11 @@ def solve_bases_mg(masks, scene=None, mirror=(False, False, False),
                     f"{tol:.1e} without raising — convergence contract "
                     f"broken upstream; refusing to cache.")
             out[i] = phi
+            # THIS MACHINE'S MULTIGRID RATE for the solve-cost quote
+            # (L-439): the one multigrid door records every converged
+            # basis it solves.
+            from ion_gym.physics.sizing import record_solve
+            record_solve("mg", metal.size, basis_s=_time.time() - _t0)
     except KeyboardInterrupt:
         raise SolveInterrupted(f"interrupted during electrode solve "
                                f"(completed {len(out)} of {n})")

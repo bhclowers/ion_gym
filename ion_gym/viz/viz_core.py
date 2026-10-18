@@ -697,7 +697,8 @@ FATE_NAMES = {0: "struck metal or left the domain", 1: "left the field box",
               2: "still in flight at t_max", 3: "crossed a declared plane",
               4: "hit the transporter pass limit",
               5: "struck a station impact plane",
-              6: "were detected at a station"}
+              6: "were detected at a station",
+              -1: "have no fate recorded (damaged or legacy result)"}
 # PROSE register, deliberately NOT physics.ion_envelope.FATE_NAME: these
 # are sentence fragments ("3 ion(s) were detected at a station"), while
 # that table holds short labels for legends and tables. Same codes, two
@@ -732,6 +733,7 @@ def describe_fates(spec, model, summaries, max_named=3):
     outcome, not a truncated result. Returns a list of sentences.
     """
     import collections
+    from ion_gym.physics.ion_envelope import summary_fate, summary_value
     if not summaries:
         return []
     _tail = []
@@ -780,6 +782,12 @@ def describe_fates(spec, model, summaries, max_named=3):
         """
         if h <= 0 or ele.size == 0:
             return ("vacuum", None)
+        # end point through the one summary accessor (L-530): an absent
+        # coordinate is NOT read as 0.0 -- the strike is unlocatable
+        end = [summary_value(su, k) for k in ("x_end", "y_end", "z_end")]
+        if any(v is None for v in end[:max(ele.ndim, 2)]) or (
+                _is_rz and end[2] is None):
+            return ("unlocated", None)
         if _is_rz and ele.ndim == 2:
             # r-z: axis 0 is axial, axis 1 is RADIUS >= 0 measured from u0.
             # A trajectory carries a SIGNED transverse coordinate (the ion
@@ -790,15 +798,11 @@ def describe_fates(spec, model, summaries, max_named=3):
             # (model.u0 is the origin of the MIRRORED full array the kernel
             # is handed, not of this one — subtracting it here put every
             # lookup off the end of the grid.)
-            r = math.hypot(float(su.get("y_end", 0.0)),
-                           float(su.get("z_end", 0.0)))
-            idx = [int(round(float(su.get("x_end", 0.0)) / h)),
-                   int(round(r / h))]
+            r = math.hypot(end[1], end[2])
+            idx = [int(round(end[0] / h)), int(round(r / h))]
         else:
-            idx = []
-            for a, key in zip(range(ele.ndim), ("x_end", "y_end", "z_end")):
-                v = float(su.get(key, 0.0)) - moff[a]
-                idx.append(int(round(v / h)))
+            idx = [int(round((end[a] - moff[a]) / h))
+                   for a in range(ele.ndim)]
         if any(i < -1 or i > n for i, n in zip(idx, ele.shape)):
             return ("outside", None)          # left the field domain
         sl = tuple(slice(max(0, i - 1), min(n, i + 2))
@@ -812,7 +816,8 @@ def describe_fates(spec, model, summaries, max_named=3):
 
     by_kind = collections.defaultdict(list)
     for su in summaries:
-        by_kind[int(su.get("kind", 2))].append(su)
+        # a summary without a fate is UNKNOWN, never a timeout (L-530)
+        by_kind[summary_fate(su)].append(su)
     out = []
     for kind, group in sorted(by_kind.items()):
         n = len(group)
@@ -823,6 +828,7 @@ def describe_fates(spec, model, summaries, max_named=3):
             n_out = sum(1 for st, _ in res if st == "outside")
             n_unnamed = sum(1 for st, nm in res if st == "metal" and not nm)
             n_vac = sum(1 for st, _ in res if st == "vacuum")
+            n_unloc = sum(1 for st, _ in res if st == "unlocated")
             parts = []
             if hits:
                 parts.append("struck " + ", ".join(
@@ -833,6 +839,9 @@ def describe_fates(spec, model, summaries, max_named=3):
                 parts.append(f"{n_unnamed} struck unnamed metal")
             if n_vac:
                 parts.append(f"{n_vac} stopped in vacuum")
+            if n_unloc:
+                parts.append(f"{n_unloc} with no recorded end point "
+                             f"(cannot be located)")
             out.append(f"{n} ion(s) terminated: " + "; ".join(parts))
         elif kind == 2:
             tmax = getattr(spec.integration, "t_max_us", None)
@@ -2903,8 +2912,9 @@ def distribution_compare(panels, *, title, operating_point, bins=30,
         point is not a result.
     Returns the matplotlib figure; the caller saves/shows.
     """
-    import matplotlib
-    matplotlib.use("Agg")
+    # Agg only when no notebook/GUI backend is active (L-550: this forced
+    # Agg unconditionally, switching a live notebook's backend)
+    _mpl_headless_if_needed()
     import matplotlib.pyplot as plt
     if not panels:
         raise VizError("distribution_compare: no panels given")
@@ -2989,8 +2999,9 @@ def resolution_anatomy(panels, *, title, operating_point, bins=60,
 
     Returns the matplotlib figure; the caller saves/shows.
     """
-    import matplotlib
-    matplotlib.use("Agg")
+    # Agg only when no notebook/GUI backend is active (L-550: this forced
+    # Agg unconditionally, switching a live notebook's backend)
+    _mpl_headless_if_needed()
     import matplotlib.pyplot as plt
     if not panels:
         raise VizError("resolution_anatomy: no panels given")
@@ -3897,57 +3908,65 @@ def unfold_mirror_labels(lab, mirror):
     return lab
 
 
-def cad_preview(spec, *, height: int = 620, opacity: float = 0.55):
-    """Interactive 3-D preview of a spec's imported STL meshes — the CAD
-    truth, one colour per electrode, name on hover, aspectmode='data'.
+# One palette for the mesh previews (matplotlib tab10): the STL-upload
+# preview and cad_preview carried their own copies of it.
+MESH_PREVIEW_PALETTE = ("#1f77b4", "#d62728", "#2ca02c", "#9467bd",
+                        "#ff7f0e", "#17becf", "#8c564b", "#e377c2",
+                        "#7f7f7f", "#bcbd22")
 
-    PROMOTED from sim_app's STL-upload preview (the 3-D CAD preview
-    shows in the notebook too; interactive early and
-    often) so notebooks and the app share one implementation. The
-    uploader's in-place preview still draws from in-memory bytes
-    pre-spec; unifying that call site onto this function is part of the
-    known sim_app two-renderer debt, noted not done.
 
-    This shows the MESH AS IMPORTED (CAD frame, mm). What the solver
-    flies is the voxelized raster of it — voxel_views() shows that; the
-    difference between the two IS the mesh-detail question.
-    """
+def mesh_preview_figure(named_meshes, *, title, height=620, opacity=0.55,
+                        palette=MESH_PREVIEW_PALETTE):
+    """THE interactive 3-D mesh preview: one Mesh3d per (name, mesh, i)
+    -- `i` the colour index, so an electrode keeps its colour whatever is
+    skipped -- name on hover, aspectmode='data', axes in mm. Shared by
+    cad_preview (a deck's files) and the STL upload panel (dropped bytes,
+    before any spec exists; L-548: it built its own figure)."""
     import plotly.graph_objects as go
-    from ion_gym.physics.build_stl import _require_trimesh
-    from ion_gym.io.stl_resolve import resolve_stl_dir
-    trimesh = _require_trimesh()
-    stl_dir = resolve_stl_dir(spec)
-    palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
-               "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
     fig = go.Figure()
-    n = 0
-    for i, el in enumerate(spec.geometry.electrodes):
-        if not getattr(el, "stl", None):
-            continue
-        mesh = trimesh.load(str(stl_dir / el.stl), force="mesh",
-                            process=True)
+    for name, mesh, i in named_meshes:
         v, f = mesh.vertices, mesh.faces
         fig.add_mesh3d(
             x=v[:, 0], y=v[:, 1], z=v[:, 2],
             i=f[:, 0], j=f[:, 1], k=f[:, 2],
             color=palette[i % len(palette)], opacity=opacity,
-            name=el.name, showlegend=True, flatshading=True,
-            hovertemplate=(f"<b>{el.name}</b><br>x %{{x:.2f}}  "
+            name=name, showlegend=True, flatshading=True,
+            hovertemplate=(f"<b>{name}</b><br>x %{{x:.2f}}  "
                            f"y %{{y:.2f}}  z %{{z:.2f}} mm<extra></extra>"))
-        n += 1
-    if n == 0:
-        raise VizError(f"{spec.name!r}: no STL-bearing electrodes to "
-                       "preview — cad_preview is for imported-mesh specs")
     fig.update_layout(
         height=height, margin=dict(l=0, r=0, t=30, b=0),
         legend=dict(orientation="h", y=1.06),
         scene=dict(aspectmode="data", xaxis_title="x (mm)",
                    yaxis_title="y (mm)", zaxis_title="z (mm)"),
-        title=dict(text=f"{spec.name} — CAD meshes as imported "
-                        "(drag to orbit; hover for electrode)",
-                   font=dict(size=12)))
+        title=dict(text=title, font=dict(size=12)))
     _mpl_release(fig)
     return fig
+
+
+def cad_preview(spec, *, height: int = 620, opacity: float = 0.55):
+    """Interactive 3-D preview of a spec's imported STL meshes — the CAD
+    truth, one colour per electrode, name on hover, aspectmode='data'.
+
+    PROMOTED from sim_app's STL-upload preview so notebooks and the app
+    share one implementation; both now draw through mesh_preview_figure
+    (L-548), the uploader from its in-memory bytes before a spec exists.
+
+    This shows the MESH AS IMPORTED (CAD frame, mm). What the solver
+    flies is the voxelized raster of it — voxel_views() shows that; the
+    difference between the two IS the mesh-detail question.
+    """
+    from ion_gym.io.stl_resolve import resolve_stl_dir, parse_stl_bytes
+    stl_dir = resolve_stl_dir(spec)
+    named = [(el.name, parse_stl_bytes((stl_dir / el.stl).read_bytes()), i)
+             for i, el in enumerate(spec.geometry.electrodes)
+             if getattr(el, "stl", None)]
+    if not named:
+        raise VizError(f"{spec.name!r}: no STL-bearing electrodes to "
+                       "preview — cad_preview is for imported-mesh specs")
+    return mesh_preview_figure(
+        named, height=height, opacity=opacity,
+        title=f"{spec.name} — CAD meshes as imported "
+              "(drag to orbit; hover for electrode)")
 
 
 def voxel_views(labels, h_mm, *, names=None, voltages=None,
@@ -5304,6 +5323,175 @@ def stats_figure(rows, *, kind="stations", height=300, title=None):
     return fig
 
 
+# ------------------------------------------------ analysis figure (L-548)
+# The app's Analysis tab drew these inline, twice (single-stage results and
+# assembly flights), with different grouping rules: fate colouring was
+# ignored in single-stage trajectory mode, an unknown fate fell out of every
+# fate-grouped plot, and the m/z selector offered '%g' labels (6 significant
+# figures) that it then matched against the full value with a 1e-9
+# tolerance, so an m/z with more digits could never be selected. One drawing
+# here serves both; the caller extracts the numbers.
+ANALYSIS_MAX_ION_TRACES = 400     # per-ion traces: browser overhead per trace
+ANALYSIS_MAX_PTS_PER_TRACE = 5000  # decimation within one ion's trace
+ANALYSIS_KINDS = ("traj", "end", "hist")
+ANALYSIS_GROUPS = ("ion", "all together", "fate", "m/z")
+UNKNOWN_MZ_COLOR = "#7f7f7f"
+
+
+def mz_key(mz) -> str:
+    """THE text identity of an m/z in the Analysis selector, legend and
+    filter. Options are offered under this key and matched by it, so a
+    value is selectable exactly when it is offered (no tolerance)."""
+    return f"{float(mz):.10g}"
+
+
+@dataclass
+class AnalysisSeries:
+    """One ion's data for analysis_figure.
+
+    x, y : 1-D arrays -- a trajectory (kind 'traj'), the end point as
+           length-1 arrays ('end'), or the values to histogram in x ('hist',
+           y unused and may be None).
+    mz   : the ion's own m/z, or None when it is not recorded (drawn under
+           'm/z unknown', never given a stand-in value).
+    fate : the ion's fate, labelled and coloured by the figure's fate_style.
+    """
+    ion: object
+    x: np.ndarray
+    y: np.ndarray | None
+    mz: float | None
+    fate: object
+
+
+def _default_fate_style(fate):
+    from ion_gym.physics.ion_envelope import fate_name, fate_color
+    return fate_name(fate), fate_color(fate)
+
+
+def _analysis_groups(series, group, palette, fate_style):
+    """[(label, colour, [series...]), ...] for a colouring group."""
+    if group == "m/z":
+        known = sorted({float(s.mz) for s in series if s.mz is not None})
+        out = []
+        for i, m in enumerate(known):
+            out.append((f"m/z {mz_key(m)}", palette[i % len(palette)],
+                        [s for s in series
+                         if s.mz is not None and float(s.mz) == m]))
+        unknown = [s for s in series if s.mz is None]
+        if unknown:
+            out.append(("m/z unknown", UNKNOWN_MZ_COLOR, unknown))
+        return out
+    if group == "fate":
+        fates = sorted({s.fate for s in series},
+                       key=lambda f: ((0, f, "") if isinstance(f, int)
+                                      else (1, 0, str(f))))
+        out = []
+        for f in fates:
+            label, colour = fate_style(f)
+            out.append((label, colour, [s for s in series if s.fate == f]))
+        # two fates may share a style (e.g. 'lost'): one legend entry each
+        merged = {}
+        for label, colour, members in out:
+            merged.setdefault((label, colour), []).extend(members)
+        return [(lb, c, m) for (lb, c), m in merged.items()]
+    return [(None, palette[0], list(series))]
+
+
+def _decimate(a, max_pts):
+    a = np.asarray(a, float)
+    if len(a) > max_pts:
+        a = a[::len(a) // max_pts + 1]
+    return a
+
+
+def analysis_figure(series, *, kind, group, palette, x_label, y_label,
+                    title, alpha=0.7, line_mode="lines", bins=20,
+                    fate_style=None, height=460,
+                    max_ion_traces=ANALYSIS_MAX_ION_TRACES,
+                    max_pts=ANALYSIS_MAX_PTS_PER_TRACE):
+    """The Analysis tab figure, from per-ion AnalysisSeries.
+
+    Route-agnostic: it takes extracted numbers, never a deck or a model.
+    kind  : 'traj' (every recorded point), 'end' (one point per ion) or
+            'hist' (histogram of x; y ignored).
+    group : 'ion' (a trace per ion in trajectory mode; one series
+            otherwise), 'all together', 'fate' or 'm/z' -- honoured in every
+            kind. Ions without an m/z form a named 'm/z unknown' group; an
+            unknown fate is a group like any other (fate_style labels it).
+    fate_style : fate -> (label, colour); default ion_envelope's one table.
+    Returns (fig, info); info['ion_traces_capped'] is True when
+    group 'ion' in 'traj' hit max_ion_traces (the caller says so).
+    """
+    import plotly.graph_objects as go
+    if kind not in ANALYSIS_KINDS:
+        raise ValueError(f"analysis_figure: kind must be one of "
+                         f"{ANALYSIS_KINDS}, got {kind!r}")
+    if group not in ANALYSIS_GROUPS:
+        raise ValueError(f"analysis_figure: group must be one of "
+                         f"{ANALYSIS_GROUPS}, got {group!r}")
+    fate_style = fate_style or _default_fate_style
+    palette = list(palette)
+    fig = go.Figure()
+    info = {"ion_traces_capped": False}
+    if kind == "hist":
+        groups = _analysis_groups(series, group, palette, fate_style)
+        for label, colour, members in groups:
+            vals = (np.concatenate([np.asarray(s.x, float) for s in members])
+                    if members else np.array([]))
+            if len(vals):
+                fig.add_histogram(x=vals, nbinsx=int(bins), opacity=alpha,
+                                  name=label, showlegend=label is not None,
+                                  marker=dict(color=colour))
+        fig.update_layout(barmode="overlay", yaxis_title="count")
+    elif kind == "end":
+        for label, colour, members in _analysis_groups(
+                series, group, palette, fate_style):
+            if not members:
+                continue
+            fig.add_scattergl(
+                x=np.concatenate([np.asarray(s.x, float) for s in members]),
+                y=np.concatenate([np.asarray(s.y, float) for s in members]),
+                mode="markers", opacity=alpha, name=label,
+                showlegend=label is not None, marker=dict(color=colour))
+        fig.update_layout(yaxis_title=y_label)
+    elif group == "ion":
+        # WebGL, a capped number of traces, decimated within a trace: an
+        # SVG scatter of ~100 ions x ~1000 points hangs the browser
+        n = 0
+        for s in series:
+            if n >= max_ion_traces:
+                info["ion_traces_capped"] = True
+                break
+            fig.add_scattergl(x=_decimate(s.x, max_pts),
+                              y=_decimate(s.y, max_pts), mode=line_mode,
+                              line=dict(width=1), marker=dict(size=3),
+                              opacity=alpha, name=f"ion {s.ion}",
+                              showlegend=False)
+            n += 1
+        fig.update_layout(yaxis_title=y_label)
+    else:
+        # one trace PER GROUP; NaN separators keep each ion's line from
+        # joining the next ion's
+        for label, colour, members in _analysis_groups(
+                series, group, palette, fate_style):
+            if not members:
+                continue
+            cx = np.concatenate([np.append(_decimate(s.x, max_pts), np.nan)
+                                 for s in members])
+            cy = np.concatenate([np.append(_decimate(s.y, max_pts), np.nan)
+                                 for s in members])
+            fig.add_scattergl(x=cx, y=cy, mode=line_mode,
+                              line=dict(width=1, color=colour),
+                              marker=dict(size=3, color=colour),
+                              opacity=alpha, name=label,
+                              showlegend=label is not None)
+        fig.update_layout(yaxis_title=y_label)
+    fig.update_layout(height=height, colorway=palette, xaxis_title=x_label,
+                      title=dict(text=title, x=0.01, font=dict(size=12)),
+                      margin=dict(l=55, r=15, t=45, b=45))
+    return fig, info
+
+
 def metal_boundary(fig, z, r_full, em):
     """The electrode-boundary contour (em at 0.5) — the line that says
     where the metal ends. MOVED VERBATIM (Phase B)."""
@@ -5979,6 +6167,61 @@ def candidate_field_figure(spec, model=None, *, dpi=DEFAULT_DPI,
     return fig
 
 
+HOTSPOT_DEFAULT_KT = 10.0   # default hot threshold, in kT of the deck's gas
+
+
+def hotspot_figure(x, y, ke_ev, *, threshold_ev, cell_mm, outlines=(),
+                   title_suffix="", px_width=760):
+    """Hot-spot map (L-548: drawn inline in the app until D4): each spatial
+    cell is the MAXIMUM KE any sample in it reached -- a lone hot sample
+    cannot hide under overplotted cold ones -- floored at threshold_ev and
+    topped at the true maximum (the extremes are the signal).
+
+    x, y, ke_ev : 1-D sample arrays (mm, mm, eV), any route.
+    cell_mm     : bin size; at least 4 bins per axis.
+    outlines    : closed (N, 2) loops in mm drawn over the map for context.
+    Returns (fig, n_hot) -- n_hot is the number of cells >= threshold_ev.
+    Raises ImportError when scipy (binned max-statistic) is absent."""
+    import plotly.graph_objects as go
+    from scipy.stats import binned_statistic_2d
+    x, y, k = (np.asarray(a, float) for a in (x, y, ke_ev))
+    if not len(x):
+        raise ValueError("hotspot_figure: no samples")
+    if not cell_mm > 0:
+        raise ValueError(f"hotspot_figure: cell_mm must be > 0, got "
+                         f"{cell_mm!r}")
+    nx = max(4, int(round((x.max() - x.min()) / cell_mm)))
+    ny = max(4, int(round((y.max() - y.min()) / cell_mm)))
+    st = binned_statistic_2d(x, y, k, statistic="max", bins=[nx, ny])
+    z = st.statistic.T
+    n_hot = int(np.nansum(z >= threshold_ev))
+    fig = go.Figure(go.Heatmap(
+        x=0.5 * (st.x_edge[:-1] + st.x_edge[1:]),
+        y=0.5 * (st.y_edge[:-1] + st.y_edge[1:]),
+        z=np.where(np.isnan(z), None, z), zmin=threshold_ev,
+        zmax=float(np.nanmax(z)), colorscale="Inferno",
+        colorbar=dict(title=f"max KE (eV)<br>floor {threshold_ev:.3g}")))
+    px, py = [], []
+    for lp in outlines:
+        px += list(lp[:, 0]) + [None]
+        py += list(lp[:, 1]) + [None]
+    if px:
+        fig.add_scatter(x=px, y=py, mode="lines",
+                        line=dict(color="#333", width=1.2),
+                        showlegend=False, hoverinfo="skip")
+    fig.update_layout(margin=dict(l=10, r=10, t=36, b=10),
+                      title=(f"hot spots — {n_hot} cells >= "
+                             f"{threshold_ev:.3g} eV (cell {cell_mm:g} mm"
+                             f"{title_suffix})"))
+    # free zoom, true scale from pane sizing (the panel once carried a
+    # scaleanchor that reshaped every drag rectangle to 1:1)
+    try:
+        apply_zoom_policy(fig, true_scale=True, px_width=px_width)
+    except VizError as e:
+        print(f"[hotspot] zoom policy skipped: {e}")
+    return fig, n_hot
+
+
 def temperature_estimator_figure(v_by_axis, ke_by_axis, m_kg, *,
                                  fit_from_pctl=20.0, n_bins=80,
                                  title=None):
@@ -5992,7 +6235,7 @@ def temperature_estimator_figure(v_by_axis, ke_by_axis, m_kg, *,
     """
     from plotly.subplots import make_subplots
     from ion_gym.physics.traj_stats import (two_estimator_report,
-                                            KB_EV)
+                                            KB_EV, KE_TAIL_CLIP_PCTL)
 
     rep = two_estimator_report(v_by_axis, ke_by_axis, m_kg,
                                fit_from_pctl=fit_from_pctl, n_bins=n_bins)
@@ -6057,7 +6300,9 @@ def temperature_estimator_figure(v_by_axis, ke_by_axis, m_kg, *,
                          row=1, col=c)
         # bottom: KE log-count histogram + M-B at T_var and T_slope
         kp = ke[ke > 0]
-        _khi = float(np.percentile(kp, 99.5)) if kp.size else 1.0
+        # the SAME clip slope_temperature fits under (traj_stats)
+        _khi = (float(np.percentile(kp, KE_TAIL_CLIP_PCTL)) if kp.size
+                else 1.0)
         _n_kout = int((kp > _khi).sum())
         kp = kp[kp <= _khi]
         kc, ke_e = np.histogram(kp, bins=n_bins)
@@ -6087,7 +6332,8 @@ def temperature_estimator_figure(v_by_axis, ke_by_axis, m_kg, *,
             font=dict(size=10, color="#333"),
             text=("T_var {0:.0f} K<br>T_slope {1:.0f} K{2}".format(
                 est["T_var"], est["T_slope"],
-                "<br>top 0.5% beyond axis (n={0})".format(_n_kout)
+                "<br>top {0:g}% beyond axis (n={1})".format(
+                    100.0 - KE_TAIL_CLIP_PCTL, _n_kout)
                 if _n_kout else "")), row=2, col=c)
         fig.update_xaxes(title_text="kinetic energy (eV)", row=2, col=c)
         fig.update_yaxes(type="log", title_text="count" if c == 1
@@ -6837,9 +7083,19 @@ def assembly_overview(stages, *, seams=None, trajs=None, traj_style=None, height
         if _tmode == "solid color":
             _colr = _tsolid
         elif _tmode == "m/z":
-            _colr = _mz_col.get(float(_t.get("mz", 0.0)), "#7f7f7f")
-        else:
+            # a trace WITHOUT a mass is grey (unknown m/z); it used to be
+            # float(_t.get("mz", 0.0)), which raised on mz=None
+            _m = _t.get("mz")
+            _colr = ("#7f7f7f" if _m is None
+                     else _mz_col.get(float(_m), "#7f7f7f"))
+        elif _tmode == "fate":
             _colr = "#b00020" if _lost else "#1f77b4"
+        else:
+            # unreachable: every other mode was mapped to fate above, with
+            # the reason in the title -- named so a new mode cannot land
+            # here as fate silently (L-554)
+            raise VizError(f"assembly_overview: colour mode {_tmode!r} "
+                           f"has no colour rule")
         _op_lost, _op_ok = min(1.0, _ta * 2.0), _ta
         for _rg in _t.get("regions", []):
             _x = np.asarray(_rg["x"], float)[::_td]
@@ -7089,8 +7345,13 @@ def _rec_extent(rec, axis):
         pts = _rec_corners(rec)
         vals = [p[0] for p in pts] if axis == u_ax else [p[1] for p in pts]
         return (min(vals), max(vals))
-    cu, cv, ru, rv = ip
-    return (cu - ru, cu + ru) if axis == u_ax else (cv - rv, cv + rv)
+    if kind == "ellipse":
+        cu, cv, ru, rv = ip
+        return (cu - ru, cu + ru) if axis == u_ax else (cv - rv, cv + rv)
+    # every kind that was not rect/polygon used to be measured AS an
+    # ellipse here (L-554); _deck_shapes3d emits only these three
+    raise ValueError(f"_rec_extent: shape kind {kind!r} has no extent "
+                     f"rule (known: rect, polygon, ellipse)")
 
 
 def deck_multiview(spec, *, operating_point, planes=None,
@@ -7219,7 +7480,7 @@ def deck_multiview(spec, *, operating_point, planes=None,
                     elif B == "z":
                         mb = (-b - db) if kp == "rect" else -b
                         mirrored.append((kp, a, mb, da, db))
-                    else:
+                    else:                    # "z" in (A, B), B != z: A is z
                         ma = (-a - da) if kp == "rect" else -a
                         mirrored.append((kp, ma, b, da, db))
                 for m in mirrored:           # drop plane-centred
@@ -7231,8 +7492,12 @@ def deck_multiview(spec, *, operating_point, planes=None,
                 elif kp == "rect":
                     ax.add_patch(plt.Rectangle((a, b), da, db,
                                                **style))
-                else:
+                elif kp == "ell":
                     ax.add_patch(_Ell((a, b), da, db, **style))
+                else:
+                    # was `else:` -> an ellipse for any patch kind (L-554)
+                    raise ValueError(f"deck_multiview: patch kind {kp!r} "
+                                     f"has no drawing rule")
         ax.autoscale_view()
         ax.margins(0.04)
         lab_z = "z [mm]" + (" (mirror unfolded)" if zmirror else "")

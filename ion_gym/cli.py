@@ -75,6 +75,13 @@ def _edit(args):
 
 
 def main(argv=None):
+    # Silence OpenMP's informational "omp_set_nested deprecated" notice
+    # (numba/MKL threading; not an error, no effect on results). Set HERE,
+    # at the process entry point and before anything imports numba --
+    # sim_app used to set it at IMPORT time, so importing the package from
+    # a notebook changed that kernel's environment (L-550).
+    import os
+    os.environ.setdefault("KMP_WARNINGS", "0")
     ap = argparse.ArgumentParser(
         prog="ion-gym",
         description="ion_gym — ion-optics simulation toolkit")

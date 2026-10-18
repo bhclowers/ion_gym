@@ -161,13 +161,51 @@ def test_rf_confinement_and_fates():
     print(f"  bounding plane fate 3 at z={sp3c.bounds.z_max}  OK")
 
 
+def _isolated_cache():
+    """Point the field cache (ION_GYM_CACHE, resolved at call time) at a
+    temporary directory for the duration, then check the USER's cache root
+    lost nothing. L-568: this gate called fa_cache.clear_all() on the
+    real cache, deleting every banked basis on the machine that ran it
+    (PI standing rule: a cached 3-D solve must not be repeated
+    needlessly)."""
+    import contextlib
+    import os
+    import tempfile
+    from ion_gym.io.paths import cache_root
+
+    @contextlib.contextmanager
+    def _cm():
+        real = cache_root()
+        before = (set(os.listdir(real)) if os.path.isdir(real) else set())
+        old = os.environ.get("ION_GYM_CACHE")
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["ION_GYM_CACHE"] = td
+            try:
+                yield td
+            finally:
+                if old is None:
+                    os.environ.pop("ION_GYM_CACHE", None)
+                else:
+                    os.environ["ION_GYM_CACHE"] = old
+        after = (set(os.listdir(real)) if os.path.isdir(real) else set())
+        lost = sorted(before - after)
+        assert not lost, f"gate deleted entries from the user's cache: {lost}"
+    return _cm()
+
+
 def test_cache_and_velocities():
     """Second build must be a cache HIT (no re-solve, bit-identical
     potential); trajectory velocity columns must be populated and
-    energy-consistent (record-0 speed == birth KE)."""
+    energy-consistent (record-0 speed == birth KE). Runs on an ISOLATED
+    cache (L-568), so its first build is a guaranteed disk miss without
+    purging anyone's cache."""
+    with _isolated_cache():
+        _cache_and_velocities()
+
+
+def _cache_and_velocities():
     import time as _t
     from ion_gym.physics.sim_build import build_run
-    from ion_gym.io import fa_cache
 
     sp2, sp3 = _specs()
     sp3.collisions.enabled = False   # vacuum operating point (record-0
@@ -188,7 +226,8 @@ def test_cache_and_velocities():
     sp3.integration.t_max_us = 10.0
     sp3.integration.rec_every = 20
 
-    fa_cache.clear_all()
+    # (was fa_cache.clear_all() on the REAL cache -- L-568; the isolated
+    # cache above is empty, so this build is a miss)
     t0 = _t.time()
     model1, fly1, _, _ = build_run(sp3)
     t_first = _t.time() - t0
@@ -236,12 +275,16 @@ def test_refusals():
                         v_basis=1e4, tol=1e-3, stencil="ghost_linear",
                         omega=1.9)
     bases = {i: b / 1e4 for i, b in bases.items()}
-    ch = compose_drive_channels(sp3, bases)
+    # the rastered label grid, passed explicitly (L-518)
+    ele = np.zeros(next(iter(masks.values())).shape, np.int16)
+    for i, m in masks.items():
+        ele[m] = i
+    ch = compose_drive_channels(sp3, bases, ele)
     assert len(ch["ch_om"]) == 2, f"want 2 channels, got {len(ch['ch_om'])}"
     assert any(abs(p - math.pi / 2) < 1e-9 for p in ch["ch_ph"]), \
         f"90-deg phase not carried: {ch['ch_ph']}"
     sp3.geometry.rf_groups[1].frequency_hz = 2e6      # now a CAPABILITY
-    ch = compose_drive_channels(sp3, bases)
+    ch = compose_drive_channels(sp3, bases, ele)
     oms = sorted(ch["ch_om"])
     # ch_om is rad/us (the kernels' microsecond time base): 1 MHz -> 2pi
     assert abs(oms[0] - 2 * math.pi * 1.0) < 1e-9 and \
@@ -251,7 +294,7 @@ def test_refusals():
     keep = list(el.rf_groups)
     el.rf_groups = keep + ["ghost_group"]
     try:
-        compose_drive_channels(sp3, bases)
+        compose_drive_channels(sp3, bases, ele)
         assert False, "undefined group membership must be refused"
     except ValueError as e:
         assert "ghost_group" in str(e)
@@ -261,7 +304,7 @@ def test_refusals():
     sp3.geometry.rf_groups.append(RFGroupSpec(
         name="lonely", amplitude_v=50.0, frequency_hz=1e6))
     try:
-        compose_drive_channels(sp3, bases)
+        compose_drive_channels(sp3, bases, ele)
         assert False, "memberless driven group must be refused"
     except ValueError as e:
         assert "lonely" in str(e)

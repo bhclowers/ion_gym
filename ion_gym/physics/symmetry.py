@@ -189,18 +189,25 @@ def _canon_shape(shape, axis=None, plane=None):
 def _electrical_id(el):
     """What must match for two mirrored electrodes to carry the same
     FIELD: potential and drive. Positional symmetry at a different
-    voltage/phase is not field symmetry."""
-    return (round(float(getattr(el, "dc", 0.0)), _ROUND),
-            getattr(el, "rf_group", None),
-            bool(getattr(el, "is_grid", False)))
+    voltage/phase is not field symmetry.
+
+    Drive = the electrode's drive-group MEMBERSHIP, from
+    ElectrodeSpec.group_names() (the one authority), compared as a set.
+    This read getattr(el, "rf_group", None) -- a field folded away into
+    rf_groups -- so every electrode reported None and mirror pairs on
+    opposite drives verified as symmetric (L-533). Read directly: an
+    object without these fields is not an electrode and raises."""
+    return (round(float(el.dc), _ROUND),
+            tuple(sorted(el.group_names())),
+            bool(el.is_grid))
 
 
 def verify_symmetry_shapes(sym: SymmetrySpec, electrodes, extents):
     """Shape tier: prove every declared MIRROR plane against the continuous
     shapes, exactly.
 
-    electrodes: iterable of ElectrodeSpec-like (name, shapes, dc,
-    rf_group, is_grid). extents: {axis: extent_mm} for midline defaults.
+    electrodes: iterable of ElectrodeSpec (name, shapes, dc, rf_groups via
+    group_names(), is_grid). extents: {axis: extent_mm} for midline defaults.
 
     The multiset of (electrical_id, shape-multiset) must be invariant
     under reflection about the declared plane -- a bijection in which each

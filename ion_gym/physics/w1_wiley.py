@@ -22,7 +22,8 @@ Closed forms used (all exact for piecewise-uniform E):
                         spread -- no downstream optic can undo it, because
                         the two ions are identical after the turnaround
                         except for the time offset.
-Units: mm, us, V, Da.  a = ACC * E / m with ACC = 96.485 (q = +1).
+Units: mm, us, V, Da.  a = ACC * E / m (q = +1), ACC derived in
+physics.constants (e / amu, 96.48533... mm/us^2 per V/mm/Da).
 """
 # PROVENANCE
 #   origin   : Wiley & McLaren, Rev. Sci. Instrum. 26 (1955) 1150 -- "Time-of-
@@ -34,7 +35,7 @@ from __future__ import annotations
 
 import numpy as np
 
-ACC = 96.485          # mm/us^2 per (V/mm / Da)
+from ion_gym.physics.constants import ACC  # noqa: E402  mm/us^2 per (V/mm / Da)
 
 
 # ------------------------------------------------------------- the model

@@ -38,15 +38,37 @@ import math
 
 import numpy as np
 
-E_CHG = 1.602176634e-19
-KG_AMU = 1.66053906660e-27
-K_B = 1.380649e-23
+from ion_gym.physics.constants import E_CHG, KG_AMU, K_B  # noqa: F401
 
 POSITION_FORMATS = ("xyz", "cylindrical", "beam_envelope")
 VELOCITY_FORMATS = ("velocity_vector", "direction_speed", "direction_ke",
                     "direction_momentum", "beam_envelope")
 DISTRIBUTIONS = ("single", "uniform", "gaussian", "grid", "list",
                  "maxwellian")
+
+# THE parameters each distribution kind takes (exactly what sample_scalar
+# reads), and which kinds draw randomly (sample_scalar needs a seed). The
+# beam panel reads these tables to label its fields, assemble a
+# declaration and show a derived one (L-554, D10): it carried three
+# hand-written copies of the kind chain, two with no catch-all.
+DIST_FIELDS = {
+    "single": ("value",),
+    "uniform": ("min", "max"),
+    "gaussian": ("mean", "sigma"),
+    "grid": ("min", "max"),
+    "maxwellian": ("temperature_k",),
+    "list": ("values",),                 # an array: declared in JSON
+}
+SEEDED_DISTRIBUTIONS = ("uniform", "gaussian", "maxwellian")
+
+# derive_declaration reports, per plane, how much of the packet's
+# phase-space spread the fitted ellipse does NOT describe (residual_frac:
+# 0 is a perfect ellipse). Above this the beam panel WARNS that a beam
+# regenerated from the fit is more ideal than the packet, so resolution
+# reads optimistically (measured on the certified OA-MRT packet: residual
+# 0.59, about +20% in R). A display threshold only -- it changes no
+# number (PI ruling 2026-10-16: keep 0.3, as a named constant; L-552).
+DERIVE_RESIDUAL_WARN = 0.3
 
 # Which scalars each format requires. The UI renders exactly these fields,
 # so this table is the single authority for "what does this format ask

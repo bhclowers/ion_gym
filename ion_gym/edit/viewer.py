@@ -28,6 +28,7 @@ from __future__ import annotations
 import panel as pn
 import param
 from panel.custom import JSComponent
+from panel.util import classproperty
 
 from ion_gym.edit.policy import EditRefusal
 from ion_gym.edit.session import EditSession
@@ -45,21 +46,36 @@ DEFAULT_HEIGHT = 620
 # the version + integrity authority (the release gate checks the
 # hashes); updating is a deliberate, separate step
 # (release tooling ASKS about updates, never applies them).
-# If those files are missing, fall back to the CDN of the SAME
-# version with a loud warning — a broken install should degrade to
-# online-only, visibly, not to a blank canvas.
+# If those files are missing (PI ruling 2026-10-15): TRY the jsdelivr CDN
+# of the SAME version -- every file the viewer needs is probed first --
+# and use it with a visible warning; if the CDN cannot be reached either,
+# REFUSE, stating both causes. Never a silent fallback, never a blank
+# canvas.
+#
+# RESOLVED ON FIRST USE, NOT AT IMPORT (L-550): importing this module used
+# to read and base64-encode every vendored file and could warn; the map
+# is now built when the viewer first renders (Panel's _process_importmap
+# hook) and cached.
 # ---------------------------------------------------------------------
 import base64 as _b64
+import functools as _functools
 import json as _json
 import warnings as _warnings
 from pathlib import Path
 
 _VENDOR_DIR = Path(__file__).resolve().parent / "vendor" / "three"
+THREE_VERSION = "0.168.0"           # the pin (VENDOR_MANIFEST.json agrees)
+_CDN_ROOT = f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}"
+_CDN_PROBE_TIMEOUT_S = 5.0
 
 
-def _vendor_importmap():
-    manifest = _VENDOR_DIR / "VENDOR_MANIFEST.json"
-    files = {
+class ViewerUnavailable(RuntimeError):
+    """three.js could not be supplied: no vendored copy and no reachable
+    CDN. The message names both causes."""
+
+
+def _vendor_files():
+    return {
         "three": _VENDOR_DIR / "three.module.min.js",
         "three/addons/controls/OrbitControls.js":
             _VENDOR_DIR / "jsm/controls/OrbitControls.js",
@@ -78,30 +94,70 @@ def _vendor_importmap():
         "three/addons/lines/LineMaterial.js":
             _VENDOR_DIR / "jsm/lines/LineMaterial.js",
     }
-    if not manifest.is_file() or not all(f.is_file()
-                                        for f in files.values()):
-        return None, "0.168.0"
-    ver = _json.loads(manifest.read_text()).get("version", "unknown")
-    imports = {}
-    for spec, path in files.items():
-        b64 = _b64.b64encode(path.read_bytes()).decode()
-        imports[spec] = f"data:text/javascript;base64,{b64}"
-    return {"imports": imports}, ver
 
 
-_IMPORTMAP, THREE_VERSION = _vendor_importmap()
-if _IMPORTMAP is None:
+def _cdn_url(spec):
+    if spec == "three":
+        return f"{_CDN_ROOT}/build/three.module.js"
+    return f"{_CDN_ROOT}/examples/jsm/" + spec[len("three/addons/"):]
+
+
+def _probe_cdn(urls, timeout=_CDN_PROBE_TIMEOUT_S):
+    """{url: reason} for every URL that could not be fetched ({} = all
+    reachable). Probed from the server process; the BROWSER fetches the
+    same URLs when the viewer renders."""
+    import urllib.error
+    import urllib.request
+    bad = {}
+    for u in urls:
+        try:
+            req = urllib.request.Request(u, method="HEAD")
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                if not 200 <= getattr(r, "status", 200) < 300:
+                    bad[u] = f"HTTP {r.status}"
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            bad[u] = f"{type(e).__name__}: {getattr(e, 'reason', e)}"
+    return bad
+
+
+@_functools.lru_cache(maxsize=1)
+def resolve_importmap():
+    """The importmap the viewer renders with: the vendored data-URL map
+    (offline), else the CDN after every file is probed (warned), else
+    ViewerUnavailable naming the missing local files and the CDN error."""
+    files = _vendor_files()
+    manifest = _VENDOR_DIR / "VENDOR_MANIFEST.json"
+    missing = [str(p) for p in [manifest, *files.values()] if not p.is_file()]
+    if not missing:
+        ver = _json.loads(manifest.read_text()).get("version", "unknown")
+        if ver != THREE_VERSION:
+            raise ViewerUnavailable(
+                f"vendored three.js is version {ver!r} but the viewer is "
+                f"pinned to {THREE_VERSION} -- re-vendor the pinned version")
+        return {"imports": {
+            spec: "data:text/javascript;base64,"
+                  + _b64.b64encode(path.read_bytes()).decode()
+            for spec, path in files.items()}}
+    urls = {spec: _cdn_url(spec) for spec in files}
+    bad = _probe_cdn(urls.values())
+    if bad:
+        raise ViewerUnavailable(
+            f"the editor's 3-D viewer cannot load three.js {THREE_VERSION}. "
+            f"(1) The bundled copy is missing: {len(missing)} of "
+            f"{len(files) + 1} files absent under {_VENDOR_DIR}. (2) The "
+            f"fallback CDN {_CDN_ROOT} could not be reached: "
+            + "; ".join(f"{u} -> {why}" for u, why in list(bad.items())[:3])
+            + (f" (+{len(bad) - 3} more)" if len(bad) > 3 else "")
+            + ". Reinstall ion_gym to restore the bundled files, or connect "
+              "to the internet.")
     _warnings.warn(
-        "ion_gym.edit.viewer: vendored three.js files are MISSING under "
-        f"{_VENDOR_DIR} — falling back to the jsdelivr CDN, so the "
-        "editor will NOT work offline. Reinstall ion_gym to restore the "
-        f"bundled three {THREE_VERSION} files; a development checkout "
-        "re-vendors them with its own tooling.", stacklevel=2)
-    _cdn = f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}"
-    _IMPORTMAP = {"imports": {
-        "three": f"{_cdn}/build/three.module.js",
-        "three/addons/": f"{_cdn}/examples/jsm/",
-    }}
+        f"ion_gym.edit.viewer: the bundled three.js files are MISSING "
+        f"({len(missing)} absent under {_VENDOR_DIR}); loading three "
+        f"{THREE_VERSION} from the jsdelivr CDN "
+        f"instead, so the editor needs the internet (the browser fetches "
+        f"the same files). Reinstall ion_gym to restore offline use.",
+        stacklevel=2)
+    return {"imports": dict(urls)}
 
 
 class EditorViewer(JSComponent):
@@ -131,7 +187,15 @@ class EditorViewer(JSComponent):
                           "resets on a document switch (PI "
                           "2026-08-26: editing must not move the view)")
 
-    _importmap = _IMPORTMAP
+    @classproperty
+    def _importmap(cls):
+        # resolved on first use and cached (resolve_importmap), never at
+        # import -- the class attribute reads the same map Panel renders
+        return resolve_importmap()
+
+    @classmethod
+    def _process_importmap(cls):          # Panel's render-time hook
+        return resolve_importmap()
 
     _esm = """
     import * as THREE from 'three';

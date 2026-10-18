@@ -89,9 +89,15 @@ def per_ion(spec, i, seed_base=None):
                         else resolve_run_seed(spec)) + int(i))
 
 
+# A summary that carries NO fate (damaged or legacy result) reads as this
+# named code -- never as a real fate. PI ruling 2026-10-15 (D1, L-530):
+# "keep the unknown"; consumers had guessed 2 (timeout) or -1.
+UNKNOWN_FATE = -1
+
 FATE_NAME = {0: "impact / exit", 1: "boundary exit", 2: "timeout",
              3: "bounding plane", 4: "transporter max_passes",
-             5: "station impact plane", 6: "station detect"}
+             5: "station impact plane", 6: "station detect",
+             UNKNOWN_FATE: "unknown (no fate recorded)"}
 
 FATE_COLOR = {0: "#2ca02c", 1: "#d62728", 2: "#ff7f0e", 3: "#9467bd",
               4: "#8c564b", 5: "#e377c2", 6: "#17becf"}
@@ -118,6 +124,38 @@ def fate_color(kind):
     return FATE_COLOR.get(int(kind), "#7f7f7f")
 
 
+# --------------------------------------------------- summary accessors
+# THE one way consumers read a per-ion summary (L-530). Each consumer used
+# to fill an absent field with its own plausible value -- m/z 1.0, fate 2
+# or -1, an end position of 0.0 -- so damaged or legacy results were shown
+# and exported as if real. Absence is now NAMED: the fate reads
+# UNKNOWN_FATE (labelled by fate_name), and a numeric field reads None,
+# which the caller must report rather than replace.
+def summary_fate(summary):
+    """The fate code, or UNKNOWN_FATE when the summary carries none."""
+    k = (summary or {}).get("kind")
+    if k is None:
+        return UNKNOWN_FATE
+    try:
+        return int(k)
+    except (TypeError, ValueError):
+        return UNKNOWN_FATE
+
+
+def summary_value(summary, key):
+    """A numeric summary field (mz, tof, x_end, ...) as float, or None when
+    it is absent or not a finite number. Never a substitute value."""
+    import math
+    v = (summary or {}).get(key)
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
 def make_summary(*, kind, tof, mz, x_end, y_end, z_end, **extras):
     """Construct a per-ion summary that SATISFIES THE CONTRACT by
     construction: the six required keys are keyword-only arguments, so
@@ -138,3 +176,34 @@ def make_summary(*, kind, tof, mz, x_end, y_end, z_end, **extras):
              x_end=float(x_end), y_end=float(y_end), z_end=float(z_end))
     s.update(extras)
     return s
+
+
+def birth_splat(err, *, col_names, birth, mz, label):
+    """THE born-in-metal outcome, identical on every route (PI 2026-10-15):
+    the ion SPLATS AT BIRTH (fate 0, metal impact, at its birth point and
+    birth time), the user is WARNED, and the other ions of the run fly on.
+
+    Every route's birth check raises raster2d.BirthInMetal; each per-ion
+    flight entry (planar / r-z / 3-D fly_fn, the staged packet) catches
+    that one class and returns this instead of aborting the ensemble.
+
+    err   : the BirthInMetal raised (its message is the diagnostic)
+    birth : the ion's birth row (x, y, z, vx, vy, vz, tob) in the frame the
+            route RECORDS in
+    Returns (traj, summary): a one-row record at birth -- base channels
+    filled, every optional channel NaN (nothing was flown) -- and a fate-0
+    summary carrying born_in_metal=True and the diagnostic. n_col is None:
+    the ion never flew, so there is no count."""
+    import numpy as np
+    x, y, z, vx, vy, vz, tob = (float(v) for v in birth[:7])
+    print(f"[flight] WARNING: {label} was born inside metal and splats at "
+          f"birth -- {err}", flush=True)
+    traj = np.full((1, len(col_names)), np.nan)
+    for name, v in zip(("t", "x", "y", "z", "vx", "vy", "vz"),
+                       (tob, x, y, z, vx, vy, vz)):
+        if name in col_names:
+            traj[0, list(col_names).index(name)] = v
+    summary = make_summary(kind=0, tof=tob, mz=mz, x_end=x, y_end=y,
+                           z_end=z, n_col=None, born_in_metal=True,
+                           note=str(err))
+    return traj, summary

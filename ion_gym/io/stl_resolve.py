@@ -50,16 +50,29 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def build_manifest(spec) -> dict:
-    """{filename: sha256} over the STL files this spec references, for
-    embedding as spec.stl_manifest so future runs can verify them."""
-    d = resolve_stl_dir(spec)
-    out = {}
+def build_manifest(spec, *, stl_dir=None) -> dict:
+    """{filename: sha256} over the STL files this spec references, hashed
+    from the ACTUAL bytes on disk, for embedding as
+    geometry.stl_manifest so future runs can verify them. THE one manifest
+    builder (L-546): cad.stl_channels.write_spec_json delegates here.
+
+    stl_dir: where the files are; default resolve_stl_dir(spec). REFUSES,
+    naming every file, when any referenced STL is missing -- a manifest
+    over absent files certifies nothing (this used to skip them silently,
+    while write_spec_json refused: two builders, opposite rules)."""
+    d = Path(stl_dir) if stl_dir is not None else resolve_stl_dir(spec)
+    out, missing = {}, []
     for el in spec.geometry.electrodes:
         if el.stl:
             fp = d / el.stl
             if fp.exists():
                 out[el.stl] = _sha256(fp)
+            else:
+                missing.append(el.stl)
+    if missing:
+        raise FileNotFoundError(
+            f"cannot build the STL manifest: referenced STL(s) missing "
+            f"from {d}: {missing}")
     return out
 
 
@@ -79,7 +92,7 @@ def preflight_stls(spec):
                 f"to anchor against; select the spec and its STL files "
                 f"together, or set an absolute stl_dir)")
     manifest = getattr(spec.geometry, "stl_manifest", None) or {}
-    missing, changed, ok_files = [], [], []
+    missing, changed, unlisted, ok_files = [], [], [], []
     for el in spec.geometry.electrodes:
         if not el.stl:
             continue
@@ -87,11 +100,16 @@ def preflight_stls(spec):
         if not fp.exists():
             missing.append(el.stl)
             continue
-        if el.stl in manifest and _sha256(fp) != manifest[el.stl]:
+        if manifest and el.stl not in manifest:
+            # a manifest that does not cover a file VERIFIES nothing about
+            # it: refused by name (L-546; it was counted "present and
+            # matching manifest")
+            unlisted.append(el.stl)
+        elif el.stl in manifest and _sha256(fp) != manifest[el.stl]:
             changed.append(el.stl)
         else:
             ok_files.append(el.stl)
-    ok = not missing and not changed
+    ok = not missing and not changed and not unlisted
     lines = [f"STL preflight for {spec.name!r}: dir {d}{note}"]
     if ok_files:
         lines.append(f"  {len(ok_files)} file(s) present"
@@ -101,6 +119,10 @@ def preflight_stls(spec):
     if changed:
         lines.append(f"  CHANGED vs manifest ({len(changed)}): "
                      f"{', '.join(changed)}")
+    if unlisted:
+        lines.append(f"  NOT IN MANIFEST ({len(unlisted)}), so unverified: "
+                     f"{', '.join(unlisted)} -- rebuild the manifest "
+                     f"(stl_resolve.build_manifest) over every file")
     return ok, "\n".join(lines)
 
 
@@ -352,11 +374,29 @@ def load_mesh(spec, el, *, stl_dir=None):
     return m
 
 
+def parse_stl_bytes(data: bytes):
+    """STL BYTES -> trimesh mesh, as authored (CAD frame, no placement):
+    the byte-side ingest point (L-546). The upload panel parses dropped
+    bytes, sizes them and previews them through here; it called
+    trimesh.load itself in three places. A mesh read from a deck's file
+    with its declared placement goes through load_mesh instead."""
+    import io as _io
+    trimesh = _require_trimesh()
+    return trimesh.load(_io.BytesIO(data), file_type="stl", force="mesh",
+                        process=True)
+
+
 def _require_trimesh():
+    """Import trimesh with an actionable message. THE one definition
+    (L-546): build_stl._require_trimesh (imported by notebook 02) and
+    stl_upload delegate here."""
     try:
         import trimesh
         return trimesh
-    except ImportError as e:
-        raise ImportError(
-            "trimesh is required to load STL geometry (pip install "
-            "trimesh)") from e
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "the STL path needs the 'trimesh' package "
+            "(pip install trimesh). The einzel-STL example's bored plates "
+            "also need a boolean backend (pip install manifold3d); the "
+            "quadrupole example needs only trimesh. Inline-shape decks "
+            "(planar, r-z, 3-D shapes) don't require trimesh.") from e

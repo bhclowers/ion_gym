@@ -24,9 +24,12 @@ corrupted) is met by construction, not by hope:
   banked flight raises AT THE MUTATION SITE instead of silently
   corrupting what the next reader sees.
 * DETECTION AS BACKSTOP — a fingerprint (path count, total points,
-  coordinate checksum) is computed at publish and re-verified on every
-  `snapshot`; a mismatch raises naming the stamp instead of rendering
-  garbage.
+  coordinate checksum) is computed at publish and verified on the FIRST
+  `snapshot` of each record; a mismatch raises naming the stamp instead
+  of rendering garbage. The verdict is cached per stamp (L-414): the
+  full re-sum cost ~0.3 s per /flight interaction at 2.4 GB banked.
+  A mutation AFTER that first read is caught by the frozen arrays (it
+  raises at the mutation site), not by a later checksum.
 """
 from __future__ import annotations
 
@@ -41,6 +44,9 @@ import numpy as np
 _LOCK = threading.Lock()
 _SLOT: Optional[dict] = None
 _SEQ = itertools.count(1)
+# stamp of the record whose fingerprint has been verified; stamps are
+# unique per publish, so a new record is always verified on first read
+_VERIFIED: Optional[int] = None
 
 _SUBJECT_KINDS = ("assembly", "single")
 
@@ -153,17 +159,22 @@ def publish(*, site: str, subject: dict, paths: List[dict],
 def snapshot() -> Optional[dict]:
     """The banked record, integrity-verified, or None. A fingerprint
     mismatch RAISES naming the stamp — a corrupted slot is never
-    rendered as though it were the flight."""
+    rendered as though it were the flight. Verified once per record;
+    later reads of the same stamp return it without re-summing."""
+    global _VERIFIED
     with _LOCK:
         rec = _SLOT
     if rec is None:
         return None
+    if rec["stamp"] == _VERIFIED:
+        return rec
     if _fingerprint(rec["paths"]) != rec["fingerprint"]:
         raise RuntimeError(
             f"last_flight slot CORRUPTED: record stamp {rec['stamp']} "
             f"({rec['site']}, {rec['when']}) no longer matches its "
             f"publish-time fingerprint — some code mutated the banked "
             f"flight in place. Refusing to render it; re-fly to re-bank.")
+    _VERIFIED = rec["stamp"]
     return rec
 
 

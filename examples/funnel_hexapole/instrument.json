@@ -645,7 +645,6 @@
      "gas": "N2",
      "T_k": 273.0,
      "P_torr": 2.5,
-     "P_pa": 333.30592105263156,
      "sigma_m2": 2.27e-18,
      "model": "hs",
      "gas_diam_nm": 0.366,
@@ -1900,7 +1899,6 @@
      "gas": "N2",
      "T_k": 300.0,
      "P_torr": 0.0,
-     "P_pa": 0.0,
      "sigma_m2": 2.27e-18,
      "model": "hs",
      "gas_diam_nm": 0.366,
@@ -1935,7 +1933,16 @@
      "z_min": -50.0,
      "z_max": 50.0
     },
-    "stations": [],
+    "stations": [
+     {
+      "name": "DETECTOR",
+      "kind": "detect",
+      "on_hit": "pass",
+      "axis": "z",
+      "pos_mm": 50.7,
+      "window": {}
+     }
+    ],
     "view": {
      "mode": "2d",
      "planes": [

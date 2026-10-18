@@ -24,8 +24,13 @@ Contract cases, per covered route:
   R1  summary: every ion's summary carries kind/tof/mz/x_end/y_end/z_end,
       and summary["mz"] EQUALS sim_build.mz_of(spec, i) — the flown mass,
       from the single authority.
-  R2  birth refusal: a source inside metal REFUSES loudly at birth
-      (ValueError naming the birth) — never a silent step-1 splat.
+  R2  birth in metal (PI ruling 2026-10-15): an ion born inside metal
+      SPLATS AT BIRTH -- fate 0, one record row at the birth point,
+      summary born_in_metal=True with a diagnostic naming the birth, and a
+      printed warning -- and the run continues for every other ion. Never
+      a silent step-1 splat, and never an abort of the whole ensemble
+      (it used to raise, which stopped the run at the first such ion).
+      tw2d's direct kernel still raises BirthInMetal for its caller.
   R3  determinism: with gas on, the same ion flown twice is byte-equal
       (per-ion seeding is reproducible).
   R4  channels: a requested optional channel ('speed') is genuinely
@@ -140,15 +145,17 @@ def main():
         def r2(kw=kw, label=label):
             bad = _spec(source_in_metal=True, **kw)
             _m, bfly, _c, bb = build_run(bad)
-            try:
-                bfly(0)
-            except ValueError as e:
-                assert "birth" in str(e).lower(), (
-                    f"{label}: refusal does not name the birth: {e}")
-                return
-            raise AssertionError(
-                f"{label}: in-metal birth flew (silent step-1 splat class)")
-        check(f"R2 {label}: in-metal birth refuses loudly", r2)
+            tr, s = bfly(0)
+            assert s.get("born_in_metal") is True, (
+                f"{label}: in-metal birth not flagged (silent step-1 "
+                f"splat class): {s}")
+            assert int(s["kind"]) == 0, (
+                f"{label}: born-in-metal fate {s['kind']}, want 0 (splat)")
+            assert len(tr) == 1, (
+                f"{label}: born-in-metal ion was flown ({len(tr)} rows)")
+            assert "birth" in str(s.get("note", "")).lower(), (
+                f"{label}: diagnostic does not name the birth: {s}")
+        check(f"R2 {label}: in-metal birth splats at birth, flagged", r2)
 
     # tw2d — PARTIAL parity by direct kernel call (see enumeration above)
     def t1():

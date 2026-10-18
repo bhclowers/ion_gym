@@ -173,17 +173,40 @@ def test_dropper_accepts_all():
     """Regression: the FileDropper must NOT restrict by filetype — FilePond
     rejects .stl (no MIME) and the drop silently fails. Headless value-set
     bypasses the browser filter, so this asserts the widget config directly."""
+    import os
+    import tempfile
     import panel as pn  # noqa
+    from ion_gym.io.paths import cache_root
     from ion_gym.io.stl_upload import StlUploadPanel
-    p = StlUploadPanel(on_commit=lambda spec: None,
-                       on_clear=lambda: None)
-    assert not p.dropper.accepted_filetypes, \
-        "dropper must accept all files (STL has no reliable MIME)"
-    # clear control present and clears staged state without error
-    p.meshes = ["sentinel"]
-    p._on_clear()
-    assert p.meshes == [] and p.commit_btn.disabled
-    print("  dropper accepts all filetypes; clear control wipes state  OK")
+    # L-568: the Clear control purges the field cache. Run it against a
+    # TEMPORARY cache and workdir -- it used to purge the real cache (and
+    # the real uploads dir) of whoever ran the gate -- and check the
+    # user's cache root lost nothing.
+    real = cache_root()
+    before = set(os.listdir(real)) if os.path.isdir(real) else set()
+    old = os.environ.get("ION_GYM_CACHE")
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["ION_GYM_CACHE"] = os.path.join(td, "cache")
+        try:
+            p = StlUploadPanel(on_commit=lambda spec: None,
+                               on_clear=lambda: None,
+                               workdir=os.path.join(td, "uploads"))
+            assert not p.dropper.accepted_filetypes, \
+                "dropper must accept all files (STL has no reliable MIME)"
+            # clear control present and clears staged state without error
+            p.meshes = ["sentinel"]
+            p._on_clear()
+            assert p.meshes == [] and p.commit_btn.disabled
+        finally:
+            if old is None:
+                os.environ.pop("ION_GYM_CACHE", None)
+            else:
+                os.environ["ION_GYM_CACHE"] = old
+    after = set(os.listdir(real)) if os.path.isdir(real) else set()
+    assert not (before - after), (
+        f"gate deleted entries from the user's cache: {sorted(before - after)}")
+    print("  dropper accepts all filetypes; clear control wipes state "
+          "(isolated cache; user cache untouched)  OK")
 
 
 if __name__ == "__main__":

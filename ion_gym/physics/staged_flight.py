@@ -53,18 +53,26 @@ from ion_gym.physics.collision3d import (E_CHG, KG_AMU,
 # would be a fourth place for it to drift, and a resolution computed with
 # a stale conversion is wrong in a way no test would name.
 from ion_gym.physics.stats import FWHM_PER_SIGMA
+# An ion born inside metal SPLATS AT BIRTH, with a warning, and the rest
+# of the packet flies on (PI 2026-10-15); every other refusal aborts the
+# packet. Worded like a region's metal impact ("hit metal (kind 0)").
+from ion_gym.physics.raster2d import BirthInMetal
+from ion_gym.physics.stations import FATE_IMPACT_PLANE
+_BORN_IN_METAL = "splat at birth: born inside metal (kind 0)"
 
-# EMPTY station-plane arrays for the per-region kernels. The staged
-# route does not yet hand its stations to the kernel (they are stated in
-# the assembly world frame and need the same world->local conversion the
-# exit seam gets), so both region flyers pass these and keep the
-# existing post-hoc station behaviour exactly. One definition, so the
-# two call sites cannot drift apart.
-_NO_PL_COL = np.empty(0, np.int64)
-_NO_PL_VAL = np.empty(0, np.float64)
-_NO_PL_SGN = np.empty(0, np.float64)
-_NO_PL_W = np.empty((0, 4), np.float64)
-_NO_PL_KIND = np.empty(0, np.int64)
+
+def _region_station_planes(reg, off):
+    """A region's stations as kernel planes (5-tuples), through the ONE
+    shared builder every single-stage route uses (stations.station_planes),
+    so the staged route cannot drift from the ruled station contract.
+
+    FRAME (PI ruling 2026-10-16, L-435): a stage's stations are authored
+    in the STAGE's own frame -- the frame the stage deck flies in alone --
+    not the assembly world frame (exits are the world-frame objects).
+    `off` is that frame minus the kernel's: the pack's mirror offset, plus
+    the planar anchor on a planar region."""
+    from ion_gym.physics.stations import station_planes
+    return station_planes(reg, tuple(float(v) for v in off))
 
 
 def _rot_matrix(rot_deg):
@@ -150,6 +158,11 @@ class Region:
     #   one, and staged flight must not invent it.
     rec_every: int = 1
     max_records: int = 100000
+    charge: Optional[int] = None   # the ION's signed charge state, from
+    #   the stage spec (load_assembly; every stage must agree -- one ion
+    #   crosses them all). Every region flyer reads it (staged planar and
+    #   3-D once flew z = +1, staged r-z defaulted a missing pack value to
+    #   1); None REFUSES at flight rather than assuming +1.
     metal_z_half_mm: Optional[float] = None   # half of the
     #   stage's DECLARED metal depth. Where declared, metal is finite in
     #   z, so an ion beyond it has LEFT THE HARDWARE and must terminate
@@ -178,6 +191,25 @@ def _mirror_off(fields):
     pack built before the convention) — behaviour unchanged for those."""
     mo = fields.get("mirror_off_mm")
     return (np.zeros(3) if mo is None else np.asarray(mo, float))
+
+
+def _seam_index(region, axis, offset_mm, h, n):
+    """Grid index of the region's declared exit plane on `axis`, REFUSED
+    when the plane lies outside the field grid (L-535). The seam gate used
+    to clamp the index to the grid edge, so its verdict could be about a
+    plane nobody declared (a 370 mm typo for 37 mm was judged at the
+    edge). offset_mm maps the stored grid to the declared frame."""
+    v = float(region.exit.value_mm)
+    k = int(round((v - float(offset_mm)) / h))
+    if not 0 <= k <= n - 1:
+        lo = float(offset_mm)
+        hi = lo + (n - 1) * h
+        raise ValueError(
+            f"region {region.name!r}: exit plane {axis} = {v:g} mm is outside "
+            f"its field grid ({axis} spans {lo:g} .. {hi:g} mm). The seam "
+            f"check would judge a plane that was not declared; move the "
+            f"exit inside the stage or extend the stage's solve domain.")
+    return k
 
 
 def check_seam(region_a: Region, region_b: Region, mz_Da,
@@ -221,8 +253,8 @@ def check_seam(region_a: Region, region_b: Region, mz_Da,
         ExA, EyA = np.asarray(f["ExA"]), np.asarray(f["EyA"])
         ax = {"x": 0, "y": 1}[region_a.exit.axis]
         anchor = f.get("anchor_mm", (0.0, 0.0))
-        k_plane = int(round((region_a.exit.value_mm - float(anchor[ax])) / h))
-        k_plane = max(0, min(ExA.shape[ax] - 1, k_plane))
+        k_plane = _seam_index(region_a, region_a.exit.axis, anchor[ax], h,
+                              ExA.shape[ax])
         sl = [slice(None)] * 2
         sl[ax] = k_plane
         sl = tuple(sl)
@@ -259,8 +291,7 @@ def check_seam(region_a: Region, region_b: Region, mz_Da,
                 f"not a signed axis. Put the handoff on the axial "
                 f"coordinate (x).")
         EzA, EuA = np.asarray(f["EzA"]), np.asarray(f["EuA"])
-        k_plane = int(round(region_a.exit.value_mm / h))
-        k_plane = max(0, min(EzA.shape[0] - 1, k_plane))
+        k_plane = _seam_index(region_a, "x", 0.0, h, EzA.shape[0])
         dc_mag = np.sqrt(EzA[k_plane] ** 2 + EuA[k_plane] ** 2) * 1e-3
         # drive channels: E = EA + sum_k w_k(t) E_k with |w_k| <= 1 (the
         # amplitude is baked into each channel basis, tracer_rz), plus
@@ -282,8 +313,8 @@ def check_seam(region_a: Region, region_b: Region, mz_Da,
         EAx, EAy, EAz = (np.asarray(f[k]) for k in ("EAx", "EAy", "EAz"))
         ax = {"x": 0, "y": 1, "z": 2}[region_a.exit.axis]
         _off = _mirror_off(f)[ax]
-        k_plane = int(round((region_a.exit.value_mm - _off) / h))
-        k_plane = max(0, min(EAx.shape[ax] - 1, k_plane))
+        k_plane = _seam_index(region_a, region_a.exit.axis, _off, h,
+                              EAx.shape[ax])
         sl = [slice(None)] * 3
         sl[ax] = k_plane
         sl = tuple(sl)
@@ -335,8 +366,45 @@ def check_seam(region_a: Region, region_b: Region, mz_Da,
     return ok, emax, report
 
 
-def _fly_region(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
+def _region_charge(reg):
+    """The ion's charge for this region (Region.charge), refused by name
+    when unset or zero -- never assumed +1."""
+    q = reg.charge
+    if q is None:
+        raise ValueError(
+            f"region {reg.name!r}: Region.charge is unset. load_assembly "
+            f"sets it from the stage spec's source.charge; a hand-built "
+            f"Region must state the ion's charge.")
+    if int(q) == 0:
+        raise ValueError(
+            f"region {reg.name!r}: the stage spec declares charge 0; an "
+            f"uncharged ion has no electric acceleration.")
+    return int(q)
+
+
+def _region_sds(reg, mz_Da, q_e):
+    """(sds_on, damping, mfp, V, log_mr, stats) for one ion in one
+    region, from the shared SDS door; inert placeholders when the region's
+    gas is off or hard-sphere. The gas FLOW is not here: it applies to
+    hard-sphere regions too, so callers read collision3d.gas_flow (L-563;
+    this returned it for SDS only, and HS regions flew still gas)."""
+    from ion_gym.physics import sds as _sds
+    if not _sds.sds_active(reg.gas):
+        return (False, 0.0, 0.0, 0.0, 0.0, np.zeros((5, 1002)))
+    from ion_gym.physics.collision3d import resolve_collisions
+    col = resolve_collisions(reg.gas)
+    p = _sds.sds_ion_params(col, mz_Da, q_e)
+    return (True, p["damping"], p["mfp_mm"], p["V_mm_us"],
+            p["log_mr_ratio"], _sds.load_tables()[0])
+
+
+def _fly_region(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
+                st_off=(0.0, 0.0, 0.0)):
     """Fly one region with the kernel its solve route calls for.
+
+    planes: the exit seam as (axis, value, sign) in the kernel frame.
+    st_off: stage frame minus kernel frame (the pack's mirror offset),
+    for converting the region's stations into kernel planes.
 
     Dispatch is on the pack's declared `route`, never on which keys are
     present. A missing key cannot distinguish "this is a different route"
@@ -350,27 +418,80 @@ def _fly_region(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
     """
     route = reg.fields.get("route")
     if route == "3d":
-        res = fly3d(reg.fields, mz_Da, r0_mm=r0_mm, v0_mm_us=v0_mm_us,
-                    tob_us=tob_us, dt_ns=reg.dt_ns, t_max_us=reg.t_max_us,
-                    collisions=reg.gas, seed=seed, planes=planes)
-        # DECLARED HERE, not inferred from a missing key (this
-        # function's own docstring says why). The 3-D route detects exit
-        # planes by interpolated crossing and arms NO kernel bounds, so
-        # a kind = 3 from it is an exit-plane crossing by construction.
-        # -2 is that statement. NOTE the residual: declared BoundsSpec
-        # is NOT ENFORCED on a 3-D staged region -- fly3d has no bounds
-        # channel at all. That is a KNOWN remaining gap, recorded
-        # rather than hidden behind this constant.
-        res["bnd_face"] = -2
+        # the region's model and the ion's charge, as on the single-stage
+        # 3-D route (build_stl3d dispatches the same way)
+        from ion_gym.physics.sds import sds_active
+        q_e = _region_charge(reg)
+        # FACES (L-165): the exit seam and the stage's DECLARED bounds,
+        # armed per face exactly as the planar and r-z regions arm them
+        # (_merge_declared_bounds: same precedence, same dead-handoff
+        # refusal), in the kernel frame (stage frame - st_off). fly3d
+        # takes them as (axis, value, sign) planes and reports WHICH plane
+        # ended the flight, so a seam and a bound are told apart by face
+        # identity, as on the other routes.
+        bnd_on, bnd_val = [False] * 6, [0.0] * 6
+        src = [SRC_NONE] * 6
+        seam_faces = set()
+        for ax, val, sgn in (planes or []):
+            k = 2 * "xyz".index(ax) + (1 if float(sgn) > 0 else 0)
+            bnd_on[k], bnd_val[k], src[k] = True, float(val), SRC_SEAM
+            seam_faces.add(k)
+        _merge_declared_bounds(reg, bnd_on, bnd_val, src,
+                               tuple(float(v) for v in st_off))
+        faces = [k for k in range(6) if bnd_on[k]]
+        # stations THEN faces -- the order kernel_planes gives every
+        # single-stage route; the tracer tells them apart by length
+        st_planes = _region_station_planes(reg, st_off)
+        planes = st_planes + [("xyz"[k // 2], bnd_val[k],
+                               1.0 if k % 2 else -1.0) for k in faces]
+        # The REGION's recording settings, as the planar and r-z region
+        # flyers pass them (L-564: this used each kernel's own default --
+        # every 10 steps for fly3d, every 50 for fly3d_sds -- so the gas
+        # model changed the recording density, and post-hoc station timing
+        # interpolates along those records).
+        if sds_active(reg.gas):
+            from ion_gym.physics.tracer3d import fly3d_sds
+            res = fly3d_sds(reg.fields, mz_Da, q_e, r0_mm, v0_mm_us, tob_us,
+                            reg.gas, dt_ns=reg.dt_ns,
+                            t_max_us=reg.t_max_us,
+                            record_every=int(reg.rec_every),
+                            max_records=int(reg.max_records), seed=seed,
+                            planes=planes)
+        else:
+            res = fly3d(reg.fields, mz_Da, r0_mm=r0_mm, v0_mm_us=v0_mm_us,
+                        tob_us=tob_us, dt_ns=reg.dt_ns,
+                        t_max_us=reg.t_max_us,
+                        record_every=int(reg.rec_every),
+                        max_records=int(reg.max_records),
+                        collisions=reg.gas,
+                        seed=seed, planes=planes, charge=q_e)
+        if res.get("truncated"):
+            # the same refusal as the planar and r-z regions
+            raise RuntimeError(
+                f"region {reg.name!r}: the trajectory buffer filled "
+                f"({int(reg.max_records)} records at "
+                f"rec_every={reg.rec_every}) before the flight ended. The "
+                f"trace is TRUNCATED, so any station crossing after that "
+                f"point is invisible and the ion would be reported as never "
+                f"detected. Raise max_records or rec_every.")
+        # the plane that ended the flight -> its FACE (or -1: none, or a
+        # station, whose kinds 5/6 are not 3 and need no face)
+        ip = int(res.get("plane_hit", -1))
+        k = faces[ip - len(st_planes)] if ip >= len(st_planes) else -1
+        res["bnd_face"] = k
+        res["bnd_src"] = tuple(src)
+        res["seam_faces"] = frozenset(seam_faces)
+        res["bnd_user_val"] = (bnd_val[k] + float(st_off[k // 2])
+                               if k >= 0 else None)
         return res
     if route == "planar":
         return _fly_region_planar(reg, mz_Da, r0_mm=r0_mm,
                                   v0_mm_us=v0_mm_us, tob_us=tob_us,
-                                  seed=seed, planes=planes)
+                                  seed=seed, planes=planes, st_off=st_off)
     if route == "rz":
         return _fly_region_rz(reg, mz_Da, r0_mm=r0_mm,
                               v0_mm_us=v0_mm_us, tob_us=tob_us,
-                              seed=seed, planes=planes)
+                              seed=seed, planes=planes, st_off=st_off)
     raise ValueError(
         f"region {reg.name!r}: fields pack declares route {route!r}. "
         f"Staged flight dispatches on this tag and knows 'planar', 'rz' "
@@ -380,7 +501,8 @@ def _fly_region(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
         f"rather than this call guessing a kernel.")
 
 
-def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
+def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
+                       st_off=(0.0, 0.0, 0.0)):
     """Planar region flight, returned in the same shape fly3d emits.
 
     A planar solve is z-INVARIANT by construction, so the kernel carries
@@ -460,11 +582,26 @@ def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
             f"bnd_val{bnd_val.shape}. The kernel indexes all six "
             f"unconditionally and does not bounds-check, so a short array "
             f"is read past its end. Fix the builder, not this check.")
-    sds_stats = _np.zeros((5, 1002))
+    # the ion's charge and the region's SDS model, as on the single-stage
+    # planar route (this flyer once used q/m = e/m and SDS off)
+    q_e = _region_charge(reg)
+    (sds_on, sds_damp, sds_mfp, sds_V, sds_logmr,
+     sds_stats) = _region_sds(reg, mz_Da, q_e)
+    # declared gas flow, in-plane only on a planar region (L-563)
+    from ion_gym.physics.build_planar import planar_gas_flow
+    gfx, gfy, _gfz = planar_gas_flow(reg.gas, f"region {reg.name!r}")
+    # STATION PLANES (L-435): the stage-frame stations in the kernel's
+    # anchored frame -- the same anchor single-stage planar applies; z
+    # carries no anchor (the field-free drift coordinate).
+    from ion_gym.physics.tracer3d import pack_planes
+    _st = pack_planes(_region_station_planes(
+        reg, (float(st_off[0]) + float(anchor[0]),
+              float(st_off[1]) + float(anchor[1]), float(st_off[2]))),
+        f"region {reg.name!r}")
     ncol = 7
     max_records = int(reg.max_records)
     rec = _np.empty((max_records, ncol))
-    acc = E_CHG / (mz_Da * KG_AMU)
+    acc = q_e * E_CHG / (mz_Da * KG_AMU)
     n, kind, _nc, bface = _fly_planar(
         x0, y0, float(v0_mm_us[0]), float(v0_mm_us[1]), float(tob_us),
         float(mz_Da), f["ExA"], f["EyA"], f["ExK"], f["EyK"],
@@ -476,17 +613,8 @@ def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
         g["c_star"], g["c_bar"], g["sig1d"], g["m_gas"],
         rec, int(reg.rec_every), nch, bnd_on, bnd_val, int(seed),
         float(r0_mm[2]), float(v0_mm_us[2]),
-        False, 0.0, 0.0, 0.0, 0.0, sds_stats,
-        # STATION PLANES: EMPTY on the staged route. The per-region
-        # kernels now accept them (L-435 steps 2-3), but a staged
-        # region flies its OWN local frame and reg.stations are stated
-        # in the assembly's world frame, so they need the same
-        # world->local conversion the exit seam gets before they can be
-        # handed over. Until that lands, staged flight behaves exactly
-        # as it always has (stations post-hoc only, via _detect_hit) —
-        # passing empty arrays keeps that behaviour bit-identical
-        # rather than half-applying a wrong-frame plane.
-        _NO_PL_COL, _NO_PL_VAL, _NO_PL_SGN, _NO_PL_W, _NO_PL_KIND)
+        sds_on, sds_damp, sds_mfp, sds_V, sds_logmr, sds_stats,
+        *_st, gfx, gfy)
     if n >= max_records:
         raise RuntimeError(
             f"region {reg.name!r}: the trajectory buffer filled "
@@ -636,7 +764,8 @@ def _merge_declared_bounds(reg, bnd_on, bnd_val, src, off):
             f"merge have diverged.")
 
 
-def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
+def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
+                   st_off=(0.0, 0.0, 0.0)):
     """r-z region flight, returned in the shape fly3d emits.
 
     The r-z kernel carries FULL 3-D Cartesian ion state against a field
@@ -677,14 +806,18 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
     src = [SRC_SEAM if k in seam_faces else SRC_NONE for k in range(6)]
     _merge_declared_bounds(reg, bnd_on, bnd_val, src, (0.0, 0.0, 0.0))
 
-    q_e = int(f.get("charge", 1))
-    if q_e == 0:
-        raise ValueError(
-            f"region {reg.name!r}: the stage spec declares charge 0; an "
-            f"uncharged ion has no electric acceleration.")
+    # the ion's charge from the REGION (was the pack's value with a silent
+    # default of 1) and the region's SDS model (r-z SDS, L-519)
+    q_e = _region_charge(reg)
     acc = q_e * E_CHG / (mz_Da * KG_AMU)
+    (sds_on, sds_damp, sds_mfp, sds_V, sds_logmr,
+     sds_stats) = _region_sds(reg, mz_Da, q_e)
     # Same single derivation the planar and 3-D routes use.
     g = gas_kernel_scalars(reg.gas)
+    # the declared gas flow, for HS AND SDS regions (L-563: it reached the
+    # kernel only under SDS)
+    from ion_gym.physics.collision3d import gas_flow
+    gas_flow_v = gas_flow(reg.gas)
     dt = float(reg.dt_ns) * 1e-3
     ncol = 7
     max_records = int(reg.max_records)
@@ -695,6 +828,12 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
     # (the planar route's global-registry flag bug is the cautionary
     # tale), so this must not be derived from OPTIONAL_CHANNELS.
     f13 = tuple([False] * 13)
+    # STATION PLANES (L-435): stage-frame stations; the r-z kernel flies
+    # the stage frame, so only the pack's mirror offset (zero on r-z
+    # packs) separates them.
+    from ion_gym.physics.tracer3d import pack_planes
+    _st = pack_planes(_region_station_planes(reg, st_off),
+                      f"region {reg.name!r}")
     n, kind, _nc, bface = _fly_rec_full(
         float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         float(v0_mm_us[0]), float(v0_mm_us[1]), float(v0_mm_us[2]),
@@ -706,13 +845,11 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
         f["tau_gate"], f["ele"], f["u0"], f["h_mm"], acc,
         dt, float(reg.t_max_us),
         g["T_k"], g["P_pa"], g["sigma_m2"], g["c_star"], g["c_bar"],
-        g["sig1d"], g["m_gas"], rec, int(reg.rec_every), int(seed),
-        *f13, bnd_on, bnd_val,
-        # STATION PLANES: EMPTY on the staged route — see the note at
-        # the planar region flyer above (world->local conversion for
-        # reg.stations is the pending piece; empty keeps staged
-        # behaviour bit-identical meanwhile).
-        _NO_PL_COL, _NO_PL_VAL, _NO_PL_SGN, _NO_PL_W, _NO_PL_KIND)
+        g["sig1d"], g["m_gas"],
+        sds_on, sds_damp, sds_mfp, sds_V, sds_logmr, sds_stats,
+        gas_flow_v[0], gas_flow_v[1], gas_flow_v[2],
+        rec, int(reg.rec_every), int(seed),
+        *f13, bnd_on, bnd_val, *_st)
     if n >= max_records:
         raise RuntimeError(
             f"region {reg.name!r}: the trajectory buffer filled "
@@ -730,8 +867,66 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes):
                 seam_faces=frozenset(seam_faces), bnd_user_val=_bval_user)
 
 
-def _detect_hit(reg, res):
-    """First IN-WINDOW crossing of this region's detect station, or None.
+def _extend_final_region(reg, res, moff):
+    """DRIFT EXTENSION for the FINAL region (L-286): an ion that left the
+    region's solved domain toward a station or bound the stage declares
+    beyond it gets ONE analytically exact record (physics.drift_extension,
+    the function every single-stage route calls), ending on a terminating
+    station or bound with its fate. Works in the STAGE frame (stations
+    and bounds are authored there) against the region's own clock, gas,
+    stations and bounds; returns `res` extended (kernel frame, like the
+    rest of it) or unchanged."""
+    import types as _types
+    from ion_gym.physics.drift_extension import (extend_ballistic,
+                                                 pack_edge_fields,
+                                                 pack_escape_face)
+    from ion_gym.io.sim_spec import BoundsSpec
+    if int(res["kind"]) != 1 or not len(res["t_us"]):
+        return res
+    bounds = reg.bounds if reg.bounds is not None else BoundsSpec()
+    if not (reg.stations or any(bounds.as_tuple()[0])):
+        return res                    # nothing declared to extend TO
+    f = reg.fields
+    an = (f.get("anchor_mm", (0.0, 0.0)) if f.get("route") == "planar"
+          else (0.0, 0.0))
+    p_k = (float(res["x"][-1]) - float(an[0]),
+           float(res["y"][-1]) - float(an[1]), float(res["z"][-1]))
+    fk, fa, fs, fn = pack_escape_face(f, p_k)
+    mo = [float(v) for v in moff]
+    cols = ["t", "x", "y", "z", "vx", "vy", "vz"]
+    traj = np.column_stack([res["t_us"], np.asarray(res["x"]) + mo[0],
+                            np.asarray(res["y"]) + mo[1],
+                            np.asarray(res["z"]) + mo[2],
+                            res["vx"], res["vy"], res["vz"]])
+    spec_like = _types.SimpleNamespace(
+        integration=_types.SimpleNamespace(t_max_us=float(reg.t_max_us)),
+        bounds=bounds, stations=list(reg.stations or []),
+        collisions=reg.gas)
+    traj, kind, info = extend_ballistic(
+        traj, cols, 1, spec_like, edge_e_vpermm=pack_edge_fields(f)[fk],
+        face_axis=fa, face_side=fs, edge_face=fn,
+        label=f"region {reg.name!r}")
+    if info is None:
+        return res
+    r = dict(res)
+    r["t_us"] = traj[:, 0]
+    r["x"], r["y"], r["z"] = (traj[:, 1] - mo[0], traj[:, 2] - mo[1],
+                              traj[:, 3] - mo[2])
+    r["vx"], r["vy"], r["vz"] = traj[:, 4], traj[:, 5], traj[:, 6]
+    r["kind"] = int(kind)
+    r["tof_us"] = float(traj[-1, 0])
+    if int(kind) == 3:
+        # ended ON a declared bound: name the face, as the kernels do
+        # (fly_staged reads it)
+        r["bnd_face"] = int(info["bnd_face"])
+    return r
+
+
+def _detect_hit(reg, res, moff=(0.0, 0.0, 0.0)):
+    """First IN-WINDOW crossing of this region's detect station, or None,
+    in the STAGE frame the station is authored in (the trace is the
+    kernel frame; `moff` is the pack's mirror offset that separates them
+    -- the comparison used to be made without it).
 
     Reuses physics.stations.station_hits rather than reimplementing plane
     crossing: that function already interpolates the crossing state
@@ -741,13 +936,16 @@ def _detect_hit(reg, res):
     interpolation convention to drift, and the arrival TIME is the whole
     measurement.
 
-    Detect stations are NON-DESTRUCTIVE by design: the ion flies
-    on through the plane, and the arrival is the FIRST in-window crossing
-    read back off the completed trace. So this reports, it does not
-    terminate.
+    A detect with on_hit="pass" is NON-DESTRUCTIVE: the ion flies on
+    through the plane, and the arrival is the FIRST in-window crossing
+    read back off the completed trace. A detect with on_hit="splat" is a
+    kernel plane (L-435): the kernel absorbs the ion AT the crossing
+    (kind 6) and writes that exact state as the trace's final record, so
+    that record is the arrival -- the first in-window crossing by
+    construction (k = 1).
     """
     import numpy as _np
-    from ion_gym.physics.stations import station_hits
+    from ion_gym.physics.stations import station_hits, FATE_DETECT
 
     dets = [s for s in (reg.stations or [])
             if getattr(s, "kind", None) == "detect"]
@@ -759,7 +957,17 @@ def _detect_hit(reg, res):
             f"({[d.name for d in dets]}); staged flight cannot choose "
             f"which one defines arrival. Declare one, or name it in the "
             f"stage entry.")
-    traj = _np.column_stack([res["t_us"], res["x"], res["y"], res["z"],
+    mo = [float(v) for v in moff]
+    if int(res["kind"]) == FATE_DETECT:
+        return dict(t_us=float(res["t_us"][-1]), k=1, in_window=True,
+                    x=float(res["x"][-1]) + mo[0],
+                    y=float(res["y"][-1]) + mo[1],
+                    z=float(res["z"][-1]) + mo[2],
+                    vx=float(res["vx"][-1]), vy=float(res["vy"][-1]),
+                    vz=float(res["vz"][-1]))
+    traj = _np.column_stack([res["t_us"], _np.asarray(res["x"]) + mo[0],
+                             _np.asarray(res["y"]) + mo[1],
+                             _np.asarray(res["z"]) + mo[2],
                              res["vx"], res["vy"], res["vz"]])
     cols = ["t", "x", "y", "z", "vx", "vy", "vz"]
     for h in station_hits(traj, cols, dets[0]):
@@ -839,7 +1047,11 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
         res = _fly_region(reg, mz_Da,
                           r0_mm=tuple(np.asarray(p_loc, float) - _moff),
                           v0_mm_us=tuple(v_loc),
-                          tob_us=tof, seed=seed, planes=planes)
+                          tob_us=tof, seed=seed, planes=planes,
+                          st_off=tuple(_moff))
+        if reg.exit is None:
+            # the final region: honour declarations beyond its domain
+            res = _extend_final_region(reg, res, _moff)
         # map the whole trace back to world for a coherent path
         R = reg.pose.R()
         t = np.asarray(reg.pose.offset_mm, float)
@@ -854,21 +1066,29 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
         # t_max and the run reports a timeout with a plausible partial
         # trajectory -- which reads as a transmission failure rather than
         # as a detector that was never consulted.
-        _hit = _detect_hit(reg, res)
+        _hit = _detect_hit(reg, res, _moff)
         if _hit is not None:
+            # WORLD coordinates, like every other position this function
+            # returns (the traces, the handoffs): the hit is in the stage
+            # frame, and it used to be published as-is, so /flight and
+            # the impact tab drew a posed stage's arrivals in the wrong
+            # place (L-435). Identity-posed stages are unchanged.
+            _pw, _vw = reg.pose.local_to_world(
+                np.array([_hit["x"], _hit["y"], _hit["z"]], float),
+                np.array([_hit["vx"], _hit["vy"], _hit["vz"]], float))
             out["detection"] = dict(region=reg.name, t_us=float(_hit["t_us"]),
                                     k=int(_hit["k"]),
-                                    x=float(_hit["x"]), y=float(_hit["y"]),
-                                    z=float(_hit["z"]),
+                                    x=float(_pw[0]), y=float(_pw[1]),
+                                    z=float(_pw[2]),
                                     # station_hits interpolates the FULL
                                     # crossing state; narrowing it to
                                     # position here is what made speed and
                                     # ke_ev underivable downstream.
                                     # Same interpolated
                                     # sample, no second convention.
-                                    vx=float(_hit["vx"]),
-                                    vy=float(_hit["vy"]),
-                                    vz=float(_hit["vz"]))
+                                    vx=float(_vw[0]),
+                                    vy=float(_vw[1]),
+                                    vz=float(_vw[2]))
             out["regions"][-1]["detected_t_us"] = float(_hit["t_us"])
             tof = float(_hit["t_us"])
             fate = "detected"
@@ -901,24 +1121,27 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
         # which could only discriminate the one source that lived on an
         # axis the seam can never occupy -- face identity discriminates
         # ALL sources on ALL axes with no position tolerance at all.
-        # bnd_face -2: the route (3-D) arms no kernel bounds, so its
-        # kind = 3 is an exit-plane crossing by construction. bnd_face
-        # -1 with kind = 3 is impossible by the kernel's own contract
-        # (kind 3 is only ever set together with a face) -- if it
-        # arrives, the contract broke, and that is surfaced, not padded
-        # over.
+        # EVERY route reports the face now: the 3-D region maps fly3d's
+        # terminating plane to its face (L-165; it used to arm no bounds
+        # and declare -2 for "kind 3 is the seam by construction"). A
+        # kind = 3 with no face is impossible by the kernels' own
+        # contract -- if it arrives, the contract broke, and that is
+        # surfaced, not padded over.
         _crossed_exit = res["kind"] == 3
         if _crossed_exit:
             _face = int(res["bnd_face"])
             if _face >= 0:
                 _crossed_exit = _face in res["seam_faces"]
-            elif _face == -1:
+            else:
                 raise RuntimeError(
                     f"region {reg.name!r}: kernel returned kind = 3 "
                     f"with no terminating face -- the kernel's "
                     f"face-reporting contract (L-165) is broken.")
         if reg.exit is None or not _crossed_exit:
-            if reg.exit is None:
+            # a station impact plane is a TERMINATION even in the final
+            # region: "completed" there would count a splatted ion as an
+            # arrival (L-435, measured)
+            if reg.exit is None and int(res["kind"]) != FATE_IMPACT_PLANE:
                 fate = "completed"
             elif res["kind"] == 3:
                 _face = int(res["bnd_face"])
@@ -945,7 +1168,12 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
                                    f"t_max_us (or the stage's override "
                                    f"in the instrument JSON), not "
                                    f"another stage's"),
-                               3: "crossed a bound"}
+                               3: "crossed a bound",
+                               # a stage-frame impact_plane outside its
+                               # window (L-435); kind 6 (detect splat) is
+                               # an arrival and never reaches this branch
+                               5: "splat on a station impact plane "
+                                  "(outside its window)"}
                 fate = (f"terminated in {reg.name}: "
                         f"{_kind_words.get(int(res['kind']), 'unknown')}"
                         f" (kind {res['kind']})")
@@ -1412,9 +1640,13 @@ def load_assembly(path):
         # flight reports a timeout fate with a perfectly plausible partial
         # trajectory, which reads as a transmission failure rather than as
         # a setting that was never consulted.
-        _integ = getattr(spec, "integration", None)
-        _dt = float(st.get("dt_ns", getattr(_integ, "dt_ns", 1.0)))
-        _tmax = float(st.get("t_max_us", getattr(_integ, "t_max_us", 50.0)))
+        # Read DIRECTLY (L-557): every SimSpec carries integration, and
+        # build_run above has already resolved an unset dt_ns, so the old
+        # getattr fallbacks (1 ns / 50 us / rec_every 1 / 100000 records)
+        # could only hide a missing value.
+        _integ = spec.integration
+        _dt = float(st.get("dt_ns", _integ.dt_ns))
+        _tmax = float(st.get("t_max_us", _integ.t_max_us))
         # EXITS ARE AUTHORED IN WORLD COORDINATES; the Region holds them
         # LOCAL. The pose is how a stage lands in the world, and its exit
         # plane is an assembly-level fact (a seam at "x = 12.562" is at
@@ -1429,34 +1661,34 @@ def load_assembly(path):
         _po = _pose_from(st.get("pose"))
         if _ex is not None:
             _ex = exit_world_to_local(_ex, _po)
-        # LOUD non-support notice (PI ruling 2026-09-12): the staged
-        # route cannot hand stations to its kernel yet — regions fly a
-        # LOCAL frame while stations are stated in the assembly WORLD
-        # frame — so any station that would ABSORB or SPLAT is reported
-        # here, by name, with the fix. Silently dropping them is what
-        # made a working splat look broken. Arrival-time stations
-        # (detect/on_hit='pass') are served post-hoc and are not
-        # reported.
-        from ion_gym.physics.stations import unsupported_stations_notice
-        _note = unsupported_stations_notice(
-            spec, route=f"staged assembly (stage {st['name']!r})",
-            fix="Fix: fly this stage on its own (single-stage honours "
-                "stations on every route), or use detect with "
-                "on_hit='pass' if you only need the arrival time.")
-        if _note:
-            print(_note, flush=True)
+        # STATIONS ARE HONOURED on this route (L-435): each region hands
+        # its stage-frame stations to its kernel (_region_station_planes),
+        # so the load-time "not honoured" notice is retired. Built once
+        # here so a malformed station (a window on its own axis, an
+        # inverted pair, a detect without on_hit) refuses at LOAD, by
+        # name, rather than aborting the packet at its first ion.
+        from ion_gym.physics.stations import station_planes
+        station_planes(spec)
         regions.append(Region(
             name=st["name"], fields=fields, pose=_po,
             exit=_ex, gas=gas,
             field_extent_mm=st.get("field_extent_mm"),
             dt_ns=_dt, t_max_us=_tmax,
             stations=list(getattr(spec, "stations", []) or []),
-            rec_every=int(st.get("rec_every",
-                                 getattr(_integ, "rec_every", 1))),
-            max_records=int(st.get("max_records",
-                                   getattr(_integ, "max_records", 100000))),
+            rec_every=int(st.get("rec_every", _integ.rec_every)),
+            max_records=int(st.get("max_records", _integ.max_records)),
             bounds=getattr(spec, "bounds", None),
+            charge=int(spec.source.charge),
             metal_z_half_mm=_metal_z_half(spec)))
+
+    # ONE ION crosses every stage, so its charge cannot differ by stage:
+    # refused by name rather than letting each region fly its own value.
+    _charges = {r.name: r.charge for r in regions}
+    if len(set(_charges.values())) > 1:
+        raise ValueError(
+            f"staged assembly: the stages declare different source.charge "
+            f"values {_charges}, but one ion crosses every stage. Give every "
+            f"stage the same charge state.")
 
     # Refuse interpenetrating DECLARED metal at load, so an
     # unphysical assembly never reaches a solver. Skips undeclared-z
@@ -1671,12 +1903,30 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
             res = fly_staged(regions, _mz_i(i), (x, y, z), (vx, vy, vz),
                              tob_us=tob, seed=i + 1,
                              check_seams=(check_seams and i == 0))
-        except ValueError as e:
-            # A refusal on ion i is information about ion i, not a reason
-            # to abandon the packet -- but it is never silent.
-            losses[str(e)[:80]] = losses.get(str(e)[:80], 0) + 1
-            per_ion.append(dict(i=i, arrived=False, why=str(e)[:120]))
+        except BirthInMetal as e:
+            # A birth inside metal is a fact about THIS ion: it SPLATS at
+            # birth, the user is WARNED, and every other ion still flies
+            # (PI 2026-10-15). Its row carries the splat point (the birth)
+            # and the full diagnostic.
+            print(f"[staged] WARNING: ion {i} was born inside metal and "
+                  f"splats at birth -- {e}", flush=True)
+            losses[_BORN_IN_METAL] = losses.get(_BORN_IN_METAL, 0) + 1
+            per_ion.append(dict(i=i, arrived=False, why=_BORN_IN_METAL,
+                                detail=str(e), mz=_mz_i(i),
+                                x=float(x), y=float(y), z=float(z)))
             continue
+        except ValueError as e:
+            # EVERY OTHER refusal is about the configuration, not the ion:
+            # a seam the gate cannot evaluate, a kernel contract, an
+            # unknown route, a charge/SDS/region refusal. It ABORTS the
+            # packet with a warning (PI 2026-10-15; L-521). It used to be
+            # tallied as a lost ion -- configuration errors mixed into
+            # transmission -- and a seam refusal on ion 0 (the only ion
+            # that runs the seam check) then let every other ion fly
+            # unchecked while the packet reported statistics.
+            msg = (f"staged packet ABORTED at ion {i} of {n_rows}: {e}")
+            print(f"[staged] WARNING: {msg}", flush=True)
+            raise ValueError(msg) from e
         fate = res.get("fate", "completed")
         # Kept BEFORE the fate branches below, and regardless of fate: a
         # lost ion's path is the most informative one to look at, and
@@ -1702,32 +1952,31 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
                     z=np.asarray(rg["z"], float)[_m], t_us=_t[_m]))
             traces.append(dict(i=i, fate=fate, mz=_mz_i(i),
                                regions=_rg_out))
-        # ARRIVED means the ion reached the end of the instrument: it
-        # crossed a declared detector ("detected"), or the final region
-        # ran to its natural end with no detector to cross ("completed").
-        # Enumerated rather than written as `fate != "completed"`, because
-        # that formulation silently reclassifies any fate added LATER as a
-        # loss. That is not hypothetical: introducing "detected" did
-        # exactly this, and 200 of 200 ions arrived while all 200 were
-        # counted lost. The only symptom was an undefined R.
-        if fate not in ("detected", "completed"):
-            losses[fate] = losses.get(fate, 0) + 1
-            per_ion.append(dict(i=i, arrived=False, why=fate,
-                                mz=_mz_i(i)))
-            continue
+        # DETECTED IS THE ONLY TRANSMISSION (PI ruling 2026-10-16: "all
+        # you can say is how many of the ions flown hit the detector").
+        # `arrived` -- the field name kept for the record format -- means
+        # DETECTED: the ion crossed a declared detector. Every other
+        # ending is a reason it was not detected, never an arrival. That
+        # includes a final region that simply ran to its end ("completed"):
+        # this used to count as arrived when no detector was declared,
+        # so an ion that hit metal or timed out in the last stage was
+        # reported transmitted and its stop time fed T and R.
         det = res.get("detection")
-        # A DECLARED DETECTOR THAT WAS NEVER CROSSED IS A LOSS, not an
-        # arrival at whatever time the last region happened to stop.
-        # Without this the run reports the region's EXIT time as a time of
-        # flight: observed once as "200/200 arrived, T = 0.0011 us,
-        # R = 3" -- every ion counted as transmitted, with a number that
-        # is not a flight time at all. A resolution is only meaningful
-        # between the source and the plane it was measured to.
-        if det is None and _has_detector:
-            losses["declared detector never crossed"] = losses.get(
-                "declared detector never crossed", 0) + 1
-            per_ion.append(dict(i=i, arrived=False,
-                                why="declared detector never crossed",
+        if fate != "detected" or det is None:
+            why = fate
+            if fate in ("completed", "detected"):
+                # "completed" hides HOW the final stage ended; name it
+                _k = int(res["regions"][-1]["kind"]) if res["regions"] \
+                    else -1
+                _end = {0: "hit metal", 1: "left the solve box",
+                        2: "timed out", 3: "crossed a bound"}.get(
+                            _k, f"kind {_k}")
+                why = (f"declared detector never crossed (final stage "
+                       f"{_end})" if _has_detector
+                       else f"no detector declared (final stage {_end}; "
+                            f"nothing measured it)")
+            losses[why] = losses.get(why, 0) + 1
+            per_ion.append(dict(i=i, arrived=False, why=why,
                                 mz=_mz_i(i)))
             continue
         tof = float(res["tof_us"])
@@ -1765,19 +2014,29 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
                             t_us=tof))
 
     n = len(rows)
+    # n_arrived = DETECTED, n_lost = NOT detected, losses = the reasons
+    # (names kept for the record format; PI ruling 2026-10-16)
     out = dict(n=n, n_arrived=len(arrivals), n_lost=n - len(arrivals),
                losses=losses, per_ion=per_ion,
+               detector_declared=bool(_has_detector),
                # A DRAWN subset, never the measured set. n_traced is
                # reported alongside n so a reader of this dict can never
                # mistake "50 paths shown" for "50 ions flown".
                traces=traces, n_traced=len(traces))
+    if not _has_detector:
+        # nothing measured these ions: no transmission, no T, no R
+        out.update(T_us=float("nan"), fwhm_ns=float("nan"), R=float("nan"),
+                   note=(f"no detector declared: {n} ions flown, none can "
+                         f"be counted as transmitted. Declare a detect "
+                         f"station to measure arrival."))
+        return out
     if len(arrivals) < 2:
         # Refusing to compute is the honest outcome: an FWHM over fewer
         # than two arrivals is not a small sample, it is undefined.
         out.update(T_us=float(arrivals[0]) if arrivals else float("nan"),
                    fwhm_ns=float("nan"), R=float("nan"),
-                   note=(f"only {len(arrivals)} of {n} ions arrived; a "
-                         f"time spread is undefined below two."))
+                   note=(f"only {len(arrivals)} of {n} ions were detected; "
+                         f"a time spread is undefined below two."))
         return out
     if _mzs is not None and len(set(float(v) for v in _mzs)) > 1:
         # A time spread pooled ACROSS masses is not a resolution — the

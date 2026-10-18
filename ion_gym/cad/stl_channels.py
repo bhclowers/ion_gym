@@ -34,7 +34,6 @@ module) never requires it and has no side effects.
 """
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 from pathlib import Path
@@ -269,6 +268,14 @@ def emit_simspec(registry: ChannelRegistry, stl_files: Mapping[str, str], *,
             "source is required: a flyable deck needs an ion source "
             "(pass a SourceSpec); this emitter does not guess birth "
             "positions")
+    if integration is None:
+        # R2 (PI ruling 2026-10-15), the SimSpec rule at the CAD door:
+        # the step and flight time set the physics; IntegrationSpec()'s
+        # 1 ns / 400 us is one deck's value, not a neutral one (L-526).
+        # Collisions left out stay VACUUM (R3 Q1, SimSpec's default).
+        raise ValueError(
+            "integration is required: pass an IntegrationSpec with the "
+            "deck's dt_ns and t_max_us; this emitter does not guess them")
     if not (mm_per_gu > 0):
         raise ValueError(f"mm_per_gu must be > 0, got {mm_per_gu!r}")
     if not (margin_mm >= 0):
@@ -302,11 +309,10 @@ def emit_simspec(registry: ChannelRegistry, stl_files: Mapping[str, str], *,
         rf_groups=list(rf_groups),
         dc_groups=list(dc_groups),
     )
-    spec = SimSpec(geometry=geom, name=name, notes=notes, source=source)
+    spec = SimSpec(geometry=geom, name=name, notes=notes, source=source,
+                   integration=integration)
     if collisions is not None:
         spec.collisions = collisions
-    if integration is not None:
-        spec.integration = integration
     if bounds is not None:
         spec.bounds = bounds
 
@@ -323,23 +329,12 @@ def write_spec_json(spec: SimSpec, path, *, stl_dir_path) -> Path:
     future load can verify the STLs are the ones this deck was authored
     with (stl_resolve.preflight_stls checks the same digests). Refuses if
     any referenced STL is missing — a manifest over absent files certifies
-    nothing.
+    nothing. The manifest comes from THE one builder,
+    stl_resolve.build_manifest (L-546: this carried its own copy).
     """
-    stl_dir_path = Path(stl_dir_path)
-    manifest, missing = {}, []
-    for el in spec.geometry.electrodes:
-        if not el.stl:
-            continue
-        fp = stl_dir_path / el.stl
-        if not fp.exists():
-            missing.append(el.stl)
-            continue
-        manifest[el.stl] = hashlib.sha256(fp.read_bytes()).hexdigest()
-    if missing:
-        raise FileNotFoundError(
-            f"cannot write manifest: referenced STL(s) missing from "
-            f"{stl_dir_path}: {missing}")
-    spec.geometry.stl_manifest = manifest
+    from ion_gym.io.stl_resolve import build_manifest
+    spec.geometry.stl_manifest = build_manifest(spec,
+                                                stl_dir=Path(stl_dir_path))
     path = Path(path)
     path.write_text(spec.to_json(indent=1))
     return path

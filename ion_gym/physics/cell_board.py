@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from ion_gym.io.lattice import cover_extent_mm
+from ion_gym.physics.optimize import InfeasibleCandidate
 
 # Design bounds (module-level named constants, not magic numbers in code)
 ENVELOPE_MM = 15.0        # max outer extent, each axis
@@ -59,13 +60,17 @@ RAIL_MIN_MM = 0.4         # minimum ELECTRODE width (fabrication
                           # are not buildable/usable here.
 RF_MIN_V = 50.0           # |a| below this = RF off (declared dead zone)
 RF_MAX_V = 300.0          # amplitude ceiling
+FREQ_MIN_HZ = 0.5e6       # RF frequency search band (every space's
+FREQ_MAX_HZ = 2.5e6       # default; was retyped in each bounds(), L-552)
 
 WALLS = ("bottom", "top", "left", "right")
 
 
-class CellBoardInfeasible(ValueError):
+class CellBoardInfeasible(InfeasibleCandidate):
     """A candidate that violates a declared constraint. Screens must record
-    these as infeasible-by-construction — never silently skip them."""
+    these as infeasible-by-construction — never silently skip them.
+    (An InfeasibleCandidate, so optimize records it at the penalty; still
+    a ValueError for every existing except clause.)"""
 
 
 @dataclass
@@ -519,8 +524,8 @@ class FiveWireWidthSpace:
 
     def bounds(self):
         import numpy as np
-        lo = [1.0, 1.0, 0.5, 2.0, 50.0, 0.5e6, -30.0, -10.0]
-        hi = [3.5, 2.8, 2.0, 12.0, 300.0, 2.5e6, 30.0, 10.0]
+        lo = [1.0, 1.0, 0.5, 2.0, RF_MIN_V, FREQ_MIN_HZ, -30.0, -10.0]
+        hi = [3.5, 2.8, 2.0, 12.0, RF_MAX_V, FREQ_MAX_HZ, 30.0, 10.0]
         return np.array(lo, float), np.array(hi, float)
 
     def to_param(self, x):
@@ -601,8 +606,8 @@ class MirrorPairSpace:
         # gaps are NOT searchable — they are the fixed 125 um isolation cut
         # (any wider gap is exposed dielectric that charges up).
         # Per pair: width, kind (0 DC / 1 RF-even / 2 RF-odd), level.
-        lo = [2.0, 0.5e6, 0.4, -10.0]
-        hi = [12.0, 2.5e6, 2.5, 10.0]
+        lo = [2.0, FREQ_MIN_HZ, 0.4, -10.0]
+        hi = [12.0, FREQ_MAX_HZ, 2.5, 10.0]
         for _ in range(self.n_pairs):
             #     width  kind(floor->0,1,2)  level
             lo += [0.4, 0.0,   -30.0]
@@ -790,8 +795,8 @@ class MirrorRingSpace:
     def bounds(self):
         import numpy as np
         #     ch_h ch_w  freq   amp  cdc  gdc  wdc  wg   wrf  wc   hrf  hdc  gl    gh
-        lo = [6.0, 8.0, 0.5e6,  30., -10.,-30.,-30., 0.4, 0.4, 0.4, 0.4, 0.4, gap_lo(self), gap_lo(self)]
-        hi = [12., 12., 2.5e6, 300.,  10., 30., 30., 3.0, 3.0, 2.0, 3.0, 3.0, self.max_wall_gap_mm, self.max_wall_gap_mm]
+        lo = [6.0, 8.0, FREQ_MIN_HZ,  30., -10.,-30.,-30., 0.4, 0.4, 0.4, 0.4, 0.4, gap_lo(self), gap_lo(self)]
+        hi = [12., 12., FREQ_MAX_HZ, RF_MAX_V,  10., 30., 30., 3.0, 3.0, 2.0, 3.0, 3.0, self.max_wall_gap_mm, self.max_wall_gap_mm]
         return np.array(lo, float), np.array(hi, float)
 
     def to_param(self, x):
@@ -955,9 +960,9 @@ class CarpetDensitySpace:
     def bounds(self):
         import numpy as np
         lo = [4.0, float(self.n_rf_lo), self.min_rail_w_mm, 0.5,
-              -30.0, 50.0, 0.5e6]
+              -30.0, RF_MIN_V, FREQ_MIN_HZ]
         hi = [self.max_channel_h_mm, self.n_rf_hi + 0.999, 2.5, 2.5,
-              30.0, 300.0, 2.5e6]
+              30.0, RF_MAX_V, FREQ_MAX_HZ]
         return np.array(lo, float), np.array(hi, float)
 
     def to_param(self, x):
@@ -1030,8 +1035,25 @@ class PlanarCarpetSpace:
                  board_w_hi=13.0, surf_gap_lo=2.0, surf_gap_hi=10.0,
                  rail_w_lo=0.5, rail_w_hi=2.0, guard_w_lo=0.5, guard_w_hi=3.0,
                  guard_dc_abs_max=12.0, n_rf_min=4, n_rf_max=20,
-                 board_thick_mm=0.2):
+                 board_thick_mm=0.2, rf_amp_lo_v=RF_MIN_V,
+                 rf_amp_hi_v=RF_MAX_V, freq_lo_hz=FREQ_MIN_HZ,
+                 freq_hi_hz=FREQ_MAX_HZ):
         self.gap_mm = gap_mm
+        # the RF amplitude and frequency search band are ARGUMENTS (L-552:
+        # literals inside bounds()); defaults are the module's named band,
+        # so every existing caller searches exactly the same box
+        if not (0.0 <= rf_amp_lo_v < rf_amp_hi_v):
+            raise ValueError(f"PlanarCarpetSpace: rf amplitude band "
+                             f"[{rf_amp_lo_v}, {rf_amp_hi_v}] V is not "
+                             f"0 <= lo < hi")
+        if not (0.0 < freq_lo_hz < freq_hi_hz):
+            raise ValueError(f"PlanarCarpetSpace: frequency band "
+                             f"[{freq_lo_hz}, {freq_hi_hz}] Hz is not "
+                             f"0 < lo < hi")
+        self.rf_amp_lo_v, self.rf_amp_hi_v = float(rf_amp_lo_v), \
+            float(rf_amp_hi_v)
+        self.freq_lo_hz, self.freq_hi_hz = float(freq_lo_hz), \
+            float(freq_hi_hz)
         self.board_w_lo, self.board_w_hi = board_w_lo, board_w_hi
         self.surf_gap_lo, self.surf_gap_hi = surf_gap_lo, surf_gap_hi
         self.rail_w_lo, self.rail_w_hi = rail_w_lo, rail_w_hi   # 500um floor
@@ -1047,9 +1069,11 @@ class PlanarCarpetSpace:
     def bounds(self):
         import numpy as np
         lo = [self.board_w_lo, self.surf_gap_lo, self.rail_w_lo,
-              self.guard_w_lo, -self.guard_dc_abs_max, 50.0, 0.5e6]
+              self.guard_w_lo, -self.guard_dc_abs_max, self.rf_amp_lo_v,
+              self.freq_lo_hz]
         hi = [self.board_w_hi, self.surf_gap_hi, self.rail_w_hi,
-              self.guard_w_hi, self.guard_dc_abs_max, 300.0, 2.5e6]
+              self.guard_w_hi, self.guard_dc_abs_max, self.rf_amp_hi_v,
+              self.freq_hi_hz]
         return np.array(lo, float), np.array(hi, float)
 
     def _n_rails(self, board_w, w_rf, w_g):

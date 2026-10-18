@@ -85,8 +85,13 @@ def main():
           f"{'PASS' if g1 else 'FAIL'}")
 
     # PE-2/3/4 on the STL quad (pure RF: rods DC=0)
-    from ion_gym.physics.build_stl import quad_stl_spec, build_stl_run
-    qspec = quad_stl_spec("/tmp/quad_pe")
+    from ion_gym.physics.build_stl import build_stl_run
+    from ion_gym.io.sim_spec import SimSpec
+    from pathlib import Path as _P
+    # THE quad fixture (STL rods + deck, generated once from the retired
+    # examples/stl_demos generator; D6c, 2026-08-18 pattern)
+    qspec = SimSpec.from_json(str(_P(__file__).resolve().parent / "fixtures"
+                                  / "stl_quad" / "quad_stl_transport.json"))
     qm, qf, qc, qb = build_stl_run(qspec, ground_border=True)
     h = qm.mm_per_gu
     cc = qspec.geometry.width_mm / 2

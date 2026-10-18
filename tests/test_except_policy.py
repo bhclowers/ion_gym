@@ -125,7 +125,15 @@ ALLOW = {
     # that additionally looks for literal strings misses
     # self._err_status(...) because the assigned value is a Call. The
     # handlers have to be read.
-    ("sim_app.py", "Exception"): 34,
+    #
+    # 2026-10-15 (D8, L-541/L-566): the count had drifted to 37 on main
+    # (the gate was red). Four were narrowed, each read: the view-slice
+    # range (2-D models named, the rest raises to the redraw boundary),
+    # the scene build (VizError/ValueError, reason on the status line),
+    # NPZ pre-generation (ValueError/TypeError/MemoryError, reported), and
+    # the assembly callback stop (the shared _stop_periodic). Ratcheted
+    # to the new count, as this allowlist requires.
+    ("sim_app.py", "Exception"): 33,
 }
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent

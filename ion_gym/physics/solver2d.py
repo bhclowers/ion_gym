@@ -134,16 +134,29 @@ def laplace_factor(fixed, h, symmetry="planar",
     so k bases cost one factorization + k triangular solves instead of
     k full solves. dtype=float32 is the declared reduced-precision
     option (screen maps only; certified paths stay float64)."""
+    import time
     from scipy.sparse.linalg import splu
+    t0 = time.perf_counter()
     A, fn = assemble_laplace(fixed, h, symmetry, neumann_edges,
                              edge_ghost)
     nz, nu = fixed.shape
     lu = splu(A.astype(dtype).tocsc())
+    t_factor = time.perf_counter() - t0
+    pending = [True]          # the first back-solve completes the record
 
     def solve_rhs(val):
+        t1 = time.perf_counter()
         b = np.zeros(nz * nu, dtype=dtype)
         b[fn] = np.asarray(val, dtype)[fixed]
-        return lu.solve(b).reshape(nz, nu).astype(np.float64)
+        phi = lu.solve(b).reshape(nz, nu).astype(np.float64)
+        if pending:
+            # THIS MACHINE'S LU RATE for the solve-cost quote (L-439):
+            # the one LU door records every factorisation it performs.
+            pending.clear()
+            from ion_gym.physics.sizing import record_solve
+            record_solve("lu", nz * nu, factor_s=t_factor,
+                         back_s=time.perf_counter() - t1)
+        return phi
     return solve_rhs
 
 

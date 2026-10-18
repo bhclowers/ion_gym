@@ -30,6 +30,8 @@ from dataclasses import dataclass, asdict
 
 import numpy as np
 
+from ion_gym.physics.constants import ACC  # mm/us^2 per (V/mm / Da)
+
 MEASURED, DECLARED, DERIVED, BUDGET = ("MEASURED", "DECLARED", "DERIVED",
                                        "BUDGET")
 
@@ -118,7 +120,7 @@ def ledger_from_recording(rec, field, mz, name, pot_ref=None,
     t, u, vs, vu = a["t"], a["u"], a["vs"], a["vu"]
     slope = vu / vs
     pot = field.pot(a["s"], u)
-    K = mz * (vs**2 + vu**2) / (2 * 96.485) + pot - pot_ref
+    K = mz * (vs**2 + vu**2) / (2 * ACC) + pot - pot_ref
     led.add("n_crossings", t.size, "", MEASURED)
     if n_launched is not None:
         led.add("transmission_at_port", t.size / n_launched, "", MEASURED,

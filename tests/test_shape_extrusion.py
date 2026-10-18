@@ -50,7 +50,13 @@ def _tiny_spec(*, width=4.0, height=3.0, depth=3.0, pitch=0.25,
         "name": "tiny_extrude_synthetic",
         # DECLARED seed: build_run draws births even when a
         # gate never flies; seed 0 = the historical deterministic draws.
-        "source": {"seed": 0},
+        # R2 (2026-10-15): physics keys stated, at the values this
+        # fixture flew with as defaults before missing ones refused
+        "source": {"seed": 0, "distribution": "disc", "n_ions": 100,
+                   "x0_mm": 1.0, "y0_mm": 0.0, "z0_mm": 0.0, "r_mm": 4.0,
+                   "ke_lo": 0.1, "ke_hi": 1.9, "mz_list": [556.0],
+                   "tob_span_us": 2.0},
+        "integration": {"dt_ns": 1.0, "t_max_us": 400.0},
         "geometry": {
             "width_mm": width, "height_mm": height, "depth_mm": depth,
             "mm_per_gu": pitch,

@@ -119,7 +119,7 @@ def generate_births(spec: SimSpec):
     for i in range(n):
         pos = p0.copy()
         if s.distribution == "point":
-            pass
+            pass                    # born AT the centre: p0 is the position
         elif s.distribution in ("disc", "grid"):
             if s.distribution == "disc":
                 rr = s.r_mm * math.sqrt(rng.uniform())
@@ -160,6 +160,16 @@ def generate_births(spec: SimSpec):
                     if abs(dpos) <= trc_g[k]:
                         break
                 pos[k] += dpos
+        else:
+            # 'file' returned above (births_file); anything else is not a
+            # distribution this generator knows. It used to fall through
+            # and be born as a POINT source at the centre (L-554).
+            from ion_gym.io.sim_spec import SOURCE_DISTRIBUTIONS
+            raise ValueError(
+                f"generate_births: source.distribution "
+                f"{s.distribution!r} is not one this generator places "
+                f"(known: {list(SOURCE_DISTRIBUTIONS)}; 'file' needs "
+                f"source.births_file)")
         out[i, 0:3] = pos
 
         # kinematics — contiguous mass blocks (ion i -> mz_list[i // n_per])
@@ -305,6 +315,12 @@ class BuildRoute:
 # rather than earning a permanent named branch.
 KNOWN_BUILDERS = ("stl3d", "scene3d", "shapes3d", "stl2d", "rz", "planar")
 
+# build_needs_solve: a cached 3-D build is still scheduled OFF the UI thread
+# when its drive compose (one full-grid gradient pass per drive group, plus
+# the static field) exceeds this many node-passes -- about two passes over a
+# multi-million-node grid, i.e. no longer "instant" (L-552: was a literal).
+COMPOSE_HEAVY_NODE_PASSES = 5_000_000
+
 
 def build_route(spec: SimSpec) -> BuildRoute:
     """Classify a spec exactly as build_run() will dispatch it."""
@@ -400,7 +416,8 @@ def build_needs_solve(spec: SimSpec):
             nodes = int(nx) * int(ny) * int(nz)
             # one gradient pass ~ tens of ms per 1e6 nodes; > ~2 gradient
             # passes over a multi-million-node grid is not "instant".
-            heavy = n_groups >= 1 and nodes * (n_groups + 1) > 5_000_000
+            heavy = (n_groups >= 1
+                     and nodes * (n_groups + 1) > COMPOSE_HEAVY_NODE_PASSES)
             return heavy
         except (TypeError, ValueError, AttributeError) as e:
             # sizing inputs incomplete -> the safe (off-thread) answer.
@@ -550,6 +567,11 @@ def build_run(spec: SimSpec, verbose=False,
     # electrode.dc. Doing it here (one door, all builders) means a builder
     # cannot forget, and a group member's dc can never be stale.
     spec.resolve_dc_groups()
+    # An unset step (dt_ns None = derive from the drives) is resolved
+    # HERE, the same one-door way. It used to be a side effect of
+    # spec.advisories(), which must only report (L-554).
+    if spec.integration.dt_ns is None:
+        spec.integration.dt_ns = spec.derive_dt_ns()
     # ONE DOOR for every route: a recording that cannot cover the
     # declared flight is refused here, before anything is built, rather
     # than truncating mid-flight on whichever builder happens to run.
@@ -557,15 +579,30 @@ def build_run(spec: SimSpec, verbose=False,
     _rec_err = check_recording_capacity(spec.integration)
     if _rec_err:
         raise ValueError(_rec_err)
-    # SDS outside its regime WARNS rather than refuses: the boundary is
-    # soft and exploring near it is legitimate. One door, every route.
-    from ion_gym.physics.sds import rf_regime_note
-    _sds_note = rf_regime_note(spec)
-    if _sds_note:
-        print(_sds_note)
+    # SDS outside its regime WARNS rather than refuses (L-452): the note is
+    # one of spec.advisories() below, so this print and the app's status
+    # line carry the same text from one computation per spec.
     errs = spec.validate()
     if errs:
         raise ValueError("invalid spec: " + "; ".join(errs))
+    # RADIAL CHANNELS are DERIVED AFTER FLIGHT about the deck's axis
+    # (L-539, PI 2026-10-15: no kernel computes them; validate() above
+    # refused a missing axis). r-z keeps its kernel's values: its axis is
+    # built in and they already are about it. Elsewhere the field channels
+    # need the recorded field components, which are added here, announced.
+    from ion_gym.io.sim_spec import RADIAL_CHANNELS
+    _rc = list(spec.integration.record_channels or [])
+    _derive_radial = (spec.geometry.symmetry.coords != "rz"
+                      and any(c in RADIAL_CHANNELS for c in _rc))
+    if _derive_radial and any(c in ("e_axial", "e_radial") for c in _rc):
+        _add = [c for c in ("e_x", "e_y", "e_z") if c not in _rc]
+        if _add:
+            spec.integration.record_channels = _rc + _add
+            _msg = (f"[RECORD] e_axial/e_radial are derived after flight "
+                    f"from the field components: also recording {_add}")
+            if _msg not in _ADVISED:
+                _ADVISED.add(_msg)
+                print(_msg + " [printed once per session]")
     # advisories are WARNINGS, not refusals: the
     # configuration is legal but ill-advised; state the reason and
     # proceed. Printed unconditionally the FIRST time — an advisory
@@ -606,6 +643,27 @@ def build_run(spec: SimSpec, verbose=False,
     # drift apart.  This is dispatch on declared geometry, not a
     # correlate -- coords, depth_mm (the SOLVE domain's z extent), e.stl and
     # spec.builder are all declared fields.
+    out = _dispatch_route(spec, verbose=verbose, solve_dtype=solve_dtype)
+    if not _derive_radial:
+        return out
+    model, fly, cols, births = out
+    frame = spec.radial_frame()
+    from ion_gym.io.records import apply_radial_frame
+
+    def fly_radial(i, *a, **k):
+        traj, summary = fly(i, *a, **k)
+        if traj is not None:
+            apply_radial_frame(traj, cols, frame)
+        return traj, summary
+    # keep whatever the route's fly function carries (attributes the
+    # ensemble driver or the app read)
+    fly_radial.__dict__.update(getattr(fly, "__dict__", {}))
+    return model, fly_radial, cols, births
+
+
+def _dispatch_route(spec, *, verbose, solve_dtype):
+    """The route builder build_run dispatches to (split out so build_run
+    can post-process the flight records for every route in one place)."""
     r = build_route(spec)
     if r.builder == "stl3d":
         # full 3-D STL scene: real 3-D solve + 3-D fly (voxelize, Rung-2)

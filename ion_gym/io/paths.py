@@ -157,6 +157,38 @@ def repo_root():
     return _repo_root()
 
 
+def uploads_dir(*parts):
+    """Home for files the app's upload doors install (STL meshes under
+    'stl', decks with their meshes under 'decks'). The registered
+    'uploads' dataset, so it moves with the data root (set_data_root /
+    ION_GYM_DATA) like every other registered name -- callers used to
+    rebuild repo_root()/'uploads' by hand beside this entry. PURE -- no
+    mkdir; the writer creates what it needs."""
+    return data_path("uploads", *parts)
+
+
+def cache_root():
+    """Home of the solved-basis cache (fa_cache, basis_cache, field_io):
+    the ION_GYM_CACHE environment variable if set, else ~/.ion_gym_cache.
+    Resolved at CALL time, every call: fa_cache used to read it once at
+    import and freeze it into default arguments, so setting the variable
+    after import (a notebook, a test, a tool) silently had no effect.
+    PURE -- no mkdir."""
+    env = os.environ.get("ION_GYM_CACHE")
+    return Path(env).expanduser() if env else Path.home() / ".ion_gym_cache"
+
+
+# The deck SimApp() opens when given no spec, relative to repo_root().
+# Registered here (PI ruling 2026-10-14: a registry entry, not a user
+# config value) so the app does not carry its own path literal.
+_DEFAULT_DECK = ("examples", "ion_funnel_rz.json")
+
+
+def default_deck():
+    """Path of the deck SimApp() opens when given no spec."""
+    return repo_root().joinpath(*_DEFAULT_DECK)
+
+
 def outputs_dir(*parts):
     """repo_root()/outputs (optionally a subpath) -- the ONE home for where
     generated figures/reports go. Committed code once

@@ -29,15 +29,213 @@ from typing import List, Sequence
 
 import numpy as np
 
+import json
+import math
+import os
+import platform
+import threading
+import time
+
 BYTES_PER_NODE = 4                     # float32 basis
 # MULTIGRID throughput: SOLVED nodes per second, to tolerance, end-to-end
-# (V-cycles make "sweeps" meaningless as a unit). This is the ONE
-# solve-cost constant — the solver is solve_bases_mg everywhere.
+# (V-cycles make "sweeps" meaningless as a unit). Since L-439 this is
+# only the PRIOR for the multigrid routes, used until this machine has
+# a recorded multigrid solve (see "per-machine solve rates" below); the
+# 2-D LU routes never use it.
 MG_NODES_PER_S = 2.2e5   # [measured, then re-measured
                          #  across three grids: 236k @1M nodes,
-                         #  256k @2.7M, ~O(N) linear/plateauing. 2.2e5 is
-                         #  the conservative floor — the estimate rounds
-                         #  toward slightly-long, never short.]
+                         #  256k @2.7M, ~O(N) linear/plateauing. Toy
+                         #  plates on the PI's machine 2026-10-15 ran
+                         #  ~0.8e5 at 885k nodes, so this prior can be
+                         #  short -- the quote says it is uncalibrated.]
+
+# ------------------------------------------------ per-machine solve rates
+# L-439. One multigrid rate priced every route, and each solver costs
+# differently (toy grids, 4 electrodes, 2026-10-15):
+#   2-D LU (planar, r-z): ONE factorisation per geometry + one cheap
+#       back-solve (~2-3% of the factor) per electrode. Pricing every
+#       electrode as a full solve quoted planar 7.5-10.5x long.
+#   3-D multigrid (stl2d, stl3d, shapes3d, scene3d): a full solve per
+#       electrode whose per-node speed RISES with N (1.4 s at 14k nodes,
+#       11.6 s at 885k) and is not monotone in grid shape.
+# A fixed constant is right on one machine at best, so the rates are
+# MEASURED ON THIS MACHINE (PI ruling 2026-10-15):
+#   * every LU factorisation (solver2d.laplace_factor) and every
+#     multigrid basis (multigrid3d.solve_bases_mg) records its node
+#     count and seconds -- the solves the user runs anyway;
+#   * the quote scales the record NEAREST in size;
+#   * LU has a sub-second PROBE (LU_PROBE_SIDES) run on the first LU
+#     quote with no record; multigrid cannot be probed honestly (its
+#     smallest solve is >1 s and does not predict a large one), so until
+#     a multigrid solve is recorded the quote uses MG_NODES_PER_S and
+#     says it is not yet calibrated.
+# Records live in cache_root()/SOLVE_RATES_FILE, keyed by machine, so a
+# cache folder shared between machines keeps each machine's own rates.
+SOLVER_OF_ROUTE = {"planar": "lu", "rz": "lu", "stl2d": "mg",
+                   "stl3d": "mg", "shapes3d": "mg", "scene3d": "mg"}
+SOLVE_RATES_FILE = "solve_rates.json"
+SOLVE_RATES_KEEP = 200        # most recent records kept per solver
+SOLVE_RATES_MIN_NODES = 10_000  # smaller solves are timer noise
+# Scaling exponents (up, down) from the nearest record to the quoted N:
+# t = t_rec * (N / N_rec) ** exp, `up` when N > N_rec. Each pair rounds
+# toward LONG: up uses the steepest local slope measured, down the
+# shallowest (toy grids 2026-10-15: LU factor slope 1.07 below 122k
+# nodes, 1.37 from 360k to 1M; back-solve ~1.0-1.2; multigrid 0.5
+# overall, ~1.0 at the large end).
+LU_FACTOR_EXP = (1.35, 1.0)
+LU_BACK_EXP = (1.25, 1.0)
+MG_BASIS_EXP = (1.0, 0.5)
+LU_PROBE_SIDES = (150, 250, 350)   # square toy grids; ~0.5 s in all
+
+_RATES_LOCK = threading.Lock()
+_RATES = None                 # this machine's records, loaded lazily
+_RATES_WRITE_WARNED = False
+
+
+def _machine_key():
+    return f"{platform.node()}|{platform.machine()}|{os.cpu_count()}"
+
+
+def _rates_path():
+    from ion_gym.io.paths import cache_root
+    return os.path.join(str(cache_root()), SOLVE_RATES_FILE)
+
+
+def _load_rates():
+    """This machine's records, {"lu": [...], "mg": [...]}. A missing file
+    is no records; an unreadable one is announced and then ignored --
+    rates are an estimate input, never physics."""
+    global _RATES
+    if _RATES is None:
+        _RATES = {"lu": [], "mg": []}
+        path = _rates_path()
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    mine = json.load(f).get(_machine_key(), {})
+                for s in _RATES:
+                    _RATES[s] = list(mine.get(s, []))
+            except (OSError, ValueError, AttributeError) as e:
+                print(f"[sizing] solve-rate records at {path} unreadable "
+                      f"({e}); quoting as if this machine had none")
+    return _RATES
+
+
+def _store_rates():
+    """Atomic rewrite of this machine's section. A failure is announced
+    once per process and the records stay in memory: a cost estimate
+    must never fail a solve."""
+    global _RATES_WRITE_WARNED
+    path = _rates_path()
+    try:
+        allm = {}
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    allm = json.load(f)
+            except (OSError, ValueError):
+                allm = {}
+        if not isinstance(allm, dict):
+            allm = {}
+        allm[_machine_key()] = _RATES
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(allm, f, indent=1)
+        os.replace(tmp, path)
+    except OSError as e:
+        if not _RATES_WRITE_WARNED:
+            print(f"[sizing] solve-rate record not saved ({e}); this "
+                  f"process keeps it in memory, the next starts over")
+            _RATES_WRITE_WARNED = True
+
+
+def record_solve(solver, n_nodes, **seconds):
+    """Record one measured solve: solver "lu" with factor_s and back_s,
+    or "mg" with basis_s (seconds per electrode basis). Called by the
+    solver doors themselves, so every route records the same way."""
+    if solver not in ("lu", "mg"):
+        raise ValueError(f"record_solve: unknown solver {solver!r}; "
+                         f"known: 'lu', 'mg'")
+    want = {"lu": ("factor_s", "back_s"), "mg": ("basis_s",)}[solver]
+    if set(seconds) != set(want):
+        raise ValueError(f"record_solve({solver!r}): needs exactly "
+                         f"{want}, got {sorted(seconds)}")
+    n = int(n_nodes)
+    if n < SOLVE_RATES_MIN_NODES:
+        return
+    rec = {"n": n, "when": time.strftime("%Y-%m-%d %H:%M")}
+    rec.update({k: float(v) for k, v in seconds.items()})
+    with _RATES_LOCK:
+        recs = _load_rates()[solver]
+        recs.append(rec)
+        del recs[:-SOLVE_RATES_KEEP]
+        _store_rates()
+
+
+def lu_probe():
+    """Time solver2d.laplace_factor on LU_PROBE_SIDES square toy grids
+    (two plates). laplace_factor records each one itself; this only
+    supplies the grids. ~0.5 s."""
+    from ion_gym.physics.solver2d import laplace_factor
+    for n in LU_PROBE_SIDES:
+        fixed = np.zeros((n, n), bool)
+        fixed[n // 3, n // 5: 4 * n // 5] = True
+        fixed[2 * n // 3, n // 5: 4 * n // 5] = True
+        v = np.zeros((n, n))
+        v[n // 3, n // 5: 4 * n // 5] = 1.0
+        laplace_factor(fixed, 0.1)(v)
+
+
+def _scale(t, n, n_rec, exps):
+    up, down = exps
+    return t * (n / n_rec) ** (up if n > n_rec else down)
+
+
+def _nearest(recs, n):
+    """Record nearest to n in log size; the most recent wins a tie."""
+    best = None
+    for r in recs:
+        d = abs(math.log(n / r["n"]))
+        if best is None or d <= best[0]:
+            best = (d, r)
+    return best[1]
+
+
+def solve_seconds(solver, n_solved, n_electrodes):
+    """(seconds, provenance line) to solve n_electrodes bases on
+    n_solved nodes with this solver, on THIS machine."""
+    n = max(float(n_solved), 1.0)
+    k = int(n_electrodes)
+    if solver == "lu":
+        with _RATES_LOCK:
+            have = bool(_load_rates()["lu"])
+        if not have:
+            print("[sizing] no LU solve recorded on this machine; timing "
+                  "a sub-second probe once")
+            lu_probe()
+        with _RATES_LOCK:
+            r = _nearest(_load_rates()["lu"], n)
+        t = (_scale(r["factor_s"], n, r["n"], LU_FACTOR_EXP)
+             + k * _scale(r["back_s"], n, r["n"], LU_BACK_EXP))
+        return t, (f"LU: one factorisation + {k} back-solve(s), scaled "
+                   f"from this machine's {r['n']:,}-node solve "
+                   f"({r['when']})")
+    if solver == "mg":
+        with _RATES_LOCK:
+            recs = list(_load_rates()["mg"])
+        if not recs:
+            return k * n / MG_NODES_PER_S, (
+                f"multigrid: NOT YET CALIBRATED on this machine -- "
+                f"default {MG_NODES_PER_S:.3g} nodes/s per basis, which "
+                f"can be several times short; the first 3-D solve here "
+                f"calibrates it")
+        r = _nearest(recs, n)
+        return k * _scale(r["basis_s"], n, r["n"], MG_BASIS_EXP), (
+            f"multigrid: {k} basis solve(s), scaled from this machine's "
+            f"{r['n']:,}-node solve ({r['when']})")
+    raise ValueError(f"solve_seconds: unknown solver {solver!r}; known: "
+                     f"'lu' (planar, r-z), 'mg' (stl2d and the 3-D routes)")
 
 
 # Per-node compose rates [measured on a 3.5M-node array].
@@ -61,8 +259,13 @@ class SizingProposal:
     mem_bases_bytes: int
     mem_solver_bytes: int
     est_solve_s: float
-    fold: str = ""                    # declared mirror axes actually used
+    fold: str = ""                    # mirror axes the SOLVE halves (planar)
     min_feature_mm: float | None = None   # smallest gap the user told us about
+    # mirror axes declared on a deck that IS already the reduced domain
+    # (3-D routes, scenes): reported, never divided out again (L-565)
+    mirror_stored: str = ""
+    solver: str = "mg"                # "lu" (planar, r-z) | "mg" (the rest)
+    rate_note: str = ""               # where est_solve_s's rate came from
     warnings: List[str] = field(default_factory=list)
     # field-build options (GeometrySpec.field_method / channel_dtype): they
     # change the COMPOSE cost and the channel memory, not the Laplace solve
@@ -86,10 +289,15 @@ class SizingProposal:
             L.append(f"**fold:** mirror {self.fold} → "
                      f"{self.n_voxels_solved:,} nodes solved "
                      f"({2 ** len(set(self.fold) & set('xyz'))}× reduction)")
+        if self.mirror_stored:
+            L.append(f"**mirror:** {self.mirror_stored} declared — this grid "
+                     f"is already the reduced domain, solved as stored "
+                     f"(no further fold)")
         L += [f"**memory:** bases {self.mem_bases_bytes / gb:.2f} GB "
               f"({self.n_electrodes} × float32) + solver "
               f"~{self.mem_solver_bytes / gb:.2f} GB",
-              f"**est. solve:** ~{fmt_time(self.est_solve_s)}"]
+              f"**est. solve:** ~{fmt_time(self.est_solve_s)}"
+              + (f" ({self.rate_note})" if self.rate_note else "")]
         if self.n_drive_channels:
             it = np.dtype(self.channel_dtype).itemsize
             mem_ch = 3 * self.n_drive_channels * self.n_voxels * it
@@ -123,9 +331,15 @@ def fmt_time(s):
 def propose_sizing_from_aabbs(aabb_min: Sequence, aabb_max: Sequence,
                               n_electrodes: int, *, pitch: float,
                               margin_mm: float = 2.0, fold: str = "",
-                              min_feature_mm: float | None = None
+                              min_feature_mm: float | None = None,
+                              solver: str = "mg", mirror_stored: str = ""
                               ) -> SizingProposal:
-    """The core.  aabb_min/max: (N,3) arrays of per-electrode AABBs in mm."""
+    """The core.  aabb_min/max: (N,3) arrays of per-electrode AABBs in mm.
+    solver: "lu" (planar, r-z) or "mg" (stl2d and the 3-D routes, and an
+    STL upload or scene, which build 3-D) -- SOLVER_OF_ROUTE.
+    fold: axes the SOLVE halves out of this domain (planar only).
+    mirror_stored: axes declared mirror on a domain that is ALREADY the
+    reduced part (3-D routes, scenes) -- reported, not divided out."""
     lo = np.min(np.atleast_2d(aabb_min), axis=0) - margin_mm
     hi = np.max(np.atleast_2d(aabb_max), axis=0) + margin_mm
     p = float(pitch)
@@ -183,17 +397,11 @@ def propose_sizing_from_aabbs(aabb_min: Sequence, aabb_max: Sequence,
 
     mem_b = int(nvox * BYTES_PER_NODE * n_electrodes)
     mem_s = int(nsolved * BYTES_PER_NODE * 4)
-    # SOLVE-TIME ESTIMATE: the actual solver is
-    # MULTIGRID (solve_bases_mg), whose end-to-end throughput is
-    # MG_NODES_PER_S (measured, ~O(N) linear: 236k @1M nodes, 256k @2.7M,
-    # plateauing — remeasured across three grids). est_s
-    # previously used a stale SOR pair (62.5k nodes/s/basis), 3.5x slower
-    # than the multigrid solver that actually runs — so a 274 M-voxel /
-    # ~39-electrode import estimated 47.5 h when the real multigrid cost
-    # is ~13.5 h. The dead SOR
-    # constants were removed with this fix: one solver, one constant, and
-    # the estimate now describes the solve that runs.
-    est_s = n_electrodes * nsolved / MG_NODES_PER_S
+    # SOLVE-TIME ESTIMATE: priced by THE SOLVER THAT RUNS, at this
+    # machine's measured rate (solve_seconds; L-439). It was one
+    # multigrid constant for every route, which priced the 2-D LU
+    # routes' cheap per-electrode back-solves as full solves.
+    est_s, rate_note = solve_seconds(solver, nsolved, n_electrodes)
 
     warns = []
     span = float(np.max(hi - lo))
@@ -211,7 +419,7 @@ def propose_sizing_from_aabbs(aabb_min: Sequence, aabb_max: Sequence,
         warns.append(f"bases need {mem_b / 1024**3:.1f} GB — consider a "
                      f"coarser pitch, a declared symmetry fold, or fewer "
                      f"conductors")
-    if not fold:
+    if not fold and not mirror_stored:
         warns.append("no symmetry fold declared — if the geometry has a "
                      "mirror plane, declaring it (and letting the solver "
                      "VERIFY it) halves the cost per plane")
@@ -220,20 +428,39 @@ def propose_sizing_from_aabbs(aabb_min: Sequence, aabb_max: Sequence,
                           n_voxels=nvox, n_electrodes=int(n_electrodes),
                           mem_bases_bytes=mem_b, mem_solver_bytes=mem_s,
                           est_solve_s=est_s, fold=fold,
-                          min_feature_mm=min_feature_mm, warnings=warns)
+                          min_feature_mm=min_feature_mm, warnings=warns,
+                          solver=solver, rate_note=rate_note,
+                          mirror_stored="".join(
+                              c for c in mirror_stored if c in "xyz"))
 
 
 # ----------------------------------------------------------- adapters
 def propose_sizing_scene(scene, *, pitch: float, margin_mm: float = 0.0,
                          min_feature_mm: float | None = None):
-    """scene3d.GeomScene -> SizingProposal.  Domain from the scene's OWN mm
-    extent (margin 0 by default: a GeomScene declares its box explicitly, unlike
-    an STL, whose box we must infer)."""
+    """scene3d.GeomScene -> SizingProposal.  Domain = the box the scene's
+    stored GRID covers (GeomScene.grid_extent_mm) -- the domain the solver
+    actually solves, vacuum margin included. Margin 0 by default: a
+    GeomScene declares its box explicitly, unlike an STL, whose box we
+    must infer.
+
+    It priced the METAL box (extent_mm) instead, so a scene's vacuum margin
+    was never quoted: fixture A at 0.25 mm/gu with a 1 mm margin stores
+    49x49x41 = 98,441 nodes and was quoted 41x41x33 = 55,473 (L-567). A
+    scene whose grid spans nothing REFUSES rather than quoting zero."""
     sc = scene.in_mm()
-    lo, hi = sc.extent_mm()
+    lo, hi = sc.grid_extent_mm()
+    if not np.all(np.asarray(hi) - np.asarray(lo) > 0.0):
+        raise ValueError(
+            f"propose_sizing_scene: the scene's grid "
+            f"({sc.grid.nx}x{sc.grid.ny}x{sc.grid.nz} nodes) spans no "
+            f"volume; grid it (GeomScene.at_resolution) before pricing it")
+    # A scene's grid is the STORED/FOLDED array frame (scene3d), so its
+    # mirror axes are already cut away: reported, never divided out again.
+    # Passing them as `fold` under-quoted a mirrored scene 2x per axis
+    # (L-565).
     return propose_sizing_from_aabbs([lo], [hi], len(sc.electrodes),
                                      pitch=pitch, margin_mm=margin_mm,
-                                     fold=sc.grid.mirror,
+                                     mirror_stored=sc.grid.mirror,
                                      min_feature_mm=min_feature_mm)
 
 
@@ -255,17 +482,18 @@ def propose_sizing_simspec(spec, *, pitch: float | None = None,
     # authority the builder uses (planar_fold_axes over the real anchored
     # masks), so node counts halve exactly and only when the solve will
     # actually fold — prerequisite-zero proved the old kind()=="mirror"
-    # halving described a fold that never ran. Non-planar routes keep the
-    # conservative rule (mirror kinds minus plane_mm axes);
-    # their builders' fold truth is UNVERIFIED for those routes —
-    # not guessed here.
+    # halving described a fold that never ran. Every other route is
+    # named in the chain below with its own builder's truth.
     sn = g.symmetry.normalized()
-    is_planar_route = (sn.coords == "xyz" and float(g.depth_mm or 0.0) == 0
-                       and g.electrodes
-                       and all(e.shapes for e in g.electrodes)
-                       and not any(getattr(e, "stl", None)
-                                   for e in g.electrodes))
-    if is_planar_route:
+    mirror_stored = ""
+    # THE ROUTE comes from the one authority build_run dispatches on
+    # (sim_build.build_route), and each route asks ITS OWN builder's fold
+    # truth (L-522). This was a hand-built planar test with an `else` that
+    # priced r-z and stl2d by the 3-D mirror rule -- so a declared mirror
+    # halved their quote although neither builder folds.
+    from ion_gym.physics.sim_build import build_route
+    route = build_route(spec).builder
+    if route == "planar":
         from ion_gym.physics.raster2d import (anchored_grid,
                                               planar_fold_axes,
                                               electrode_mask,
@@ -278,41 +506,40 @@ def propose_sizing_simspec(spec, *, pitch: float | None = None,
         fx = planar_fold_axes(sn, m2, xs, ys,
                               {"x": g.width_mm, "y": g.height_mm})
         fold = "".join("xy"[a] for a in sorted(fx))
-    else:
-        # NON-PLANAR ROUTES: ask THE SAME authority the 3-D builders
-        # ask. This was
-        #     kind(a) == "mirror" and a not in sn.plane_mm
-        # — a conservative rule, justified above on the
-        # grounds that the non-planar builders' fold truth was
-        # UNVERIFIED. That premise no longer holds:
-        # build_stl3d._declared_mirror_axes is documented as THE one
-        # authority for declared mirror planes on the 3-D routes, and
-        # physics.symmetry.assert_mirror_field_symmetry now proves the
-        # fold on every 3-D build.
-        #
-        # The excluded-by-plane_mm clause was not merely conservative,
-        # it was WRONG: _declared_mirror_axes reads scene.grid.mirror or
-        # symmetry.planes and NEVER reads plane_mm, so a deck that
-        # DECLARES plane_mm was priced as if it would not fold while the
-        # builder folded it. Measured on this tree, that mis-sized three
-        # of the seven mirrored 3-D decks — oa3d_quarter (y,z),
-        # mirror_end_half (y), mirror_end_quarter (y,z) — by a factor of
-        # 2 per axis, and those are exactly the decks a user prices
-        # before committing to a long solve.
-        #
-        # Configuration-agnostic: every 3-D route (shapes3d, stl3d,
-        # scene3d) reaches build_stl3d_run through this one function, so
-        # the estimate and the build now read the same fact from the same
-        # place and cannot drift.
+    elif route in ("stl2d", "rz"):
+        # NEITHER BUILDER FOLDS. build_stl solves the full domain
+        # (mirror=(False, False, False)); build_rz VERIFIES declared mirror
+        # planes (refusing a false one) and then solves every basis on the
+        # full (z, r) grid. Pricing a fold neither performs under-quoted
+        # the solve by 2x per declared plane.
+        fold = ""
+    elif route in ("stl3d", "shapes3d", "scene3d"):
+        # 3-D ROUTES SOLVE THE DECLARED GRID AS STORED (L-565). A declared
+        # mirror on these routes means the deck IS the reduced domain:
+        # build_stl3d_run solves _grid_from_spec (the declared extent)
+        # and multigrid applies the mirror as a boundary at the face. So
+        # nothing is divided out. This used to halve per declared axis
+        # (and an earlier comment here claimed oa3d_quarter /
+        # mirror_end_* were priced unfolded "while the builder folded
+        # it" -- the builder never folds). Measured with no solve:
+        # slim_surround_mini (mirror z) solves 81x41x17 = 56,457 nodes
+        # and was quoted 28,228. The mirror axes come from the 3-D
+        # builders' own authority, _declared_mirror_axes (a POSITIONAL
+        # (mx, my, mz) tuple), and are reported, not credited.
         from ion_gym.physics.build_stl3d import _declared_mirror_axes
-        # Returns a POSITIONAL (mx, my, mz) tuple of bools, not axis
-        # names — zipped against "xyz" here rather than assumed.
-        fold = "".join(a for a, m in zip("xyz", _declared_mirror_axes(spec))
-                       if m)
-    # price the compose: drive channels = RF/time-domain groups + static DC
+        fold = ""
+        mirror_stored = "".join(
+            a for a, m in zip("xyz", _declared_mirror_axes(spec)) if m)
+    else:
+        raise ValueError(
+            f"propose_sizing_simspec: route {route!r} has no solve-cost "
+            f"rule; the estimate knows planar, stl2d, rz, stl3d, shapes3d "
+            f"and scene3d. Refusing to price it as some other route.")
     prop = propose_sizing_from_aabbs([lo], [hi], len(g.electrodes),
                                      pitch=p, margin_mm=0.0, fold=fold,
-                                     min_feature_mm=min_feature_mm)
+                                     min_feature_mm=min_feature_mm,
+                                     solver=SOLVER_OF_ROUTE[route],
+                                     mirror_stored=mirror_stored)
     # price the compose: drive channels = RF/time-domain groups + static DC
     prop.n_drive_channels = 1 + len(getattr(g, "rf_groups", []) or [])
     prop.field_method = str(field_method or getattr(
@@ -376,6 +603,40 @@ def system_memory_gb():
         return None
 
 
+def _record_ceiling(budget_gb):
+    """(budget_gb, ram_gb, warn_gb, refuse_gb): the ONE ceiling every
+    record quote is tiered against, so a single-stage and a staged quote
+    on the same machine and budget cannot disagree about what fits."""
+    ram = system_memory_gb()
+    if budget_gb is not None:
+        budget_gb = float(budget_gb)
+        if not (budget_gb > 0):
+            raise ValueError(
+                f"record_volume: budget_gb must be a positive number of "
+                f"gigabytes, got {budget_gb!r}. Pass None to derive the "
+                f"limit from system RAM instead of declaring one.")
+        return (budget_gb, ram, budget_gb * RECORD_WARN_OF_BUDGET,
+                budget_gb)
+    if ram:
+        return (None, ram, ram * RECORD_WARN_FRACTION,
+                ram * RECORD_REFUSE_FRACTION)
+    return (None, ram, RECORD_WARN_GB_FALLBACK, RECORD_REFUSE_GB_FALLBACK)
+
+
+def _ceiling_line(budget_gb, ram, warn_gb, refuse_gb):
+    if budget_gb is not None:
+        return (f"**budget:** {budget_gb:.0f} GB declared for this run"
+                + (f" (machine has {ram:.0f} GB)" if ram else "")
+                + f" — warn at {warn_gb:.1f} GB, refuse at "
+                  f"{refuse_gb:.1f} GB")
+    if ram:
+        return (f"**machine:** {ram:.0f} GB RAM — warn at "
+                f"{warn_gb:.1f} GB, refuse at {refuse_gb:.1f} GB")
+    return (f"**machine:** total RAM unavailable on this platform "
+            f"— falling back to fixed limits (warn "
+            f"{warn_gb:.1f} GB, refuse {refuse_gb:.1f} GB)")
+
+
 def record_volume(spec, *, n_cols=None, budget_gb=None):
     """What THIS run will store, before it stores any of it.
 
@@ -425,20 +686,7 @@ def record_volume(spec, *, n_cols=None, budget_gb=None):
     total = samples * int(n_cols) * RECORD_BYTES_PER_VALUE * n_flown
     gb = total / (1024.0 ** 3)
 
-    ram = system_memory_gb()
-    if budget_gb is not None:
-        budget_gb = float(budget_gb)
-        if not (budget_gb > 0):
-            raise ValueError(
-                f"record_volume: budget_gb must be a positive number of "
-                f"gigabytes, got {budget_gb!r}. Pass None to derive the "
-                f"limit from system RAM instead of declaring one.")
-        warn_gb, refuse_gb = budget_gb * RECORD_WARN_OF_BUDGET, budget_gb
-    elif ram:
-        warn_gb, refuse_gb = (ram * RECORD_WARN_FRACTION,
-                              ram * RECORD_REFUSE_FRACTION)
-    else:
-        warn_gb, refuse_gb = RECORD_WARN_GB_FALLBACK, RECORD_REFUSE_GB_FALLBACK
+    budget_gb, ram, warn_gb, refuse_gb = _record_ceiling(budget_gb)
     tier = ("refuse" if gb >= refuse_gb else
             "warn" if gb >= warn_gb else "ok")
 
@@ -461,18 +709,7 @@ def record_volume(spec, *, n_cols=None, budget_gb=None):
             f"flight is stored ({wanted:,} samples wanted). The size above "
             f"is what is KEPT. Raise rec_every to cover the whole flight "
             f"at the same cost, or raise max_records to keep more.")
-    if budget_gb is not None:
-        lines.append(f"**budget:** {budget_gb:.0f} GB declared for this run"
-                     + (f" (machine has {ram:.0f} GB)" if ram else "")
-                     + f" — warn at {warn_gb:.1f} GB, refuse at "
-                       f"{refuse_gb:.1f} GB")
-    elif ram:
-        lines.append(f"**machine:** {ram:.0f} GB RAM — warn at "
-                     f"{warn_gb:.1f} GB, refuse at {refuse_gb:.1f} GB")
-    else:
-        lines.append(f"**machine:** total RAM unavailable on this platform "
-                     f"— falling back to fixed limits (warn "
-                     f"{warn_gb:.1f} GB, refuse {refuse_gb:.1f} GB)")
+    lines.append(_ceiling_line(budget_gb, ram, warn_gb, refuse_gb))
 
     levers = []
     if tier != "ok":
@@ -497,3 +734,70 @@ def record_volume(spec, *, n_cols=None, budget_gb=None):
                 tier=tier,
                 warn_gb=warn_gb, refuse_gb=refuse_gb,
                 lines=lines, levers=levers, assumed_width=assumed)
+
+
+# A staged packet KEEPS x, y, z, t per region for its drawn traces only
+# (staged_flight.fly_packet); every other ion's region records live for
+# that ion's flight and are dropped, so they are not a retained cost.
+STAGED_TRACE_COLS = 4
+
+
+def staged_record_volume(regions, n_traces, *, budget_gb=None):
+    """What a staged packet flight will KEEP, before it flies.
+
+    regions  : the loaded staged_flight Regions (dt_ns, t_max_us,
+               rec_every, max_records -- the stage overrides already
+               applied by load_assembly).
+    n_traces : how many ions keep their path (trace_keep_count).
+
+    Each region stores at most min(t_max/dt // rec_every + 1,
+    max_records) samples per ion -- the same per-region count
+    record_volume uses -- and a kept trace holds STAGED_TRACE_COLS of
+    them in every region it crosses. Upper bound: a trace is cut at
+    detection and an ion may never reach later regions. Tiered against
+    the same ceiling as record_volume and returns the same keys, so one
+    guard renders both.
+    """
+    n = int(n_traces)
+    per_region, samples = [], 0
+    for rg in regions:
+        dt_us = float(rg.dt_ns) * 1e-3
+        if dt_us <= 0:
+            raise ValueError(f"staged_record_volume: region {rg.name!r} "
+                             f"dt_ns must be positive, got {rg.dt_ns!r}")
+        rec_every = max(int(rg.rec_every), 1)
+        wanted = int(float(rg.t_max_us) / dt_us // rec_every) + 1
+        cap = int(rg.max_records)
+        s = min(wanted, cap) if cap > 0 else wanted
+        per_region.append((rg.name, s, rec_every))
+        samples += s
+    total = samples * STAGED_TRACE_COLS * RECORD_BYTES_PER_VALUE * n
+    gb = total / (1024.0 ** 3)
+    budget_gb, ram, warn_gb, refuse_gb = _record_ceiling(budget_gb)
+    tier = ("refuse" if gb >= refuse_gb else
+            "warn" if gb >= warn_gb else "ok")
+    lines = [
+        f"**staged trajectory record:** {n:,} kept trace(s) x {samples:,} "
+        f"samples over {len(per_region)} region(s) x {STAGED_TRACE_COLS} "
+        f"channels x {RECORD_BYTES_PER_VALUE} B = **{gb:.2f} GB** "
+        f"(upper bound)",
+        "**per region:** " + ", ".join(
+            f"{nm} {s:,} (rec_every {re})" for nm, s, re in per_region),
+        _ceiling_line(budget_gb, ram, warn_gb, refuse_gb),
+    ]
+    levers = []
+    if tier != "ok":
+        big = max(per_region, key=lambda p: p[1])
+        levers.append(f"raise rec_every on stage {big[0]!r} (it holds "
+                      f"{big[1]:,} of the {samples:,} samples per trace)")
+        levers.append(f"lower the instrument's trace fraction/floor: "
+                      f"{n:,} traces -> {max(n // 10, 1):,} is "
+                      f"{gb / 10:.2f} GB")
+        # NOT the single-stage "storage only" lever: staged detect
+        # crossings are found post-hoc on the stored records, so a
+        # coarser rec_every can move an interpolated arrival.
+    return dict(samples_per_ion=samples, n_ions=n,
+                n_cols=STAGED_TRACE_COLS, bytes=int(total), gb=gb,
+                ram_gb=ram, budget_gb=budget_gb, tier=tier,
+                warn_gb=warn_gb, refuse_gb=refuse_gb,
+                lines=lines, levers=levers, per_region=per_region)

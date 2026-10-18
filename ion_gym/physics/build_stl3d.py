@@ -30,6 +30,22 @@ from ion_gym.physics.sim_build import generate_births
 from ion_gym.physics.collision3d import KG_AMU, E_CHG
 from ion_gym.physics.solver3d import solve_bases
 from ion_gym.physics.tracer3d import fly3d
+from ion_gym.physics.raster2d import BirthInMetal
+# THE basis excitation (one definition, build_planar): solved at V_BASIS,
+# divided out to unit bases (L-552: this module retyped it locally).
+from ion_gym.physics.build_planar import V_BASIS
+
+# 3-D basis-solve settings, named rather than written into the calls
+# (L-552). Not in the cache key: they set the convergence target, and
+# changing them must not silently invalidate every user's banked bases.
+STL3D_SOLVE_TOL = 1e-4      # relative residual target, multigrid and SOR
+STL3D_SOR_OMEGA = 1.9       # SOR over-relaxation (fallback solver only)
+# The cache-key TEXT for the basis excitation. It must stay these exact
+# bytes ("1e4", not f"{V_BASIS:g}" = "10000"): every basis banked by a
+# user is keyed on them, and a re-key would re-solve every 3-D geometry
+# once for no physical change (PI ruling 2026-10-15). Tied to V_BASIS
+# by the check in _bases_cache_key, so the two cannot drift apart.
+_KEY_V_BASIS_TEXT = "1e4"
 
 # tracer3d kinds (0 impact / 1 left box / 2 timeout) are IDENTICAL to the
 # ion_gym fate convention — no remap. (An earlier remap here was wrong;
@@ -283,13 +299,23 @@ class Stl3DModel:
                 for i2, EK in enumerate((f["ExK"], f["EyK"], f["EzK"])):
                     ent[i2] = ent[i2] + amp * c * EK[kk][sl]
                     ent[3 + i2] = ent[3 + i2] + amp * sph * EK[kk][sl]
-            else:                      # square/cos: per-channel Dehmelt
+            elif int(kinds[kk]) in (1, 2):   # cos / square: per-channel
+                # Dehmelt; the square carries its harmonic sum pi^2/6
                 e0_sq = (f["ExK"][kk][sl] ** 2 + f["EyK"][kk][sl] ** 2
                          + f["EzK"][kk][sl] ** 2) * (amp * 1e3) ** 2
                 fac = (math.pi ** 2 / 6.0) if int(kinds[kk]) == 2 else 1.0
                 om = om_us * 1e6
                 pe = pe + charge * ((charge * E_CHG) * e0_sq * fac
                                     / (4 * m_kg * om ** 2))
+            else:
+                # tables (kinds 3/4) and anything unnamed: no adiabatic
+                # envelope. This else once caught tables as sinusoids
+                # (fac 1.0) and drew a wrong surface silently (L-520);
+                # refused exactly as build_planar's pe_surface does.
+                raise ValueError(
+                    f"pe_surface: drive group {gr.name!r} (waveform kind "
+                    f"{int(kinds[kk])}) has no adiabatic envelope -- use "
+                    f"pe_mode='instant'.")
         for om_us, ent in quad.items():
             e0_sq = sum(np.asarray(c2) ** 2 for c2 in ent) * 1e6
             om = om_us * 1e6
@@ -385,7 +411,7 @@ def _display_rf_pair(spec, bases, shape):
     return top, B
 
 
-def _drive_reweight_key(spec, bases):
+def _drive_reweight_key(spec, bases, ele):
     """Key for the EXPENSIVE, drive-INDEPENDENT part of the compose: the
     per-group E-field GRADIENTS. These depend only on geometry, the
     electrode->group MEMBERSHIP, the metal mask, and the field method —
@@ -414,6 +440,9 @@ def _drive_reweight_key(spec, bases):
         b = np.asarray(bases[i])
         fp.update(str(i).encode())
         fp.update(np.ascontiguousarray(b[::4, ::4, ::4]).tobytes())
+    # the METAL MASK the one-sided gradient keys on, hashed in FULL (a
+    # surface edit can be a single voxel, which a stride could skip)
+    ele_fp = hashlib.sha256(np.ascontiguousarray(ele).tobytes()).hexdigest()
     payload = {
         "shape": list(shape),
         "pitch": float(g.mm_per_gu),
@@ -421,6 +450,7 @@ def _drive_reweight_key(spec, bases):
         "channel_dtype": getattr(g, "channel_dtype", "float64"),
         "membership": membership,
         "bases_fp": fp.hexdigest(),
+        "ele_fp": ele_fp,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -454,8 +484,16 @@ def unsupported_drive_features(spec):
 
 
 
-def compose_drive_channels(spec, bases, verbose=False):
+def compose_drive_channels(spec, bases, ele, verbose=False):
     """(EA, channels) for the 3-D flight from DECLARED drive groups.
+
+    `ele` is the RASTERED LABEL GRID (electrode index per voxel, 0 =
+    vacuum; same shape as every basis) -- the one geometry the solve used.
+    The electrode-aware gradient applies its one-sided rule at voxels
+    next to it, so it is REQUIRED (L-518): the builder used to hand it
+    over by setting an attribute on the bases dict, which always failed
+    silently, and the composer then GUESSED metal as basis > 0.5 -- the
+    real electrode plus a shell of vacuum around it.
 
     Supersedes _compose_AB (which handled ONE frequency and phases 0/180
     only). Now every RFGroupSpec becomes ONE affine drive CHANNEL over
@@ -484,6 +522,12 @@ def compose_drive_channels(spec, bases, verbose=False):
     groups = {gr.name: gr for gr in g.rf_groups}
     shape = next(iter(bases.values())).shape
     h = g.mm_per_gu
+    ele = np.asarray(ele)
+    if ele.shape != shape:
+        raise ValueError(
+            f"compose_drive_channels: label grid shape {ele.shape} does not "
+            f"match the bases {shape}; pass the label grid the solve "
+            f"rastered (after any mirror unfold).")
     # DECLARED field-build options (GeometrySpec): electrode-aware vs plain
     # gradient, and stored channel precision. Defaults preserve current
     # behavior (electrode_aware, float64).
@@ -534,7 +578,6 @@ def compose_drive_channels(spec, bases, verbose=False):
     tab_t, tab_v, tab_off = [], [], [0]
     ch_name = []            # group name per channel, for consumers that
                             # must say which drive a channel is (exports)
-    ele = _ele_from_bases(spec, bases)     # metal mask for edge-aware grad
     # PROGRESS: the per-group gradient passes below are the work that runs
     # AFTER the last [vmg] line (the bases solve) — a full-grid gradient
     # each, ~as costly as a solve cycle, with NO logging before this. On a
@@ -557,7 +600,7 @@ def compose_drive_channels(spec, bases, verbose=False):
     # app; a new key clears the old slot (frees the old grids). Lazily
     # filled per group, so a group toggled from amplitude 0 to non-zero
     # just computes its gradient on first need.
-    _rw_key = _drive_reweight_key(spec, bases)
+    _rw_key = _drive_reweight_key(spec, bases, ele)
     _rw = _COMPOSE_GRAD_CACHE.get(_rw_key)
     if _rw is None:
         _COMPOSE_GRAD_CACHE.clear()
@@ -661,22 +704,6 @@ def compose_drive_channels(spec, bases, verbose=False):
     return channels
 
 
-def _ele_from_bases(spec, bases):
-    """Metal label grid for edge-aware gradients: reuse the masks the
-    solve rastered (never a second geometry). Falls back to nonzero-basis
-    union only if a builder didn't stash them."""
-    import numpy as np
-    m = getattr(bases, "ele", None)
-    if m is not None:
-        return m
-    shape = next(iter(bases.values())).shape
-    ele = np.zeros(shape, np.int16)
-    for i in sorted(bases):
-        # a solved basis is ~1.0 on its own electrode; label that region
-        ele[bases[i] > 0.5] = i
-    return ele
-
-
 
 def _declared_mirror_axes(spec):
     """THE ONE authority for declared mirror planes on the 3-D routes.
@@ -741,7 +768,14 @@ def _bases_cache_key(spec, geom_bytes=None, tag="stl3d-v1"):
     # which is correct rather than merely tidy -- a cache entry should not
     # outlive the vocabulary that describes it. First run after this change
     # re-solves; subsequent runs hit as before.
-    h.update(f"{pitch:.9g}|{nx}|{ny}|{nz}|{tag}|ghost_linear|1e4".encode())
+    if float(_KEY_V_BASIS_TEXT) != V_BASIS:
+        raise ValueError(
+            f"_bases_cache_key: the key text {_KEY_V_BASIS_TEXT!r} no longer "
+            f"matches V_BASIS = {V_BASIS!r}. Bases solved at a different "
+            f"excitation are not interchangeable: change both deliberately "
+            f"(a re-key re-solves every banked 3-D geometry once).")
+    h.update(f"{pitch:.9g}|{nx}|{ny}|{nz}|{tag}|ghost_linear|"
+             f"{_KEY_V_BASIS_TEXT}".encode())
     return {f"{tag}_bases": h.hexdigest()}
 
 
@@ -799,7 +833,6 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
         t_vox = time.time() - t0
 
         t0 = time.time()
-        V_BASIS = 1e4          # solver headroom; normalize to unit bases
         # Corrected multigrid (this session's fix: honest full-cycle
         # convergence + verified symmetric-subspace projection). A full 3-D
         # user STL scene is exactly the large, open problem SOR crawls on
@@ -813,11 +846,12 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
             # the field with a DIFFERENT SOLVER, unannounced.
             print(f"[stl3d] multigrid unavailable ({e}); solving by SOR")
             bases = solve_bases(masks, mirror=mirror_axes,
-                                v_basis=V_BASIS, tol=1e-4, stencil="ghost_linear",
-                                verbose=verbose, omega=1.9)
+                                v_basis=V_BASIS, tol=STL3D_SOLVE_TOL,
+                                stencil="ghost_linear", verbose=verbose,
+                                omega=STL3D_SOR_OMEGA)
         else:
             bases = solve_bases_mg(masks, mirror=mirror_axes,
-                                   v_basis=V_BASIS, tol=1e-4,
+                                   v_basis=V_BASIS, tol=STL3D_SOLVE_TOL,
                                    stencil="ghost_linear", verbose=verbose)
         bases = {i: (b / V_BASIS).astype(np.float32)
                  for i, b in bases.items()}
@@ -883,16 +917,13 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
         ele[masks[idx]] = int(idx)
     metal = ele > 0
     h = spec.geometry.mm_per_gu
-    # expose the label grid to the composer's edge-aware gradients
-    try:
-        bases.ele = ele
-    except AttributeError:
-        pass
 
     # MULTIDRIVE: one channel per declared group; an electrode may join
     # several (ElectrodeSpec.group_names) plus DC. Supersedes the single
     # A/B sin pair. The tracer sums channels with per-channel waveforms.
-    channels = compose_drive_channels(spec, bases, verbose=verbose)
+    # The label grid goes in EXPLICITLY (L-518; it was stashed as an
+    # attribute on a plain dict, which always failed silently).
+    channels = compose_drive_channels(spec, bases, ele, verbose=verbose)
     # A7 SYMMETRY GATE: after EVERY mirrored build, prove —
     # never assume — that the unfolded potentials are bit-symmetric
     # about each declared plane and that the normal E component is
@@ -1060,7 +1091,7 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
     # LOUD capacity check (the old silent 100k cap hid mid-flight
     # truncation): announce BEFORE flying if the recording cannot cover
     # t_max, with the numbers and the levers.
-    _mrec = int(getattr(integ, "max_records", 100000))
+    _mrec = int(integ.max_records)    # the spec's field, no local default (L-557)
     _need = int(integ.t_max_us * 1e3 / (integ.dt_ns * max(int(integ.rec_every), 1))) + 2
     if _need > _mrec:
         _t_cover = _mrec * integ.dt_ns * max(int(integ.rec_every), 1) * 1e-3
@@ -1069,6 +1100,11 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
               f"({_need} records needed, max_records={_mrec}). Traces will "
               f"truncate mid-flight (announced per ion). Raise "
               f"integration.max_records or rec_every to cover the flight.")
+
+    _edge3d = {}     # residual edge field, measured once on first need
+    # the drift extension can only act on a declared station or bound; a
+    # deck with neither never enters it (and never measures the edge)
+    _declares_downstream = bool(spec.stations) or any(bnd.as_tuple()[0])
 
     def fly_fn(i):
         b = births[i]
@@ -1103,38 +1139,46 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
         # dispatch belongs HERE, in the module that owns the native 3-D
         # flight, so it survives the removal of the import route.
         _model = str(getattr(coll, "model", "hs")).lower() if coll else ""
-        if coll is not None and _model == "sds":
-            from ion_gym.physics.tracer3d import fly3d_sds
-            out = fly3d_sds(fields, env.mz, spec.source.charge,
-                            (b[0], b[1], b[2]),
-                            (b[3], b[4], b[5]),
-                            b[6], coll,
-                            dt_ns=integ.dt_ns, t_max_us=integ.t_max_us,
-                            record_every=max(int(integ.rec_every), 1),
-                            max_records=_mrec, seed=env.seed,
-                            ion_label=f"ion {i}",
-                            # stations + declared bounds, same list the
-                            # HS path gets: the model choice must not
-                            # change which declarations a run obeys.
-                            planes=_plane_list())
-        elif coll is not None and _model not in ("hs", ""):
+        if coll is not None and _model not in ("hs", "sds", ""):
             raise ValueError(
                 f"build_stl3d: unknown collisions.model {_model!r} on the "
                 f"native 3-D route; known models are 'hs' and 'sds'. "
                 f"Refusing to fly a different model than the spec declares.")
-        else:
-            out = fly3d(fields, env.mz,
-                        (b[0], b[1], b[2]),
-                        (b[3], b[4], b[5]),
-                        b[6],
-                        dt_ns=integ.dt_ns, t_max_us=integ.t_max_us,
-                        record_every=max(int(integ.rec_every), 1),
-                        max_records=_mrec,
-                        collisions=coll,
-                        seed=env.seed,
-                        planes=_plane_list(), ion_label=f"ion {i}",
-                        transporter=spec.transporter,
-                        charge=spec.source.charge)      # q/m = charge*e/m
+        try:
+            if coll is not None and _model == "sds":
+                from ion_gym.physics.tracer3d import fly3d_sds
+                out = fly3d_sds(fields, env.mz, spec.source.charge,
+                                (b[0], b[1], b[2]),
+                                (b[3], b[4], b[5]),
+                                b[6], coll,
+                                dt_ns=integ.dt_ns, t_max_us=integ.t_max_us,
+                                record_every=max(int(integ.rec_every), 1),
+                                max_records=_mrec, seed=env.seed,
+                                ion_label=f"ion {i}",
+                                # stations + declared bounds, same list the
+                                # HS path gets: the model choice must not
+                                # change which declarations a run obeys.
+                                planes=_plane_list())
+            else:
+                out = fly3d(fields, env.mz,
+                            (b[0], b[1], b[2]),
+                            (b[3], b[4], b[5]),
+                            b[6],
+                            dt_ns=integ.dt_ns, t_max_us=integ.t_max_us,
+                            record_every=max(int(integ.rec_every), 1),
+                            max_records=_mrec,
+                            collisions=coll,
+                            seed=env.seed,
+                            planes=_plane_list(), ion_label=f"ion {i}",
+                            transporter=spec.transporter,
+                            charge=spec.source.charge)  # q/m = charge*e/m
+        except BirthInMetal as e:
+            # splat at birth + warning; the other ions fly (the one rule,
+            # ion_envelope.birth_splat). Recorded in the CANONICAL frame
+            # the route hands out (births[i], before the field shift).
+            from ion_gym.physics.ion_envelope import birth_splat
+            return birth_splat(e, col_names=col_names, birth=births[i],
+                               mz=env.mz, label=f"ion {i}")
         n = len(out["x"])
         # HONOR spec.integration.record_channels (the
         # 3-D route once hardcoded [t..vz,e_x,e_y,e_z] and ignored the recording
@@ -1176,14 +1220,16 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
             "e_radial": np.sqrt(_ex_a ** 2 + _ey_a ** 2),
             "e_x": _ex_a, "e_y": _ey_a, "e_z": _ez_a,
             "radius": np.sqrt(out["x"][:n] ** 2 + out["y"][:n] ** 2),
-            # KERNEL-DEPENDENT channels. The SDS kernel is a continuum
-            # mobility+diffusion model: it has no discrete collision count
-            # and no wrap bookkeeping, so these are ABSENT rather than zero.
-            # None here means "this kernel cannot produce it"; requesting it
-            # REFUSES below instead of writing a lie -- a silent 0
-            # collisions would read as a collisionless flight.
-            "n_col": (np.full(n, float(out["ncol"])) if "ncol" in out
-                      else None),
+            # KERNEL-DEPENDENT channels. n_col follows THE collision-count
+            # rule every route applies (sds.SDS_NO_COLLISION_COUNT, PI
+            # 2026-10-14): NaN under SDS (no discrete collisions exist --
+            # never a 0, which would read as a collisionless flight), and
+            # for HS the kernel's own count, read directly so a kernel
+            # that omits it raises rather than defaults. wrap_passes: None
+            # means "this kernel cannot produce it" and requesting it
+            # REFUSES below.
+            "n_col": (np.full(n, np.nan) if _model == "sds"
+                      else np.full(n, float(out["ncol"]))),
             "wrap_passes": (out["wrap_passes"][:n].astype(float)
                             if "wrap_passes" in out else None),
         }
@@ -1226,9 +1272,34 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
         _ex = float(_fx) + _off[0]
         _ey = float(_fy) + _off[1]
         _ez = float(_fz) + _off[2]
+        _kind, _tof = int(out["kind"]), float(out["tof_us"])
+        # DRIFT EXTENSION (L-286): an ion that left the solved box toward
+        # a declared station or bound beyond it gets ONE analytically
+        # exact ballistic record (physics.drift_extension -- the same
+        # function the planar and r-z routes call), ending on a
+        # terminating station or bound with its fate. Not on a truncated
+        # record: its last row is not the exit state.
+        if (_kind == 1 and n and _declares_downstream
+                and not bool(out.get("truncated", False))):
+            from ion_gym.physics.drift_extension import (
+                extend_ballistic, pack_edge_fields, pack_escape_face)
+            _fk, _fa, _fs, _fn = pack_escape_face(fields, (_fx, _fy, _fz))
+            if "edge" not in _edge3d:
+                _edge3d["edge"] = pack_edge_fields(fields)
+            _tr, _kind, _xt = extend_ballistic(
+                tr[:n], col_names, _kind, spec,
+                edge_e_vpermm=_edge3d["edge"][_fk], face_axis=_fa,
+                face_side=_fs, edge_face=_fn,
+                derived={"radius": lambda prev, row, idx, dt:
+                         math.hypot(row[idx["x"]], row[idx["y"]])},
+                label=f"ion {i}")
+            if _xt is not None:
+                tr, n = _tr, n + 1
+                _ex, _ey, _ez = _xt["end_mm"]
+                _tof = float(tr[-1, 0])
         from ion_gym.physics.ion_envelope import make_summary
-        summ = make_summary(kind=int(out["kind"]),
-                    tof=float(out["tof_us"]), mz=env.mz,
+        summ = make_summary(kind=_kind,
+                    tof=_tof, mz=env.mz,
                     x_end=_ex, y_end=_ey, z_end=_ez,
                     ke_end=float(out["KE_eV"]),
                     vx_end=float(_v[0]), vy_end=float(_v[1]),
@@ -1241,12 +1312,11 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
                     # diagnosis (a buffer-gas-thermalised ion reported ZERO
                     # collisions). Direct access: a provider that omits ncol
                     # now raises, it does not default.
-                    # ncol ABSENT means the kernel does not count discrete
-                    # collisions (SDS is a continuum model) -- pass None so
-                    # downstream shows "not tracked" rather than a false 0.
-                    # A kernel that DOES count still must provide it: no
-                    # silent default.
-                    n_col=(int(out["ncol"]) if "ncol" in out else None),
+                    # Under SDS (no discrete collisions) the count is None,
+                    # the rule every route applies -- downstream shows
+                    # nothing rather than a false 0. A kernel that DOES
+                    # count must provide it: no silent default.
+                    n_col=(None if _model == "sds" else int(out["ncol"])),
                     truncated=bool(out.get("truncated", False)),
                     t_end_us=float(out.get("t_end_us",
                                            out["tof_us"])))

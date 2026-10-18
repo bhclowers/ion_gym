@@ -470,6 +470,15 @@ def _metal_nn(ele, gx, gy, nx, ny):
     return ele[i, j] > 0.5
 
 
+class BirthInMetal(ValueError):
+    """An ion whose BIRTH lies inside metal. Raised by every route's birth
+    refusal (this module's refuse_birth_in_metal, tracer3d's 3-D twin,
+    tracer_tw2d). It is a fact about that ION, so a packet flight records
+    it as that ion's loss (staged_flight.fly_packet, PI ruling 2026-10-15)
+    while every other refusal aborts the packet. Still a ValueError for
+    every existing caller."""
+
+
 def refuse_birth_in_metal(ele, gx, gy, h, spec, i, pos_txt):
     """Nearest-node refusal: a birth inside the
     effective metal shell used to die silently at step 1 (the recorded
@@ -488,7 +497,7 @@ def refuse_birth_in_metal(ele, gx, gy, h, spec, i, pos_txt):
         names = {k: el.name
                  for k, el in enumerate(spec.geometry.electrodes, start=1)}
         lbl = int(ele[gi, gj])
-        raise ValueError(
+        raise BirthInMetal(
             f"ion {i} birth at {pos_txt} lies inside the effective "
             f"metal of electrode {names.get(lbl, lbl)!r} (nearest-node "
             f"rule, node pitch {h} mm): move the source or shrink its "

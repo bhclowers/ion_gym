@@ -37,7 +37,10 @@ from ion_gym.physics.ion_envelope import FATE_COLOR  # noqa: F401
 # channel. Name-based — resolved through TrajRecord over the
 # guaranteed BASE_CHANNELS prefix (column_names() always puts
 # [t,x,y,z,vx,vy,vz] first, so the prefix schema holds for every run).
-_PLANE_TRAJ_AXES = {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("y", "z")}
+# "rz": the r-z record frame is x = axial, y = radial (RZModel.PLANES);
+# it was reached only through a silent ('x', 'y') fallback (L-554)
+_PLANE_TRAJ_AXES = {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("y", "z"),
+                    "rz": ("x", "y")}
 _PLANE_NORMAL_AXIS = {"xy": "z", "xz": "y", "yz": "x"}
 
 # THE default 3-D view every PE figure has always used; camera=None
@@ -534,7 +537,11 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
             from ion_gym.io.records import TrajRecord
             from ion_gym.io.sim_spec import BASE_CHANNELS
             rec = TrajRecord(tr[:, :len(BASE_CHANNELS)], BASE_CHANNELS)
-            ca, cb = _PLANE_TRAJ_AXES.get(plane, ("x", "y"))
+            if plane not in _PLANE_TRAJ_AXES:
+                raise ValueError(
+                    f"pe_figure_3d: no trajectory axes for plane {plane!r} "
+                    f"(known: {sorted(_PLANE_TRAJ_AXES)})")
+            ca, cb = _PLANE_TRAJ_AXES[plane]
             xs, ys = rec[ca], rec[cb]
             if _norm_pos is not None:
                 near = np.abs(rec[_norm_ax] - _norm_pos) <= _slab
@@ -543,7 +550,11 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                     continue
                 xs, ys = xs[near], ys[near]
             zs = samp(np.column_stack([xs, ys])) + lift
-            kind = r.summary.get("kind", 2)
+            # a summary without a fate is UNKNOWN (grey), never a timeout
+            # (L-530: this defaulted to 2)
+            from ion_gym.physics.ion_envelope import (summary_fate,
+                                                      fate_color)
+            kind = summary_fate(r.summary)
             # TRAJECTORY COLOUR: fate-coloured by
             # DEFAULT -- the fate is a declared property of the flight and
             # colouring by it costs the reader nothing. But the default is
@@ -555,9 +566,9 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
             #   traj_color={0: "#d62728", 2: "#00e5ff"} -> per-fate
             #                        override, falling back to FATE_COLOR
             if traj_color is None:
-                colour = FATE_COLOR.get(kind, "#1f77b4")
+                colour = fate_color(kind)       # the one table; unknown grey
             elif isinstance(traj_color, dict):
-                colour = traj_color.get(kind, FATE_COLOR.get(kind, "#1f77b4"))
+                colour = traj_color.get(kind, fate_color(kind))
             else:
                 colour = traj_color
             fig.add_scatter3d(

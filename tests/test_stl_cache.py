@@ -23,17 +23,28 @@ from pathlib import Path
 
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from ion_gym.physics.build_stl import quad_stl_spec, build_stl_run, _STL_BUILD_CACHE
+from ion_gym.physics.build_stl import build_stl_run, _STL_BUILD_CACHE
+from ion_gym.io.sim_spec import SimSpec
+
+# THE quad fixture: four STL rods + their deck, generated once from the
+# retired examples/stl_demos generator (2026-08-18 pattern, D6c). A fresh
+# SimSpec per call, so an edit to one build never leaks into the next.
+QUAD = Path(__file__).parent / "fixtures" / "stl_quad" / \
+    "quad_stl_transport.json"
+
+
+def quad_spec():
+    return SimSpec.from_json(str(QUAD))
 
 
 def main():
     ok = True
     _STL_BUILD_CACHE.clear()
 
-    spec = quad_stl_spec("/tmp/quad_cache_test")
-    # warm the numba JIT on a throwaway geometry so timing reflects the
-    # solve, not compilation
-    build_stl_run(quad_stl_spec("/tmp/quad_cache_warm"), ground_border=True)
+    spec = quad_spec()
+    # warm the numba JIT so timing reflects the solve, not compilation
+    # (the cache is cleared after, so the timed build below still solves)
+    build_stl_run(quad_spec(), ground_border=True)
 
     _STL_BUILD_CACHE.clear()
     t0 = time.time()
@@ -65,22 +76,29 @@ def main():
     print(f"K-2 reweight correct: dA(+x probe) = {dA:.3f} V for +10 V on "
           f"rod 1 (expect >0)  ->  {'PASS' if g2 else 'FAIL'}")
 
-    # K-3: changing the grid is a real geometry change -> re-solve (miss)
-    spec2 = quad_stl_spec("/tmp/quad_cache_test2")
-    spec2.geometry.mm_per_gu = 0.2
+    # K-3: changing the grid is a real geometry change -> re-solve (miss).
+    # The pitch MUST differ from the deck's: this set 0.2, the deck's own
+    # pitch, and passed only because each spec wrote its STLs to a fresh
+    # /tmp folder (a new path is a new cache key) -- the gate was never
+    # testing the grid. 0.1 halves the pitch and keeps every lattice
+    # extent conforming (they are multiples of 0.2).
+    spec2 = quad_spec()
+    pitch0 = spec2.geometry.mm_per_gu
+    spec2.geometry.mm_per_gu = pitch0 / 2.0
     t0 = time.time()
     build_stl_run(spec2, ground_border=True)
     t_grid = time.time() - t0
     g3 = t_grid > 0.3     # a real solve, not a cache hit
     ok &= g3
-    print(f"K-3 grid invalidates: mm_per_gu 0.15->0.2 re-solved in "
+    print(f"K-3 grid invalidates: mm_per_gu {pitch0:g}->"
+          f"{spec2.geometry.mm_per_gu:g} re-solved in "
           f"{t_grid:.2f}s  ->  {'PASS' if g3 else 'FAIL'}")
 
     # K-4: build_needs_solve predicts fresh->True, cached->False. This is
     # what the UI uses to show a solving spinner only when it'll be slow.
     from ion_gym.physics.sim_build import build_needs_solve
     _STL_BUILD_CACHE.clear()
-    fresh = quad_stl_spec("/tmp/quad_predict")
+    fresh = quad_spec()
     pred_fresh = build_needs_solve(fresh)
     build_stl_run(fresh, ground_border=True)      # now cached
     pred_cached = build_needs_solve(fresh)

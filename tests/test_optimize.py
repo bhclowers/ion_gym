@@ -1,8 +1,21 @@
 """Gate: CMA-ES over a SimSpec recovers a better einzel focus than both the
 unfocused lens and the hand-tuned -800 V reference (known-answer physics)."""
-import tempfile
-from ion_gym.physics.build_stl import einzel3d_spec
+from pathlib import Path
+from ion_gym.io.sim_spec import SimSpec
 from ion_gym.physics.optimize import OptimizeSpec, optimize, _evaluate
+
+# THE einzel fixture: three apertured STL plates + their deck, generated
+# once from the retired examples/stl_demos generator (2026-08-18 pattern,
+# D6c). The deck's lens plate (electrodes[1]) is at -800 V; each test
+# starts it at 0 V, the unfocused reference.
+EINZEL = Path(__file__).parent / "fixtures" / "stl_einzel3d" / \
+    "einzel3d_stl.json"
+
+
+def einzel_spec(lens_v):
+    spec = SimSpec.from_json(str(EINZEL))
+    spec.geometry.electrodes[1].dc = float(lens_v)
+    return spec
 
 # LOUD SKIP: the STL boolean path needs a trimesh boolean backend
 # (manifold3d or blender) — an optional dependency, absent -> named
@@ -17,7 +30,7 @@ except ImportError:
 
 
 def test_einzel_focus_recovery():
-    base = einzel3d_spec(tempfile.mkdtemp(), lens_v=0.0)
+    base = einzel_spec(lens_v=0.0)
     base.source.n_ions = 8
     osp = OptimizeSpec(params=["geometry.electrodes[1].dc"],
                        lo=[-2000.0], hi=[0.0], metric="exit_radius",
@@ -54,7 +67,7 @@ def test_noisy_objective_crn_audit():
     vacuum-era side-claim r800 < r0 is retired — the trust condition is
     beating BOTH references, whichever order they fall in."""
     import math
-    base = einzel3d_spec(tempfile.mkdtemp(), lens_v=0.0)
+    base = einzel_spec(lens_v=0.0)
     base.source.n_ions = 8
     base.collisions.enabled = True
     base.collisions.gas = "He"

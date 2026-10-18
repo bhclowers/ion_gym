@@ -656,7 +656,10 @@ def test_V15_models_declare_their_planes_and_nothing_sniffs_a_signature():
     #    plane" when what actually happened was that their solver threw.
     class Exploding:
         PLANES = ("xy", "xz", "yz")
-        def pe_surface(self, mz=None, charge=1, plane="xy"):
+        # the CURRENT pe_surface signature (t_us joined it with the lab-time
+        # view, L-562), so the call reaches the body and the TypeError
+        # raised there is the one under test
+        def pe_surface(self, mz=None, charge=1, plane="xy", t_us=0.0):
             raise TypeError("unsupported operand type(s) for *: 'NoneType'")
     with pytest.raises(TypeError, match="NoneType"):
         pe_view.compute_component(Exploding(), 100.0, 1, "effective",
@@ -666,7 +669,7 @@ def test_V15_models_declare_their_planes_and_nothing_sniffs_a_signature():
     #    the message says what it DOES have.
     class RZLike:
         PLANES = ("rz",)
-        def pe_surface(self, mz=None, charge=1, plane="rz"):
+        def pe_surface(self, mz=None, charge=1, plane="rz", t_us=0.0):
             raise AssertionError("must never be reached")
     with pytest.raises(ValueError, match=r"has no 'yz' plane.*'rz'"):
         pe_view.compute_component(RZLike(), 100.0, 1, "effective", plane="yz")
@@ -674,7 +677,7 @@ def test_V15_models_declare_their_planes_and_nothing_sniffs_a_signature():
     # 5. and the default plane is the model's OWN first plane, not "xy".
     class RZOk:
         PLANES = ("rz",)
-        def pe_surface(self, mz=None, charge=1, plane="rz"):
+        def pe_surface(self, mz=None, charge=1, plane="rz", t_us=0.0):
             assert plane == "rz"
             n = np.zeros((4, 4))
             return np.arange(4.), np.arange(4.), n, n.astype(np.int16)
@@ -970,3 +973,81 @@ def test_V20_pe_view_keeps_electrode_identity_and_never_omits_the_overlay():
     with pytest.raises(ValueError, match="BOOLEAN ele"):
         pe_view.pe_figure_3d(surface=(x, y, PE, (ele > 0)),
                              electrode_dc={1: -100.0}, metal_mode="dc")
+
+
+def _analysis_series():
+    """Four ions: m/z 100 struck metal, m/z 1234.5678 detected, m/z 100 with
+    the unknown fate, and one with no recorded m/z (timeout)."""
+    from ion_gym.physics.ion_envelope import UNKNOWN_FATE
+    t = np.linspace(0.0, 1.0, 5)
+    return [V.AnalysisSeries(ion=i, x=t, y=t * (i + 1), mz=mz, fate=f)
+            for i, (mz, f) in enumerate([(100.0, 0), (1234.5678, 6),
+                                         (100.0, UNKNOWN_FATE), (None, 2)])]
+
+
+def test_V21_analysis_figure_groups_every_ion_by_name():
+    """L-548/L-530 (D3): the Analysis tab's figure. Colouring by fate or m/z
+    is honoured in EVERY kind (single-stage trajectory mode drew one series),
+    the unknown fate and the unknown m/z are named groups (they were dropped
+    or given a stand-in), and no ion is lost from any grouping."""
+    from ion_gym.physics.ion_envelope import fate_name, UNKNOWN_FATE
+    s = _analysis_series()
+    kw = dict(palette=["#111111", "#222222"], x_label="t", y_label="x",
+              title="probe")
+    for kind in V.ANALYSIS_KINDS:
+        fig, _ = V.analysis_figure(s, kind=kind, group="fate", **kw)
+        names = {tr.name for tr in fig.data}
+        assert names == {fate_name(k) for k in (0, 6, UNKNOWN_FATE, 2)}, (
+            kind, names)
+        n = sum(int(np.isfinite(np.asarray(tr.x, float)).sum())
+                for tr in fig.data)
+        assert n == sum(len(x.x) for x in s), (kind, n)
+        fig, _ = V.analysis_figure(s, kind=kind, group="m/z", **kw)
+        assert [tr.name for tr in fig.data] == [
+            "m/z 100", "m/z 1234.5678", "m/z unknown"], kind
+    # unknown kind / group refused by name, never drawn as something else
+    with pytest.raises(ValueError, match="kind"):
+        V.analysis_figure(s, kind="scatter", group="ion", **kw)
+    with pytest.raises(ValueError, match="group"):
+        V.analysis_figure(s, kind="traj", group="charge", **kw)
+
+
+def test_V21_analysis_trace_cap_is_reported():
+    s = _analysis_series()
+    fig, info = V.analysis_figure(s, kind="traj", group="ion",
+                                  palette=["#111111"], x_label="t",
+                                  y_label="x", title="probe",
+                                  max_ion_traces=2)
+    assert len(fig.data) == 2 and info["ion_traces_capped"]
+    fig, info = V.analysis_figure(s, kind="traj", group="ion",
+                                  palette=["#111111"], x_label="t",
+                                  y_label="x", title="probe")
+    assert len(fig.data) == 4 and not info["ion_traces_capped"]
+
+
+def test_V21_mz_key_round_trips_the_flown_value():
+    """L-552 (D3): the selector offered '%g' labels (6 figures) and matched
+    them to the flown value within 1e-9, so m/z 1234.5678 could never be
+    selected. The offered key IS the match key."""
+    for mz in (100.0, 1234.5678, 0.001234, 56789.01234):
+        assert float(V.mz_key(mz)) == mz
+    assert V.mz_key(100) == V.mz_key(100.0) == "100"
+
+
+def test_V22_hotspot_map_is_the_binned_maximum_at_the_stated_floor():
+    """L-548 (D4): the hot-spot map. Each cell is the MAXIMUM KE in it, the
+    count is cells >= the stated threshold (0 is a threshold, not blank),
+    and a non-positive cell size is refused, not replaced."""
+    pytest.importorskip("scipy")
+    x = np.array([0.1, 0.2, 3.9, 3.8, 2.0])
+    y = np.array([0.1, 0.2, 3.9, 3.8, 2.0])
+    ke = np.array([0.01, 5.0, 0.02, 0.03, 0.04])   # one hot sample, cold peers
+    fig, n_hot = V.hotspot_figure(x, y, ke, threshold_ev=1.0, cell_mm=1.0)
+    assert n_hot == 1, n_hot             # the lone 5 eV sample is not hidden
+    z = np.array(fig.data[0].z, dtype=float)
+    assert np.nanmax(z) == 5.0
+    _, n_all = V.hotspot_figure(x, y, ke, threshold_ev=0.0, cell_mm=1.0)
+    assert n_all == 3, n_all             # every VISITED cell
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError, match="cell_mm"):
+            V.hotspot_figure(x, y, ke, threshold_ev=1.0, cell_mm=bad)

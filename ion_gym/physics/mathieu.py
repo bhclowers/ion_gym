@@ -80,6 +80,26 @@ def hill_beta_njit(a, q, square=False):
     return np.arccos(tr) / np.pi
 
 
+def rf_amplitude_for_q(q, mz, r0_mm, freq_hz, charge=1):
+    """RF amplitude V (volts, 0-peak) that puts an ion of mass mz (Da) at
+    Mathieu q in an ideal quadrupole of field radius r0_mm driven at
+    freq_hz:  q = 4 z e V / (m r0^2 Omega^2)  ->  V = q m r0^2 Omega^2 /
+    (4 z e). The standard mass-filter relation; geometry-agnostic (any r0,
+    any frequency, any charge).
+
+    Moved here from build_stl._q_to_rf_amp (D6b, 2026-10-16): it is
+    quadrupole physics, not part of the STL quad demo that used it."""
+    from ion_gym.physics.constants import E_CHG, KG_AMU
+    if not (r0_mm > 0 and freq_hz > 0 and charge):
+        raise ValueError(f"rf_amplitude_for_q: need r0_mm > 0, freq_hz > 0 "
+                         f"and a non-zero charge (got r0_mm={r0_mm}, "
+                         f"freq_hz={freq_hz}, charge={charge})")
+    m = mz * KG_AMU
+    omega = 2.0 * np.pi * freq_hz
+    r0 = r0_mm / 1000.0
+    return q * m * r0 ** 2 * omega ** 2 / (4.0 * charge * E_CHG)
+
+
 def compare_to_reference(npz_path, tol=1e-9):
     """Acceptance gate against the exported V02 reference maps.
 

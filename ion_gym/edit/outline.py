@@ -44,7 +44,7 @@ import math
 from typing import List, Optional, Tuple
 
 from ion_gym.edit.policy import (EditRefusal, deck_extrude_axis,
-                                 viewer_frame)
+                                 inplane_domain_mm, viewer_frame)
 from ion_gym.edit.session import EditSession, normalize_color
 
 # ellipse -> polygon sampling for display; display fidelity only (the
@@ -394,30 +394,16 @@ def shift_shape(shape: dict, dx: float = 0.0, dy: float = 0.0,
     """Return a COPY of a shape dict translated by (dx, dy) in-plane and
     dz along the extrude axis.  One authority for the move operation:
     the gizmo drag, the gate, and any future nudge tool all shift a
-    shape through here.  Refuses unknown types by name."""
-    import copy as _copy
-    out = _copy.deepcopy(shape)
-    t = out.get("type")
-    if t == "rect":
-        out["x_mm"] = float(out["x_mm"]) + dx
-        out["y_mm"] = float(out["y_mm"]) + dy
-    elif t == "ellipse":
-        out["cx_mm"] = float(out["cx_mm"]) + dx
-        out["cy_mm"] = float(out["cy_mm"]) + dy
-    elif t == "polygon":
-        out["points_mm"] = [[float(a2) + dx, float(b2) + dy]
-                            for a2, b2 in out["points_mm"]]
-    elif t == "cutout":
-        out["children"] = [shift_shape(k, dx, dy, dz)
-                           for k in (out.get("children") or [])]
-        return out
-    else:
-        raise EditRefusal(f"no shift rule for shape type {t!r}")
-    ex = out.get("extrude")
-    if isinstance(ex, dict) and dz:
-        ex["lo_mm"] = float(ex["lo_mm"]) + dz
-        ex["hi_mm"] = float(ex["hi_mm"]) + dz
-    return out
+    shape through here.  Refuses unknown types by name.
+
+    The rule itself lives in io.sim_spec.shift_shape_dict (L-527: the
+    assembly flatten needs it too, and io stands below edit); this keeps
+    the editor's own refusal type."""
+    from ion_gym.io.sim_spec import shift_shape_dict
+    try:
+        return shift_shape_dict(shape, dx, dy, dz)
+    except ValueError as e:
+        raise EditRefusal(str(e)) from e
 
 
 def render_primitives(session: EditSession) -> dict:
@@ -473,7 +459,11 @@ def render_primitives(session: EditSession) -> dict:
     if all_x:
         bbox2d = [min(all_x), min(all_y), max(all_x), max(all_y)]
     else:
-        bbox2d = [0.0, 0.0, float(g.width_mm), float(g.height_mm)]
+        # an empty deck shows its DECLARED domain over the stored in-plane
+        # axes -- from origin_mm, on the deck's own axes (L-553: this was
+        # [0, 0, width, height], wrong for a signed frame or an x/y deck)
+        (u0, u1), (v0, v1) = inplane_domain_mm(g, axis)
+        bbox2d = [u0, v0, u1, v1]
     return {"electrodes": out_els, "bbox2d": bbox2d,
             "pitch_mm": float(g.mm_per_gu),
             "frame": frame}

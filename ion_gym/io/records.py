@@ -154,13 +154,65 @@ def record(traj, columns):
     return None if traj is None else TrajRecord(traj, columns)
 
 
-# constants for derived-channel physics (duplicated nowhere else in this
-# module's callers; the tracer kernels carry their own numba-local copies)
-_AMU_KG = 1.66053906660e-27
-_E_CHG = 1.602176634e-19
+# constants for derived-channel physics: the ONE authority (L-532; these
+# were retyped here)
+from ion_gym.physics.constants import KG_AMU as _AMU_KG   # noqa: E402
+from ion_gym.physics.constants import E_CHG as _E_CHG     # noqa: E402
+
+_AXES = "xyz"
 
 
-def assemble_record(o, columns, mz_da):
+def radial_values(name, rec, frame):
+    """A radial channel (sim_spec.RADIAL_CHANNELS) DERIVED from a record
+    about `frame` (an OpticAxisSpec: SimSpec.radial_frame()), or None when
+    the record lacks the columns it needs (positions for radius; e_x,
+    e_y, e_z for the field channels). THE one derivation, used after
+    flight by every route and by the app's plots (L-539: each route and
+    the app had its own axis -- x, z through the origin, or the domain
+    centre).
+
+      radius   = distance from the line (axis through through_mm)
+      e_axial  = e_<axis> (signed, along +axis)
+      e_radial = |E perpendicular to the axis| (>= 0)"""
+    if frame is None:
+        raise ValueError(f"radial channel {name!r} needs an optic axis "
+                         f"(SimSpec.radial_frame() returned None)")
+    a = _AXES.index(frame.axis)
+    p, q = _AXES[(a + 1) % 3], _AXES[(a + 2) % 3]        # cyclic in-plane
+    cp, cq = (float(v) for v in frame.through_mm)
+    if name == "radius":
+        if p not in rec or q not in rec:
+            return None
+        return np.sqrt((rec[p] - cp) ** 2 + (rec[q] - cq) ** 2)
+    if name in ("e_axial", "e_radial"):
+        need = (f"e_{frame.axis}", f"e_{p}", f"e_{q}")
+        if not all(c in rec for c in need):
+            return None
+        if name == "e_axial":
+            return np.array(rec[need[0]], dtype=float)
+        return np.sqrt(rec[need[1]] ** 2 + rec[need[2]] ** 2)
+    raise ValueError(f"radial_values: {name!r} is not a radial channel "
+                     f"(known: radius, e_axial, e_radial)")
+
+
+def apply_radial_frame(traj, columns, frame):
+    """Overwrite, in place, every radial channel present in `columns` with
+    its value derived about `frame`. Refuses a radial column it cannot
+    derive (its inputs are not recorded) rather than leaving the
+    kernel's own-axis value in it."""
+    rec = TrajRecord(traj, columns)
+    for c in ("radius", "e_axial", "e_radial"):
+        if c in rec:
+            v = radial_values(c, rec, frame)
+            if v is None:
+                raise ValueError(
+                    f"radial channel {c!r} cannot be derived: the record "
+                    f"lacks its inputs (columns {list(columns)})")
+            rec[c] = v
+    return traj
+
+
+def assemble_record(o, columns, mz_da, frame=None):
     """Build the dense trajectory record from a kernel output dict,
     filling EVERY requested channel and REFUSING any it cannot derive
     (a requested channel silently left at zero is a wrong
@@ -178,6 +230,9 @@ def assemble_record(o, columns, mz_da):
         The record schema — normally ``spec.column_names()``.
     mz_da : float
         This ion's m/z in Da (for the KE channels).
+    frame : OpticAxisSpec or None
+        The axis the radial channels are measured about
+        (SimSpec.radial_frame()); required when one is requested.
 
     Returns the dense (n, ncols) float64 array. Every column is written;
     an unfillable requested channel raises with a diagnostic naming what
@@ -207,9 +262,20 @@ def assemble_record(o, columns, mz_da):
         elif c == "ke_z":
             rec[c][:] = _ke * vz * vz
         elif c == "radius":
-            rec[c][:] = np.sqrt(o["x"] ** 2 + o["y"] ** 2)
+            # about the declared/route axis (L-539; this assumed z
+            # through the origin while e_axial below assumed x)
+            rec[c][:] = radial_values("radius", base, frame)
         elif c == "n_col":
-            rec[c][:] = float(o.get("ncol", 0))
+            # No default: a missing count written as 0 reads as a
+            # collisionless flight. Under SDS the provider passes
+            # ncol = nan (sds.SDS_NO_COLLISION_COUNT, every route).
+            if "ncol" not in o:
+                raise ValueError(
+                    "record channel 'n_col' was requested but the kernel "
+                    "output carries no 'ncol' (pass nan for a model with "
+                    f"no discrete collisions, e.g. SDS); provided: "
+                    f"{sorted(o)}")
+            rec[c][:] = float(o["ncol"])
         elif c in ("e_x", "e_y", "e_z", "e_field", "e_axial",
                    "e_radial") and have_e:
             ex, ey, ez = o["ex"], o["ey"], o["ez"]
@@ -221,10 +287,14 @@ def assemble_record(o, columns, mz_da):
                 rec[c][:] = ez
             elif c == "e_field":
                 rec[c][:] = np.sqrt(ex * ex + ey * ey + ez * ez)
-            elif c == "e_axial":
-                rec[c][:] = ex          # transport axis is x
-            elif c == "e_radial":
-                rec[c][:] = np.sqrt(ey * ey + ez * ez)
+            elif c in ("e_axial", "e_radial"):
+                if frame is None:
+                    radial_values(c, rec, None)       # refuses by name
+                a = _AXES.index(frame.axis)
+                comp = {"x": ex, "y": ey, "z": ez}
+                p, q = _AXES[(a + 1) % 3], _AXES[(a + 2) % 3]
+                rec[c][:] = (comp[frame.axis] if c == "e_axial" else
+                             np.sqrt(comp[p] ** 2 + comp[q] ** 2))
         else:
             raise ValueError(
                 f"assemble_record: requested channel {c!r} cannot be "

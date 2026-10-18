@@ -286,10 +286,16 @@ def test_stats_markdown_all_timeouts():
 
 
 def test_stats_markdown_every_fate_code():
-    """Render with 0/1/2/3 all present — exercises every table at once."""
+    """Render with EVERY fate code present — exercises every table at once.
+
+    The fixture flies each code of the one fate table (ion_envelope's,
+    re-exported by stats), so a fate added there is covered here without
+    an edit. It flew a hard-coded (0, 1, 2, 3) while asserting every
+    FATE_NAME entry, and failed once the table grew to the station fates
+    and the named unknown (L-569, PI ruling 2026-10-16: fix the test)."""
     from ion_gym.physics.stats import FATE_NAME
     res, mz = [], []
-    for code in (0, 1, 2, 3):
+    for code in sorted(FATE_NAME):
         for i in range(6):
             res.append(_r(code, x_end=0.1 * i, y_end=-0.1 * i,
                           z_end=10.0 * code, vz_end=0.12,

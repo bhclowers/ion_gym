@@ -33,8 +33,8 @@
                 (exact ballistic flight to declared out-of-domain planes)
   I/O layer:    spec_io / assembly (documents) · fa_cache + basis_cache
                 (content-hashed solved bases) · field_io · births · records
-  legacy fly:   ionbench / tracer_numba / tracer_rf2d (reference-tracer
-                equivalence path)
+  legacy fly:   ionbench / tracer_numba (reference-tracer equivalence
+                path)
   drivers:      ensemble_driver (threaded fly + storage)
 ```
 
@@ -63,7 +63,9 @@
 | `ensemble_driver` | Threaded fly, storage toggles, NPZ export | `test_reproducible_fly`; `test_per_ion_mass` |
 | `optimize` | OptimizeSpec (dotted SimSpec paths + bounds + metric) → CMA-ES over any buildable geometry | `test_optimize` (einzel focus recovery) |
 | `flyer_plane` | Canonical width-plane flyer with first-event electrode-hit detection (EXIT/HIT/LOST/STUCK) | reference-tracer equivalence fixture; `test_numba_equiv` |
-| `ionbench`, `tracer_numba`, `tracer_rf2d` | Legacy reference-tracer equivalence path | `test_ionbench_native_equiv`; `test_numba_equiv` |
+| `ballistic` | Field-free motion along one axis added to a two-axis deck (speed from energy, ballistic position, transverse walk); every value an argument | `test_W3d` (internal) |
+| `mathieu` | Mathieu/Hill stability exponent; RF amplitude for a target q (`rf_amplitude_for_q`) | notebook `V02_mathieu_stability`; the HCD study notebook (RF from q) |
+| `ionbench`, `tracer_numba` | Legacy reference-tracer equivalence path | `test_ionbench_native_equiv`; `test_numba_equiv` |
 | `sim_app` | Panel dashboard: control tabs, plot tabs, Status tab, voxel-doctrine display, exports | `test_ui_smoke`; `test_solve_orchestrator`; `validate_ui_exercise` |
 | `pe_view`, `stats`, `stl_upload` | PE-surface tab, impact-statistics card (planes/stations figures), STL upload panel | `test_pe_view`/`test_pe_surface_tab`/`test_stats`/`test_stl_upload` |
 | `edit/` (policy, session, viewer, serve) | Browser geometry editor: per-route EditPolicy, targeted-patch commit (zero edits → original bytes), /editor + /flight servers | `edit_gate` battery (byte-identity across in-scope decks) |
@@ -74,7 +76,7 @@
 | module | role |
 |--------|------|
 | `viz_core.py` | **The** image/report framework. `Scene` (bodies / rays / field slabs / bounds / provenance) ← adapter `scene_from_simspec` → renderers `render_mpl` (multi-axis xy/xz/yz, per-group legend), `to_plotly`/`to_plotly_views`, `report()`, `stats_figure` (planes/stations). Metal is decomposed from the SOLVER'S OWN mask (display == solver input); fields are the solver's own arrays. Every panel is stamped SOLVER-DERIVED or SCHEMATIC. Owns the zoom policy: plotly axes are never scale-anchored. | `test_viz_core`; `validate_examples_draw` |
-| `pe_view.py`, `deck_v.py`, `design_maps.py` | PE-surface rendering; deck visual summaries; design-space maps | `test_pe_view`; `validate_pe_surface` |
+| `pe_view.py`, `design_maps.py` | PE-surface rendering; design-space maps | `test_pe_view`; `validate_pe_surface` |
 
 New subsystems get pictures by writing an ADAPTER to `Scene`, not another
 plotting script.

@@ -32,7 +32,8 @@ from typing import Dict, List
 
 import panel as pn
 
-from ion_gym.edit.policy import EditRefusal
+from ion_gym.edit.policy import (EditRefusal, deck_extrude_axis,
+                                 inplane_domain_mm, world_domain_mm)
 from ion_gym.edit.session import EditSession
 from ion_gym.edit.outline import shift_shape
 from ion_gym.edit.viewer import viewer_for_session, DEFAULT_WIDTH
@@ -213,8 +214,21 @@ class EditorApp:
         if getattr(self, "w_contours", None) is not None \
                 and self.w_contours.value:
             from ion_gym.edit.contours import contour_primitives
-            cont = contour_primitives(preview)
-            if "refused" not in cont:
+            try:
+                cont = contour_primitives(preview)
+            except Exception as e:
+                # THE UI BOUNDARY for an optional overlay: a contour
+                # MALFUNCTION (contour_primitives returns refusals and
+                # raises bugs) must not take the geometry view down with
+                # it, and must not read as a refusal either (L-541). It is
+                # named as a failure here, with its traceback on the
+                # console, and the viewer draws without contours.
+                import traceback
+                traceback.print_exc()
+                self._say(f"contours FAILED (a defect, not a refusal): "
+                          f"{type(e).__name__}: {e}")
+                cont = None
+            if cont is not None and "refused" not in cont:
                 self._say(f"contours: {len(cont['polylines'])} "
                           f"line(s), field build "
                           f"{cont['build_s']} s")
@@ -307,6 +321,11 @@ class EditorApp:
             return
         shapes = self._shapes_of(el_i)
         if not (0 <= sh_j < len(shapes)):
+            # a stale pick (the shape list changed under the picker): said
+            # on the form, not an empty form with no reason (L-553)
+            self.fields[:] = [pn.pane.Markdown(
+                f"**shape {sh_j} does not exist** on this electrode "
+                f"({len(shapes)} shape(s)) — pick again")]
             return
         shape = shapes[sh_j]
         t = shape.get("type")
@@ -335,7 +354,12 @@ class EditorApp:
             return
         if self.session.policy.supports_extrude:
             ex = shape.get("extrude") or {}
-            w_on = pn.widgets.Checkbox(name="extrude (axis z)",
+            try:
+                _ax = ex.get("axis") or self._deck_axis()
+            except EditRefusal as e:        # a mixed deck: say so here too
+                self.fields[:] = [pn.pane.Markdown(f"**not editable:** {e}")]
+                return
+            w_on = pn.widgets.Checkbox(name=f"extrude (axis {_ax})",
                                        value=bool(ex))
             w_lo = pn.widgets.FloatInput(
                 name="extrude lo_mm", value=float(ex.get("lo_mm", 0.0)),
@@ -385,7 +409,12 @@ class EditorApp:
                         f"extrude hi_mm ({hi:g}) must exceed lo_mm "
                         f"({lo:g}) — a zero or negative slab is not a "
                         f"body")
-                shape["extrude"] = {"axis": "z", "lo_mm": lo, "hi_mm": hi}
+                # the shape's own axis if it has one, else the deck's (it
+                # was always 'z', which rewrote an x/y shape's axis on
+                # every Apply -- L-553)
+                axis = ((base.get("extrude") or {}).get("axis")
+                        or self._deck_axis())
+                shape["extrude"] = {"axis": axis, "lo_mm": lo, "hi_mm": hi}
             else:
                 shape.pop("extrude", None)
         return shape
@@ -454,12 +483,27 @@ class EditorApp:
         self._refresh_banner()
         self._refresh_viewer()
 
+    def _deck_axis(self) -> str:
+        """The committed deck's ONE extrude axis (policy.deck_extrude_axis:
+        'z' for extrude-less and empty decks; a mixed deck refuses)."""
+        return deck_extrude_axis(
+            (el.get("name", str(i)), el.get("shapes", []))
+            for i, el in enumerate(self.session.committed_electrodes()))
+
     def _default_shape(self, t: str) -> dict:
+        # A new shape sits at the centre of the deck's DECLARED domain, in
+        # the deck's STORED in-plane frame, and extrudes along the deck's
+        # own axis (L-553): it was centred on (width/2, height/2) from a
+        # zero origin and always extruded along z, so on an x/y-extruded
+        # deck one Add made the deck mixed-axis (the next render refused)
+        # and on a signed-frame deck it landed off-centre or outside.
         g = self.session.spec.geometry
         h = float(g.mm_per_gu)
         span = _NEW_SHAPE_SPAN_PITCHES * h
-        cx = self.session.snap_to_pitch(float(g.width_mm) / 2)
-        cy = self.session.snap_to_pitch(float(g.height_mm) / 2)
+        axis = self._deck_axis()
+        (u0, u1), (v0, v1) = inplane_domain_mm(g, axis)
+        cx = self.session.snap_to_pitch((u0 + u1) / 2)
+        cy = self.session.snap_to_pitch((v0 + v1) / 2)
         if t == "rect":
             s = {"type": "rect", "x_mm": cx - span / 2,
                  "y_mm": cy - span / 2, "width_mm": span,
@@ -474,8 +518,14 @@ class EditorApp:
             raise EditRefusal(f"no default for shape type {t!r}")
         if self.session.policy.supports_extrude:
             ax = self.session.spec.geometry.axial_extent_mm
-            lo, hi = (ax if ax else (0.0, span))
-            s["extrude"] = {"axis": "z", "lo_mm": float(lo),
+            if ax:
+                lo, hi = ax
+            else:
+                # one default span from the domain's floor along the deck
+                # axis -- (0, span) on a z deck, exactly as before
+                lo = world_domain_mm(g, axis)[0]
+                hi = lo + span
+            s["extrude"] = {"axis": axis, "lo_mm": float(lo),
                             "hi_mm": float(hi)}
         return s
 

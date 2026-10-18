@@ -31,14 +31,23 @@ import math
 import numpy as np
 from numba import njit
 
-# ---- physical constants (source values, verbatim) ----
-ELEMENTARY_CHARGE = 1.602176462e-19
-K_BOLTZMANN = 1.3806503e-23
-N_AVOGADRO = 6.02214199e23
-MOL_VOLUME = 22.413996e-3
-AMU_TO_KG = 1.66053873e-27
+# ---- physical constants ----
+# From the one authority (PI ruling 2026-10-13, R1: CODATA 2018
+# everywhere). This is the one deliberate deviation from the verbatim
+# port: the source's 1998 values were e 1.602176462e-19, kB 1.3806503e-23,
+# NA 6.02214199e23, molar volume 22.413996e-3, amu 1.66053873e-27.
+from ion_gym.physics.constants import (E_CHG as ELEMENTARY_CHARGE,
+                                       K_B as K_BOLTZMANN,
+                                       N_A as N_AVOGADRO,
+                                       MOL_VOLUME_STP as MOL_VOLUME,
+                                       KG_AMU as AMU_TO_KG,
+                                       T_STP_K as STP_TEMP,
+                                       ATM_TORR as STP_PRESSURE_TORR)
 PI = math.pi
-STP_TEMP = 273.15
+# The SDS mobility tables' REFERENCE gas (air), used only by
+# get_air_to_gas to convert table values to the deck's gas. Not a
+# deck-gas mass: a deck naming "air" gets collision3d.GASES["air"]
+# (PI ruling 2026-10-14).
 M_AIR = 28.94515
 D_AIR = 0.366
 
@@ -49,15 +58,24 @@ N_DIST_POINTS = 1002
 
 # ------------------------------------------------------------- data loaders
 def _read_numbers(path):
-    """Read comma/space separated numbers, ignoring ';' comments."""
+    """Read comma/space separated numbers, ignoring ';' comments.
+
+    A token that is not a number REFUSES, naming file, line and token
+    (L-534). It used to be skipped, which shifts every later value: the
+    tables are read positionally (mass, diameter, Ko triples; ICDF rows),
+    so one bad token silently re-pairs the rest. Both shipped tables
+    parse with zero bad tokens (checked 2026-10-14)."""
     out = []
-    for line in open(path):
-        line = line.split(";")[0]
-        for tok in line.replace(",", " ").split():
-            try:
-                out.append(float(tok))
-            except ValueError:
-                pass
+    with open(path) as fh:
+        for ln, line in enumerate(fh, 1):
+            for tok in line.split(";")[0].replace(",", " ").split():
+                try:
+                    out.append(float(tok))
+                except ValueError:
+                    raise ValueError(
+                        f"{path}:{ln}: {tok!r} is not a number. SDS tables "
+                        f"are read positionally, so skipping it would shift "
+                        f"every later value; fix or remove the token.") from None
     return out
 
 
@@ -78,6 +96,84 @@ def load_massdata(path):
             break
         rows.append((abs(m), abs(d), abs(ko)))
     return rows
+
+
+# ------------------------------------------------- one door for every route
+_TABLES = None
+
+
+def load_tables():
+    """(diffusion ICDF statistics, mobility mass table) from the shipped
+    files, read ONCE per process. Every SDS route (planar, r-z, 3-D,
+    staged regions, the regime note) loads through here; there used to be
+    three loaders."""
+    global _TABLES
+    if _TABLES is None:
+        import pathlib as _pl
+        here = _pl.Path(__file__).parent
+        _TABLES = (load_diffusion_statistics(str(here / JUMP_ICDF_FILE)),
+                   load_massdata(str(here / MOBILITY_FILE)))
+    return _TABLES
+
+
+def sds_active(collisions):
+    """True when this collisions argument (None, dict or CollisionSpec)
+    asks for gas ON under the SDS model. An unknown model name REFUSES by
+    name: the routes only know 'hs' and 'sds', and guessing which one a
+    misspelled model meant is how an SDS deck once flew hard-sphere."""
+    from ion_gym.physics.collision3d import resolve_collisions
+    col = resolve_collisions(collisions)
+    if col is None:
+        return False
+    model = str(col.model).lower()
+    if model not in ("hs", "sds"):
+        raise ValueError(
+            f"collisions.model {col.model!r} is not a known model; the "
+            f"flight routes implement 'hs' (hard-sphere) and 'sds'.")
+    return model == "sds"
+
+
+def sds_ion_params(collisions, mass_amu, charge):
+    """Per-ion SDS parameters (ion_params) for this ion on this gas: the
+    deck's gas by name, its diameter, T and P, the ion's own mass and its
+    real charge. ONE call shared by every route that flies SDS."""
+    from ion_gym.physics.collision3d import gas_mass, resolve_collisions
+    col = resolve_collisions(collisions)
+    if col is None:
+        raise ValueError("SDS parameters need gas: collisions is None or "
+                         "disabled.")
+    _stats, massdata = load_tables()
+    return ion_params(float(mass_amu), int(charge), gas_mass(col.gas),
+                      float(col.gas_diam_nm), float(col.T_k),
+                      float(col.P_torr), massdata)
+
+
+# THE COLLISION-COUNT RULE under SDS, identical on every route (PI
+# 2026-10-14): the per-ion summary carries n_col = None, a recorded n_col
+# column is NaN, and this advisory says why. Not a refusal: switching a
+# deck's model must never block a flight because a recording column was
+# requested.
+SDS_NO_COLLISION_COUNT = (
+    "collisions: the n_col (collision count) channel is NaN and the "
+    "per-ion collision count is empty, because model='sds' does not "
+    "simulate individual ion-gas collisions. SDS (Appelhans and Dahl "
+    "2005) treats the gas as a continuum: every time step it (1) damps "
+    "the ion's velocity toward its mobility-limited drift velocity K*E "
+    "(Stokes damping, from the tabulated mobility) and (2) moves the ion "
+    "by a random diffusion jump drawn from tables pre-computed for the "
+    "number of collisions expected in that step. The collisions are "
+    "averaged into those two terms instead of being sampled one at a "
+    "time, so no collision event exists to count. Use model='hs' "
+    "(hard-sphere), which samples every collision, when a count is "
+    "needed.")
+
+
+def blank_collision_channel(traj, col_names):
+    """Apply the rule to a recorded trajectory: the n_col column, if
+    recorded, becomes NaN (in place). Returns traj."""
+    if "n_col" in col_names:
+        traj[:, list(col_names).index("n_col")] = np.nan
+    return traj
 
 
 # ------------------------------------------------------------- mass -> params
@@ -136,7 +232,7 @@ def ion_params(mass_ion, charge, gas_mass, gas_diam, T_k, P_torr, massdata):
     emu = ELEMENTARY_CHARGE / AMU_TO_KG
     damping_STP = emu * 0.01 / ko * (abs(charge) / mass_ion)     # 1/us
     t_ratio = T_k / STP_TEMP
-    pt_ratio = t_ratio * (760.0 / P_torr)
+    pt_ratio = t_ratio * (STP_PRESSURE_TORR / P_torr)
     return dict(
         damping=damping_STP / pt_ratio,
         mfp_mm=mfpo * pt_ratio,
@@ -193,6 +289,13 @@ def _sphere_rand(r):
 # warning says so by printing the ratio rather than a verdict alone.
 SDS_MIN_GAMMA_OVER_OMEGA = 1.0
 SDS_ASSUMED_MZ_WHEN_UNSET = 300.0
+# The note's "pressure that would reach the threshold" search doubles the
+# deck pressure up to this many times (2**40 x P), then says no reachable
+# pressure was found rather than guessing.
+SDS_NEED_P_MAX_DOUBLINGS = 40
+# dt guidance: the mobility damping time 1/damping must be resolved; the
+# app advises dt <= (1/damping) / SDS_DT_PER_DAMPING_TIME.
+SDS_DT_PER_DAMPING_TIME = 10.0
 
 
 def rf_regime_note(spec):
@@ -238,19 +341,21 @@ def rf_regime_note(spec):
     effective temperatures.
     """
     import math
-    import pathlib as _pl
-    coll = getattr(spec, "collisions", None)
-    if coll is None or not getattr(coll, "enabled", False):
+    from ion_gym.physics.collision3d import gas_mass as _gas_mass
+    from ion_gym.physics.collision3d import resolve_collisions
+    # the one gas authority (A4): the deck's gas, temperature and pressure
+    coll = resolve_collisions(getattr(spec, "collisions", None))
+    if coll is None:
         return None
-    if str(getattr(coll, "model", "")).lower() != "sds":
+    if str(coll.model).lower() != "sds":
         return None
     rf = [g for g in (spec.geometry.rf_groups or [])
           if float(getattr(g, "amplitude_v", 0.0) or 0.0) != 0.0]
     if not rf:
         return None                       # no RF: nothing to erase
     f_hz = max(float(getattr(g, "frequency_hz", 0.0) or 0.0) for g in rf)
-    p_torr = float(getattr(coll, "P_torr", 0.0) or 0.0)
-    t_k = float(getattr(coll, "T_k", 0.0) or 0.0)
+    p_torr = float(coll.P_torr)
+    t_k = float(coll.T_k)
     if f_hz <= 0 or p_torr <= 0 or t_k <= 0:
         return None                       # not enough to judge; say nothing
 
@@ -267,10 +372,14 @@ def rf_regime_note(spec):
         mz_note = (f" (source.mz_list is unset, so m/z {masses[0]:g} was "
                    f"ASSUMED -- declare it and this is exact)")
 
-    gas_mass = float(getattr(coll, "gas_mass_amu", 0.0) or 28.0)
-    gas_diam = float(getattr(coll, "gas_diam_nm", 0.0) or 0.366)
-    charge = abs(int(getattr(spec.source, "charge", 1) or 1))
-    md = load_massdata(str(_pl.Path(__file__).parent / "sds_mobility.dat"))
+    # The deck's gas by name (L-531: this read 'gas_mass_amu', a field
+    # CollisionSpec does not have, so every deck was judged at 28.0) and
+    # the deck's gas diameter; the source's real charge (ion_params damps
+    # with abs(z)).
+    gas_mass = _gas_mass(coll.gas)
+    gas_diam = float(coll.gas_diam_nm)
+    charge = int(spec.source.charge)
+    _stats, md = load_tables()
     omega = 2.0 * math.pi * f_hz
 
     rows = []
@@ -286,7 +395,7 @@ def rf_regime_note(spec):
     m_worst = [r[0] for r in rows if r[1] == worst][0]
     need_p = None
     _p = p_torr
-    for _ in range(40):
+    for _ in range(SDS_NEED_P_MAX_DOUBLINGS):
         _p *= 2.0
         _g = ion_params(m_worst, charge, gas_mass, gas_diam, t_k, _p,
                         md)["damping"] * 1.0e6
@@ -315,7 +424,8 @@ def rf_regime_note(spec):
          f"{SDS_MIN_GAMMA_OVER_OMEGA:g} at m/z {m_worst:g}: pressure "
          f"about {need_p:.2f} Torr at this frequency"
          if need_p else
-         f"[sds]   No reachable pressure below 2^40 x {p_torr:g} Torr "
+         f"[sds]   No reachable pressure below "
+         f"2^{SDS_NEED_P_MAX_DOUBLINGS} x {p_torr:g} Torr "
          f"puts m/z {m_worst:g} in regime at this frequency"),
         "[sds]   Otherwise use model='hs', which resolves collisions "
         "and keeps the micromotion.",

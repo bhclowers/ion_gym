@@ -41,9 +41,10 @@ import math
 import numpy as np
 from numba import njit
 
-from ion_gym.physics.tracer3d import (_wave_eval, _mfp_mm, _collide,
+from ion_gym.physics.tracer3d import (_wave_eval,
                       K_SIN, K_COS, K_SQUARE, E_CHG, AMU)
-from ion_gym.physics.collision3d import KB, KG_AMU, gas_mass
+from ion_gym.physics.collision3d import (gas_kernel_scalars,
+                                         hs_collision_step)
 
 
 # ------------------------------------------------------------- interpolation
@@ -91,7 +92,7 @@ def _fly_tw2d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
               ch_kind, ch_om, ch_ph, ch_amp, ch_off, ch_duty, tab_t, tab_v, tab_off,
               ele, h_mm, xs, ys, zs, ts, vxs, vys, vzs, record_every,
               collide_on, T_k, P_pa, sigma_m2, c_star, c_bar, sig1d, m_gas,
-              seed):
+              seed, gfx, gfy, gfz):
     """2-D mirror of tracer3d._fly3d. E_z = 0 (z inertial). Returns
     (nrec, kind) with kind 0 = metal impact, 1 = left box, 2 = time out."""
     nx, ny = EAx.shape
@@ -176,14 +177,13 @@ def _fly_tw2d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
         step += 1
 
         if collide_on:
+            # the shared gas-frame HS step against the declared flow
+            # (gfx, gfy, gfz) mm/us (L-563); m/s <-> mm/us as before
             spx = vx * 1e-3; spy = vy * 1e-3; spz = vz * 1e-3
-            sp = math.sqrt(spx * spx + spy * spy + spz * spz)
-            if sp < 1e-7:
-                sp = 1e-7
-            lam = _mfp_mm(sp, T_k, P_pa, sigma_m2, c_star, c_bar)
-            if np.random.random() < 1.0 - math.exp(-sp * dt_s * 1e6 / lam):
-                nvx, nvy, nvz = _collide(spx, spy, spz, 0.0, 0.0, 0.0,
-                                         m_ion_amu, m_gas, sig1d, sp)
+            nvx, nvy, nvz, _hit = hs_collision_step(
+                spx, spy, spz, gfx, gfy, gfz, dt_s, 1e6, T_k, P_pa,
+                sigma_m2, c_star, c_bar, m_ion_amu, m_gas, sig1d)
+            if _hit:
                 vx = nvx * 1e3; vy = nvy * 1e3; vz = nvz * 1e3
                 ncol += 1
 
@@ -322,7 +322,8 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
     if _in_metal_2d(_ele, float(r0_mm[0]) / _h, float(r0_mm[1]) / _h,
                     _ele.shape[0], _ele.shape[1]):
         who = f"{ion_label} " if ion_label else ""
-        raise ValueError(
+        from ion_gym.physics.raster2d import BirthInMetal
+        raise BirthInMetal(
             f"{who}birth at (x={float(r0_mm[0]):.3f}, "
             f"y={float(r0_mm[1]):.3f}) mm (local frame) lies inside "
             f"the effective metal (all-four-corner cell rule, node "
@@ -333,28 +334,21 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
             "State the charge state (source.charge) rather than flying a "
             "neutral through an electrostatic field.")
     qm = int(charge) * E_CHG / (mz_Da * AMU)
-    on = collisions is not None and (
-        collisions.get("enabled", True) if isinstance(collisions, dict)
-        else getattr(collisions, "enabled", True))
-    if on:
-        g = (collisions.get("gas", "He") if isinstance(collisions, dict)
-             else getattr(collisions, "gas", "He"))
-        T_k = float(collisions.get("T_k", 298.0)
-                    if isinstance(collisions, dict)
-                    else getattr(collisions, "T_k", 298.0))
-        P_pa = float(collisions.get("P_pa", 0.0)
-                     if isinstance(collisions, dict)
-                     else getattr(collisions, "P_pa", 0.0))
-        sigma = float(collisions.get("sigma_m2", 2.27e-18)
-                      if isinstance(collisions, dict)
-                      else getattr(collisions, "sigma_m2", 2.27e-18))
-        mg = gas_mass(g)
-        c_star = math.sqrt(2 * KB * T_k / (mg * KG_AMU)) / 1000.0
-        c_bar = math.sqrt(8 * KB * T_k / (math.pi * mg * KG_AMU)) / 1000.0
-        sig1d = math.sqrt(KB * T_k / (mg * KG_AMU)) / 1000.0
-    else:
-        T_k = 298.0; P_pa = 0.0; sigma = 2.27e-18
-        mg = 4.0; c_star = c_bar = sig1d = 1.0
+    # The one gas authority (L-531, R3): missing fields take the spec's
+    # values; vacuum resolves nothing.
+    from ion_gym.physics.sds import sds_active
+    if sds_active(collisions):
+        raise ValueError(
+            "fly_tw2d: collisions.model='sds' but this kernel implements "
+            "hard-sphere collisions only; it would fly SDS as HS. Use "
+            "model='hs' here, or fly the deck through build_run on the "
+            "planar route, which implements SDS.")
+    g = gas_kernel_scalars(collisions)
+    on, T_k, P_pa, sigma = g["enabled"], g["T_k"], g["P_pa"], g["sigma_m2"]
+    c_star, c_bar, sig1d, mg = g["c_star"], g["c_bar"], g["sig1d"], g["m_gas"]
+    # declared gas flow, modelled in the HS step (L-563; it was dropped)
+    from ion_gym.physics.collision3d import gas_flow
+    gfx, gfy, gfz = gas_flow(collisions)
     nmax = int(min(max_records,
                    t_max_us * 1e3 / dt_ns / max(record_every, 1) + 8))
     xs = np.empty(nmax); ys = np.empty(nmax); zs = np.empty(nmax)
@@ -374,7 +368,7 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
         fields["tab_v"], fields["tab_off"], fields["ele"],
         fields["h_mm"], xs, ys, zs, ts, vxs, vys, vzs,
         int(record_every), on, T_k, P_pa, sigma, c_star, c_bar, sig1d,
-        mg, int(seed))
+        mg, int(seed), gfx, gfy, gfz)
     return dict(x=xs[:nrec], y=ys[:nrec], z=zs[:nrec], t_us=ts[:nrec],
                 vx=vxs[:nrec], vy=vys[:nrec], vz=vzs[:nrec],
                 tof_us=float(ts[nrec - 1]), kind=int(kind), n_col=int(ncol))

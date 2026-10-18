@@ -28,10 +28,13 @@ import math
 import numpy as np
 from numba import njit
 
-from ion_gym.physics.collision3d import _mfp_mm, _collide
+from ion_gym.physics.collision3d import hs_collision_step
 from ion_gym.physics.interp import _bilin
 from ion_gym.physics.raster2d import (_metal_nn)
 from ion_gym.physics.build_planar import _wave_eval   # THE 2-D waveform
+from ion_gym.physics.constants import E_CHG, KG_AMU
+from ion_gym.physics.sds import (_diff_dist_steps, _sphere_rand,
+                                 N_DIST_COLLISIONS as _SDS_NDC)
 
 
 @njit(cache=True, nogil=True)
@@ -61,15 +64,18 @@ def _write_row(rec, k, t, x, y, z, vx, vy, vz, ez, er, ncol, m_ion, path,
         c += 1
     if cke:
         # KE in eV: 0.5 m v^2, v in mm/us = 1e3 m/s; m in kg = m_ion*AMU
-        rec[k, c] = 0.5 * m_ion * 1.6605402e-27 * (sp * 1e3) ** 2 \
-            / 1.602176634e-19
+        # Constants from the authority (PI, 2026-10-14, R1b amended: CODATA
+        # across every builder). Closes the 2026-08-06 RATCHET FLAG; the
+        # ported 1.6605402e-27 moved KE channels by +6.8e-7 relative.
+        rec[k, c] = 0.5 * m_ion * KG_AMU * (sp * 1e3) ** 2 \
+            / E_CHG
         c += 1
     # Cartesian component KEs: the r-z SOLVE is a half-plane
     # but the kernel state is full 3-D Cartesian (vx, vy, vz are BASE
     # channels), so per-axis KE is exactly defined and matches the
     # planar/3-D routes' definition; ke_x + ke_y + ke_z == ke_ev by
     # construction. x is the solver axial coordinate on this route.
-    _kes = 0.5 * m_ion * 1.6605402e-27 * 1e6 / 1.602176634e-19
+    _kes = 0.5 * m_ion * KG_AMU * 1e6 / E_CHG
     if cke_x:
         rec[k, c] = _kes * vx * vx
         c += 1
@@ -111,12 +117,26 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
                   EzG, EuG, tau_gate,
                   ele, u0, mm, acc, dt, t_max_us,
                   T_k, P_pa, sigma, c_star, c_bar, sig1d, m_gas,
+                  sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, sds_stats,
+                  vgx, vgy, vgz,
                   rec, rec_every, seed,
                   cs, cke, cke_x, cke_y, cke_z, cef, cea, cer, crad, cncol, cpath, ceat, cket,
                   bnd_on, bnd_val, pl_col, pl_val, pl_sgn, pl_w, pl_kind):
     """Records base kinematics + enabled optional channels every
     rec_every steps. E-field stored is in V/mm per the channel contract
     (basis arrays are V/m; the write scale converts). Returns (nrec, kind, ncol).
+
+    SDS (L-519; sds_on): the same model fly3d_sds and the planar kernel
+    fly. Each half-kick's acceleration is Stokes-damped toward the
+    mobility drift relative to the gas flow (vgx, vgy, vgz; mm/us, x
+    axial) on ALL THREE velocity components -- this kernel carries full
+    3-D state -- and each step ends with the isotropic 3-D ICDF diffusion
+    jump, so metal, box, stations and bounds are tested over the whole
+    step including the jump. The hard-sphere collision test does not run
+    under SDS (SDS has no discrete collisions; the builder reports n_col
+    as absent). The HS step runs in the same gas-flow frame
+    (collision3d.hs_collision_step; L-563 -- it collided against still
+    gas whatever flow was declared); zero flow is bit-identical.
 
     DRIVE CHANNELS (L-455): the field is
         E(x, r, t) = E_A + sum_k w_k(t) * E_k + step(t - tau_gate) * E_G
@@ -155,7 +175,13 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
     # the post-step velocity; exact per-step, no dependence on rec_every.
     eat = 0.0
     ket = 0.0
-    ke_scale = 0.5 * m_ion * 1.6605402e-27 * 1e6 / 1.602176634e-19
+    ke_scale = 0.5 * m_ion * KG_AMU * 1e6 / E_CHG
+    # SDS Stokes factor: damping and dt are constant over the flight, so
+    # the factor is too (the planar kernel recomputes the same number)
+    sds_fac = 1.0
+    if sds_on and sds_damping > 0.0:
+        _tterm = sds_damping * dt
+        sds_fac = (1.0 - math.exp(-_tterm)) / _tterm
     # field at the birth point for row 0 (lab clock = tob)
     r0 = math.sqrt(y * y + z * z)
     ez0, er0 = _efield(x, r0, tob)
@@ -191,9 +217,16 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
         r = math.sqrt(y * y + z * z)
         ez, er = _efield(x, r, tob + t)
         rr = r if r > 1e-9 else 1e-9
-        vx += 0.5 * ez * dt
-        vy += 0.5 * er * y / rr * dt
-        vz += 0.5 * er * z / rr * dt
+        if sds_on:
+            vx += 0.5 * sds_fac * (ez - (vx - vgx) * sds_damping) * dt
+            vy += 0.5 * sds_fac * (er * y / rr
+                                   - (vy - vgy) * sds_damping) * dt
+            vz += 0.5 * sds_fac * (er * z / rr
+                                   - (vz - vgz) * sds_damping) * dt
+        else:
+            vx += 0.5 * ez * dt
+            vy += 0.5 * er * y / rr * dt
+            vz += 0.5 * er * z / rr * dt
         x += vx * dt
         y += vy * dt
         z += vz * dt
@@ -202,9 +235,16 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
         r = math.sqrt(y * y + z * z)
         ez, er = _efield(x, r, tob + t + dt)
         rr = r if r > 1e-9 else 1e-9
-        vx += 0.5 * ez * dt
-        vy += 0.5 * er * y / rr * dt
-        vz += 0.5 * er * z / rr * dt
+        if sds_on:
+            vx += 0.5 * sds_fac * (ez - (vx - vgx) * sds_damping) * dt
+            vy += 0.5 * sds_fac * (er * y / rr
+                                   - (vy - vgy) * sds_damping) * dt
+            vz += 0.5 * sds_fac * (er * z / rr
+                                   - (vz - vgz) * sds_damping) * dt
+        else:
+            vx += 0.5 * ez * dt
+            vy += 0.5 * er * y / rr * dt
+            vz += 0.5 * er * z / rr * dt
         t += dt
         step += 1
         sp = math.sqrt(vx * vx + vy * vy + vz * vz)
@@ -213,13 +253,29 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
         # the next step (positions are continuous through a collision)
         eat += ez * fscale * dt
         ket += ke_scale * sp * sp * dt
-        if P_pa > 0.0:
-            if sp < 1e-7:
-                sp = 1e-7
-            lam = _mfp_mm(sp, T_k, P_pa, sigma, c_star, c_bar)
-            if np.random.random() < 1.0 - math.exp(-sp * dt / lam):
-                vx, vy, vz = _collide(vx, vy, vz, 0.0, 0.0, 0.0,
-                                      m_ion, m_gas, sig1d, sp)
+        if sds_on:
+            # SDS diffusion: the isotropic 3-D ICDF jump (fly3d_sds's
+            # step). The step's chord now runs xo -> post-jump position,
+            # which is what the metal backtrack and the plane crossings
+            # below interpolate along, so the arc length takes the same
+            # chord (it already holds the pre-jump one).
+            if sds_mfp > 0.0:
+                _pre = math.sqrt((x - xo) * (x - xo) + (y - yo) * (y - yo)
+                                 + (z - zo) * (z - zo))
+                _dsteps = _diff_dist_steps(sds_stats, sds_logmr)
+                _nc = sds_V / sds_mfp * dt
+                _rj = math.sqrt(_nc / _SDS_NDC) * _dsteps * sds_mfp
+                _jx, _jy, _jz = _sphere_rand(_rj)
+                x += _jx
+                y += _jy
+                z += _jz
+                path += math.sqrt((x - xo) * (x - xo) + (y - yo) * (y - yo)
+                                  + (z - zo) * (z - zo)) - _pre
+        elif P_pa > 0.0:
+            vx, vy, vz, _hit = hs_collision_step(
+                vx, vy, vz, vgx, vgy, vgz, dt, 1.0, T_k, P_pa, sigma,
+                c_star, c_bar, m_ion, m_gas, sig1d)
+            if _hit:
                 ncol += 1
         if step % rec_every == 0 and nrec < rec.shape[0] - 1:
             _write_row(rec, nrec, tob + t, x, y, z, vx, vy, vz,

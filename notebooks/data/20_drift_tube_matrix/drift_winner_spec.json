@@ -21,6 +21,11 @@
   "electrodes": [
    {
     "name": "ring_01",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -46,6 +51,11 @@
    },
    {
     "name": "ring_02",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -71,6 +81,11 @@
    },
    {
     "name": "ring_03",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -96,6 +111,11 @@
    },
    {
     "name": "ring_04",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -121,6 +141,11 @@
    },
    {
     "name": "ring_05",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -146,6 +171,11 @@
    },
    {
     "name": "ring_06",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -171,6 +201,11 @@
    },
    {
     "name": "ring_07",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -196,6 +231,11 @@
    },
    {
     "name": "ring_08",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -221,6 +261,11 @@
    },
    {
     "name": "ring_09",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -246,6 +291,11 @@
    },
    {
     "name": "ring_10",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -271,6 +321,11 @@
    },
    {
     "name": "ring_11",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -296,6 +351,11 @@
    },
    {
     "name": "ring_12",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -321,6 +381,11 @@
    },
    {
     "name": "ring_13",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -346,6 +411,11 @@
    },
    {
     "name": "ring_14",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -371,6 +441,11 @@
    },
    {
     "name": "ring_15",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -396,6 +471,11 @@
    },
    {
     "name": "ring_16",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -421,6 +501,11 @@
    },
    {
     "name": "ring_17",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -446,6 +531,11 @@
    },
    {
     "name": "ring_18",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -471,6 +561,11 @@
    },
    {
     "name": "ring_19",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -496,6 +591,11 @@
    },
    {
     "name": "ring_20",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -521,6 +621,11 @@
    },
    {
     "name": "ring_21",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -546,6 +651,11 @@
    },
    {
     "name": "ring_22",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -571,6 +681,11 @@
    },
    {
     "name": "ring_23",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -596,6 +711,11 @@
    },
    {
     "name": "ring_24",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -621,6 +741,11 @@
    },
    {
     "name": "ring_25",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -646,6 +771,11 @@
    },
    {
     "name": "ring_26",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -671,6 +801,11 @@
    },
    {
     "name": "ring_27",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -696,6 +831,11 @@
    },
    {
     "name": "ring_28",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -721,6 +861,11 @@
    },
    {
     "name": "ring_29",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -746,6 +891,11 @@
    },
    {
     "name": "ring_30",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -771,6 +921,11 @@
    },
    {
     "name": "ring_31",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -796,6 +951,11 @@
    },
    {
     "name": "ring_32",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -821,6 +981,11 @@
    },
    {
     "name": "ring_33",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -846,6 +1011,11 @@
    },
    {
     "name": "ring_34",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -871,6 +1041,11 @@
    },
    {
     "name": "ring_35",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -896,6 +1071,11 @@
    },
    {
     "name": "ring_36",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -921,6 +1101,11 @@
    },
    {
     "name": "ring_37",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -946,6 +1131,11 @@
    },
    {
     "name": "ring_38",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -971,6 +1161,11 @@
    },
    {
     "name": "ring_39",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -996,6 +1191,11 @@
    },
    {
     "name": "ring_40",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1066,7 +1266,6 @@
   "gas": "He",
   "T_k": 298.0,
   "P_torr": 0.9999972366148532,
-  "P_pa": 133.322,
   "sigma_m2": 1.25e-18,
   "model": "hs1",
   "gas_diam_nm": 0.366,

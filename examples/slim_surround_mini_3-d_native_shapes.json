@@ -384,8 +384,20 @@
   "enabled": false
  },
  "integration": {
+  "rec_every": 80,
+  "max_records": 100000,
   "t_max_us": 40.0,
   "dt_ns": 1.0
+ },
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xy"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
  },
  "_display_name": "Electrode Definition Example"
 }

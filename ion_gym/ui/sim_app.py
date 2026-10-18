@@ -27,10 +27,8 @@ import os
 import threading
 import time
 
-# Silence OpenMP's informational "omp_set_nested deprecated" notice (from
-# numba/MKL threading). It's not an error and doesn't affect results; this
-# just keeps the console clean. Set before numba/MKL initialize.
-os.environ.setdefault("KMP_WARNINGS", "0")
+# (KMP_WARNINGS is set by the CLI entry point, ion_gym.cli.main -- not
+# here: importing a module must not change the environment, L-550.)
 
 import ion_gym
 import numpy as np
@@ -55,12 +53,91 @@ from ion_gym.viz import viz_core as V
 # generous. The server path never uses it (it schedules a poll).
 _BUILD_JOIN_TIMEOUT_S = 900.0
 
-# Fate tables come from THE single authority
-# (physics.ion_envelope): this module's own copies stopped at
-# 3, so station fates 5/6 had no name, no colour and no impact
-# marker anywhere in the UI even though the kernels emit them.
-from ion_gym.physics.ion_envelope import (  # noqa: E402
-    FATE_COLOR as _FATE_COLOR, FATE_NAME as _FATE_NAME)
+# Fate names and colours come from THE single authority
+# (physics.ion_envelope: fate_name / fate_color, which also name the
+# unknown fate). This module once kept its own tables, which stopped at 3;
+# the last aliases (_FATE_NAME/_FATE_COLOR) went with D5, 2026-10-16.
+# Thermal assessment: seed of the random velocity SIGNS rebuilt from
+# per-axis KE (with the ion index), so a run assesses identically in every
+# session (it was hash() of a str, salted per process).
+_KE_SIGN_SEED = 0x6B65
+
+
+# Beam panel: display names for beam_spec.DIST_FIELDS parameters (the
+# rest show their own key).
+_BEAM_PARAM_LABEL = {"temperature_k": "temperature (K)"}
+
+
+def _beam_panel_fields(kind):
+    """The numeric fields the beam panel shows for one distribution kind,
+    from beam_spec.DIST_FIELDS. An unknown kind REFUSES by name (L-554:
+    the panel's three kind chains each had a different catch-all, two had
+    none). 'list' is not a panel kind (an array; declared in JSON) and is
+    handled by name at each caller."""
+    from ion_gym.physics.beam_spec import DIST_FIELDS
+    if kind not in DIST_FIELDS:
+        raise ValueError(f"beam panel: distribution kind {kind!r} is not "
+                         f"one of {list(DIST_FIELDS)}")
+    return DIST_FIELDS[kind]
+
+
+VIEW_PAD_FRAC = 0.04    # view margin either side of an axis range
+
+
+def _axis_view_range(user_bounds, domain, fallback=None):
+    """THE initial (lo, hi) of one view axis, padded, or None = autorange
+    (L-547: the field view and the geometry preview each had their own
+    `_rng`, with OPPOSITE z rules, and the preview ignored the Bounds tab).
+
+    In order:
+      1. user_bounds -- the Bounds tab's min/max for this axis when both
+         are on and hi > lo (the scene-extent control, e.g. clamping a
+         z-invariant STL quad's infinite bands to the rod length);
+      2. domain -- SimApp._domain_range, the one deck-extent rule
+         (mirrors and signed origins included);
+      3. fallback -- a body extent the domain rule cannot know (the
+         axial z extent of a depth_mm == 0 transport geometry: the model's
+         z_extent_mm, or the preview masks' span);
+      4. None.
+    The domain WINS over the fallback: preferring a stored-half extent
+    over the canonical [-H, +H] frame on a declared z-mirror is the
+    range-vs-drawing disagreement _domain_range exists to prevent. On
+    every current deck the two never both answer for z (only stl2d,
+    depth_mm == 0, sets z_extent_mm, and its domain has no z), so the
+    field view is unchanged; the preview gains the Bounds tab.
+    Pure (no widgets): the preview calls it on a worker thread."""
+    if user_bounds is not None:
+        lo, hi = user_bounds
+    elif domain is not None:
+        lo, hi = domain
+    elif fallback is not None:
+        lo, hi = fallback
+    else:
+        return None
+    pad = VIEW_PAD_FRAC * (hi - lo)
+    return (lo - pad, hi + pad)
+
+
+def _stop_periodic(pcb, label):
+    """THE stop for a Panel periodic callback that drives a worker poll
+    (L-547: the stop was copied into every worker+poll site, with its
+    catch written three different ways). Returns None, so a caller writes
+    `own["pcb"] = _stop_periodic(own["pcb"], "solve")`.
+
+    Bokeh raises ValueError when the session already removed the callback
+    ("already ran or was already removed"), and a document torn down
+    mid-stop raises RuntimeError. Either way the callback is no longer
+    running -- the outcome this call exists for -- so nothing more is
+    done, and the case is printed with its label so it is on the record.
+    Anything else is a real failure and propagates."""
+    if pcb is None:
+        return None
+    try:
+        pcb.stop()
+    except (ValueError, RuntimeError) as e:
+        print(f"[{label}] periodic callback was already stopped "
+              f"({type(e).__name__}: {e})", flush=True)
+    return None
 # Control-column geometry (a duty box was once cut off by
 # the plot). A drive-group row is the widest thing the left column holds,
 # so the column width is DERIVED from that row instead of being a literal
@@ -454,7 +531,7 @@ class SimApp:
             # examples/projects.
             from ion_gym.io import paths
             from ion_gym.io.sim_spec import SimSpec as _SimSpec
-            _fj = paths.repo_root() / "examples" / "ion_funnel_rz.json"
+            _fj = paths.default_deck()
             try:
                 spec = _SimSpec.from_json(_fj.read_text())
             except Exception as e:
@@ -466,6 +543,7 @@ class SimApp:
         self.tabs = None                                # persistent container
         self._model = None
         self._scene = None
+        self._scene_warning = ""       # why _scene is None after a build
         self._cols = None
         self._handle = None
         self._stop = False
@@ -672,9 +750,7 @@ class SimApp:
                 if not worker.is_alive():
                     # died without reporting (interpreter-level only:
                     # work() sets done in a finally) — say so, stop
-                    pcb = own.pop("pcb", None)
-                    if pcb is not None:
-                        pcb.stop()
+                    _stop_periodic(own.pop("pcb", None), label)
                     if self._fig_loading_gen == gen:
                         self.pane.loading = False
                     self.status.object = (
@@ -687,9 +763,7 @@ class SimApp:
                 if self._fig_loading_gen == gen and not self.pane.loading:
                     self.pane.loading = True
                 return
-            pcb = own.pop("pcb", None)
-            if pcb is not None:
-                pcb.stop()
+            _stop_periodic(own.pop("pcb", None), label)
             finish()
 
         # fast path: a small build publishes with zero poll latency
@@ -1476,8 +1550,13 @@ class SimApp:
         # --- Gas tab
         self.w_gas_on = pn.widgets.Checkbox(name="collisions enabled",
                                             value=col.enabled)
+        # Widget values READ the spec (L-552: getattr fallbacks retyped
+        # the spec's own defaults -- 'hs', 1.0 Torr -- a second copy that
+        # could disagree). CollisionSpec always carries model, and
+        # P_torr is filled at construction (P_TORR_DEFAULT when unset).
+        from ion_gym.physics.collision3d import GASES
         self.w_col_model = pn.widgets.Select(
-            name="collision model", value=getattr(col, "model", "hs"),
+            name="collision model", value=col.model,
             options={"hard-sphere (HS)": "hs",
                      "diffusion (SDS)": "sds"},
             description="HS = discrete elastic hard-sphere collisions. "
@@ -1485,13 +1564,13 @@ class SimApp:
             "diffusion), matched to tabulated ion mobilities.")
         self.w_gas = pn.widgets.Select(
             name="buffer gas", value=col.gas,
-            options=["He", "H2", "N2", "air", "Ar", "CO2", "Kr", "Xe"])
+            options=list(GASES))         # THE gas table (collision3d)
         self.w_T = pn.widgets.FloatInput(
             name="gas temperature (K)", value=col.T_k,
             description="Buffer-gas temperature; sets the thermal velocity "
             "ions relax toward.")
         self.w_P = pn.widgets.FloatInput(name="P (Torr)",
-                                         value=getattr(col, "P_torr", 1.0))
+                                         value=float(col.P_torr))
         self.w_sigma = pn.widgets.LiteralInput(
             name="HS cross-section σ (m²)", value=col.sigma_m2,
             type=(int, float),
@@ -1500,7 +1579,7 @@ class SimApp:
             "collisions. Typical N₂ value ≈ 2.3e-18 m².")
         self.w_gdiam = pn.widgets.FloatInput(
             name="SDS gas diameter (nm)",
-            value=getattr(col, "gas_diam_nm", 0.366),
+            value=float(col.gas_diam_nm),     # the spec's own value
             description="Neutral gas molecule diameter, used only by the SDS "
             "(diffusion) model to set the mean free path. Air ≈ 0.366 nm.")
         # dt-adequacy advisor: text beside the pressure
@@ -1965,7 +2044,10 @@ class SimApp:
                     "core). The tail-fit percentile sets where the "
                     "Maxwell-Boltzmann log-tail slope is fit: for a "
                     "non-thermal distribution T_slope depends on this "
-                    "cut, so it is stated, not fixed."),
+                    "cut, so it is stated, not fixed. The estimators take "
+                    "ONE ion mass: a run that flew several m/z is assessed "
+                    "one m/z at a time, chosen with the **m/z filter** on "
+                    "the Analysis tab."),
                 pn.Row(self.w_therm_pctl, self.w_therm_bins,
                        self.w_therm_btn),
                 self.thermal_table, self.thermal_pane,
@@ -2700,7 +2782,7 @@ class SimApp:
         # Stats card lives in the first tab; created once (persistent
         # across in-place tab rebuilds), updated on every fly.
         if getattr(self, "stats", None) is None:
-            from ion_gym.physics.stats import stats_card
+            from ion_gym.ui.stats_card import stats_card
             self.stats = stats_card(collapsed=False)
 
         # MULTI-FA TAB. Every multi-FA control lives
@@ -3872,19 +3954,26 @@ class SimApp:
         physical clocks bound the step, both computed from the SAME
         kernel functions (no second physics):
         * RF: the fastest enabled drive period must be resolved —
-          advise dt <= T_RF/50.
+          advise dt <= T_RF / RF_MIN_STEPS_PER_PERIOD, the same floor
+          SimSpec.advisories() warns at (this pane used T_RF/50, so it
+          could show a tick while the advisory warned).
         * HS collisions: occurrence is a Poisson draw per step with
-          P = 1-exp(-v dt/lambda(v)); keeping P <~ 0.1 (dt <= tau/10,
-          tau = lambda/v at the characteristic ion speed) preserves the
-          exponential free-path statistics — larger steps undercount
-          multiple collisions.
+          P = 1-exp(-v dt/lambda(v)); keeping P <~ 0.1 (dt <= tau /
+          HS_DT_PER_COLLISION_TIME, tau = lambda/v at the characteristic
+          ion speed) preserves the exponential free-path statistics —
+          larger steps undercount multiple collisions.
         * SDS: the mobility damping time 1/damping must be resolved —
-          advise dt <= 0.1/damping.
-        Errors render IN the pane, never silently."""
+          advise dt <= (1/damping) / SDS_DT_PER_DAMPING_TIME.
+        Gas clocks are taken over EVERY declared species at the source's
+        real charge, and the tightest wins (this pane once used the first
+        species at z = 1). Errors render IN the pane, never silently."""
         try:
             import math as _m
-            from ion_gym.physics.collision3d import (_mfp_mm, gas_mass,
-                                                     KB, KG_AMU, E_CHG)
+            from ion_gym.physics.collision3d import (
+                _mfp_mm, gas_mass, KB, KG_AMU, E_CHG,
+                HS_DT_PER_COLLISION_TIME)
+            from ion_gym.physics.constants import TORR_PA
+            from ion_gym.io.sim_spec import RF_MIN_STEPS_PER_PERIOD
             s = self.spec
             lines = []
             recs = []
@@ -3892,21 +3981,30 @@ class SimApp:
                   if getattr(g, "amplitude_v", 0.0)]
             if fs:
                 t_rf_ns = 1e9 / max(fs)
-                recs.append(t_rf_ns / 50.0)
+                _rf_dt = t_rf_ns / RF_MIN_STEPS_PER_PERIOD
+                recs.append(_rf_dt)
                 lines.append(f"fastest RF period **{t_rf_ns:.1f} ns** "
-                             f"(resolve: dt &le; {t_rf_ns/50:.2f} ns)")
+                             f"(resolve: dt &le; {_rf_dt:.2f} ns)")
             if self.w_gas_on.value:
                 T = float(self.w_T.value)
-                P_pa = float(self.w_P.value) * 133.322
-                mz = float(self._source_spec().source.mz_list[0])
+                P_pa = float(self.w_P.value) * TORR_PA
+                _src = self._source_spec().source
+                masses = [float(m) for m in _src.mz_list]
+                if not masses:
+                    raise ValueError("source.mz_list is empty; declare at "
+                                     "least one species mass")
+                charge = int(_src.charge)
                 mg = gas_mass(self.w_gas.value)
                 c_star = _m.sqrt(2 * KB * T / (mg * KG_AMU)) / 1000.0
                 c_bar = _m.sqrt(8 * KB * T / (_m.pi * mg * KG_AMU)) / 1000.0
-                ke = max(float(self._source_spec().source.ke_hi), 0.0)
-                v_th = _m.sqrt(8 * KB * T
-                               / (_m.pi * mz * KG_AMU)) / 1000.0
-                v_ke = _m.sqrt(2 * ke * E_CHG / (mz * KG_AMU)) / 1000.0
-                v_ch = max(v_th, v_ke, 1e-9)
+                ke = max(float(_src.ke_hi), 0.0)
+
+                def _v_ch(mz):
+                    v_th = _m.sqrt(8 * KB * T
+                                   / (_m.pi * mz * KG_AMU)) / 1000.0
+                    v_ke = _m.sqrt(2 * ke * E_CHG
+                                   / (mz * KG_AMU)) / 1000.0
+                    return max(v_th, v_ke, 1e-9)
                 if self.w_col_model.value == "sds":
                     from ion_gym.physics.sds import (
                         ion_params as _sds_ion_params,
@@ -3924,24 +4022,34 @@ class SimApp:
                         md = _sds_load_mass(
                             os.path.join(_sdir, _sds_mod.MOBILITY_FILE))
                         self._sds_massdata = md
-                    prm = _sds_ion_params(mz, 1.0, mg,
-                                          float(self.w_gdiam.value), T,
-                                          float(self.w_P.value), md)
-                    t_damp_ns = 1e3 / prm["damping"]   # damping in 1/us
-                    recs.append(0.1 * t_damp_ns)
+                    # the tightest damping time over every species, at the
+                    # source's real charge (ion_params damps with abs(z))
+                    t_damp_ns, mz = min(
+                        (1e3 / _sds_ion_params(
+                            m, charge, mg, float(self.w_gdiam.value), T,
+                            float(self.w_P.value), md)["damping"], m)
+                        for m in masses)              # damping in 1/us
+                    _sds_dt = t_damp_ns / _sds_mod.SDS_DT_PER_DAMPING_TIME
+                    recs.append(_sds_dt)
                     lines.append(
-                        f"SDS damping time **{t_damp_ns:.1f} ns** "
-                        f"(resolve: dt &le; {0.1*t_damp_ns:.2f} ns)")
+                        f"SDS damping time **{t_damp_ns:.1f} ns** at m/z "
+                        f"{mz:g} (resolve: dt &le; {_sds_dt:.2f} ns)")
                 else:
-                    lam = _mfp_mm(v_ch, T, P_pa,
-                                  float(self.w_sigma.value), c_star, c_bar)
-                    tau_ns = 1e3 * lam / v_ch
-                    recs.append(tau_ns / 10.0)
+                    # the shortest collision time over every species
+                    tau_ns, lam, v_ch, mz = min(
+                        (1e3 * _l / _v, _l, _v, m)
+                        for m in masses
+                        for _v in (_v_ch(m),)
+                        for _l in (_mfp_mm(_v, T, P_pa,
+                                           float(self.w_sigma.value),
+                                           c_star, c_bar),))
+                    _hs_dt = tau_ns / HS_DT_PER_COLLISION_TIME
+                    recs.append(_hs_dt)
                     lines.append(
                         f"mean free path **{lam:.3f} mm** at "
-                        f"v&#8776;{v_ch:.2f} mm/&micro;s &rarr; collision "
-                        f"time **{tau_ns:.1f} ns** (Poisson sampling: "
-                        f"dt &le; {tau_ns/10:.2f} ns)")
+                        f"v&#8776;{v_ch:.2f} mm/&micro;s (m/z {mz:g}) "
+                        f"&rarr; collision time **{tau_ns:.1f} ns** "
+                        f"(Poisson sampling: dt &le; {_hs_dt:.2f} ns)")
             if not lines:
                 self.w_dt_advice.object = (
                     "*no RF drive or collisions enabled — dt is "
@@ -4256,26 +4364,11 @@ class SimApp:
         _zext = getattr(model, "z_extent_mm", None)
 
         def _rng(lbl):
-            # USER BOUNDS FIRST: if the Bounds tab has min/max enabled for
-            # this axis, the view honours it — this is the scene-extent
-            # control (e.g. clamp a z-invariant STL quad's infinite bands to
-            # the physical 120 mm rod length). Falls back to geometry/model
-            # extents.
-            bw = self.w_bnd.get(lbl)
-            if bw is not None and bw["min_on"].value and bw["max_on"].value:
-                lo, hi = float(bw["min"].value), float(bw["max"].value)
-                if hi > lo:
-                    pad = 0.04 * (hi - lo)
-                    return (lo - pad, hi + pad)
-            if lbl == "z" and _zext is not None:
-                lo, hi = _zext
-            else:
-                dr = self._domain_range(lbl)      # ONE rule (r-z mirrored)
-                if dr is None:
-                    return None
-                lo, hi = dr
-            pad = 0.04 * (hi - lo)
-            return (lo - pad, hi + pad)
+            # THE view-range rule (module _axis_view_range), shared with
+            # the geometry preview
+            return _axis_view_range(self._user_bounds(lbl),
+                                    self._domain_range(lbl),
+                                    _zext if lbl == "z" else None)
 
         ra, rb = _rng(la), _rng(lb)
         if ra is not None:
@@ -4420,6 +4513,20 @@ class SimApp:
             print(f"[sim_app] WARNING: pane sizing failed ({e}); "
                   f"the view may render stretched")
 
+    @staticmethod
+    def _el_mask(masks, i, el):
+        """Electrode `el` (position `i` in the spec list) -> its solve mask,
+        or None. Two keyings exist, both exact: native planar/r-z key by the
+        DECLARED NAME (raster2d.el_masks_from_labels with the electrode
+        list); the STL builders key by integer label -- the declared basis,
+        else the 1-based list position their rasterizers enumerate. Looking
+        up `.basis` alone (None on native decks) never found a mask."""
+        if el.name in masks:
+            return masks[el.name]
+        if el.basis is not None and el.basis in masks:
+            return masks[el.basis]
+        return masks.get(i + 1)
+
     def _refresh_dc_derived(self, _=None):
         """Show what the ladder ACTUALLY puts on each electrode.
 
@@ -4495,26 +4602,32 @@ class SimApp:
             #     in the WIDTH/x slot (axis 0) and the last axis is r.  An imported-array
             #     r-z import with a DC ladder therefore had its V/cm measured
             #     ACROSS THE RADIUS and printed as if it were down the axis.
-            # (b) `if masks:` -- `el_masks` is set by build_stl / build_stl3d /
-            #     the retired import route and NEVER by build_planar or build_rz,
-            #     NATIVELY built spec the gradient silently did not appear.  Not
-            #     "approximate": absent, with no word said.
+            # (b) `if masks:` fell through with no word said.  Every builder
+            #     sets `el_masks` now (build_planar, build_rz, build_stl,
+            #     build_stl3d -- L-440), so the usual reason is simply that
+            #     nothing is solved yet (self._model is None); that is what
+            #     the readout says.  A solved model without masks is named by
+            #     its class, never explained by a claim about the builders.
             # (c) a 2-D xyz cross-section has NO axial axis in the mask at all
             #     (z is the uniform direction).  There is no gradient to compute,
             #     and computing one along y would be a number with no meaning.
             #
             # DECLARE the axis; refuse when there isn't one.
             masks = getattr(self._model, "el_masks", None)
-            if not masks:
-                grad = (" · _gradient unavailable: this model does not expose "
-                        "per-electrode masks (native builders do not set "
-                        "`el_masks`)_")
+            if self._model is None:
+                # PI wording 2026-09-13 (L-440)
+                grad = " · _Solve field to apply gradient_"
+            elif not masks:
+                grad = (" · _gradient unavailable: the solved "
+                        f"{type(self._model).__name__} carries no "
+                        "per-electrode masks_")
             else:
-                m0 = masks.get(mem[0].basis)
-                m1 = masks.get(mem[-1].basis)
+                _pos = {id(e): k for k, e in enumerate(s.geometry.electrodes)}
+                m0 = self._el_mask(masks, _pos[id(mem[0])], mem[0])
+                m1 = self._el_mask(masks, _pos[id(mem[-1])], mem[-1])
                 if m0 is None or m1 is None:
-                    grad = (" · _gradient unavailable: no mask for "
-                            f"`{mem[0].basis}`/`{mem[-1].basis}`_")
+                    grad = (" · _gradient unavailable: no solve mask for "
+                            f"`{mem[0].name}`/`{mem[-1].name}`_")
                 else:
                     ax = _axial_axis(s.geometry, m0.ndim)
                     if ax is None:
@@ -4663,27 +4776,37 @@ class SimApp:
         q = ("efield" if self.w_fieldmode.value.startswith("|E|")
              else "pe" if self.w_fieldmode.value.startswith("PE")
              else "phi")
-        idx = None
-        try:
-            h = float(getattr(model, "h_mm", 0.0)) or 0.0
-            ax = {"xy": 2, "xz": 1, "yz": 0}[plane]
-            n = model.A.shape[ax]
-            # world_off_mm composes mirror + declared origin (signed
-            # frames); mirror_off_mm alone left a signed-origin 3-D
-            # deck's slice slider in the stored frame.
-            off = (getattr(model, "world_off_mm", None)
-                   or getattr(model, "mirror_off_mm", (0.0, 0.0, 0.0)))[ax]
-            lo, hi = off, off + (n - 1) * h
-            step = max(h, (hi - lo) / 200.0)
-            if abs(self.w_viewslice.end - hi) > 1e-9:   # re-range per plane
-                self.w_viewslice.start = lo - step
-                self.w_viewslice.end = hi
-                self.w_viewslice.step = step
-            if self.w_viewslice.value > self.w_viewslice.start and h > 0:
-                idx = int(round((self.w_viewslice.value - off) / h))
-        except Exception as e:
-            print(f"[view] slice range unavailable ({e!r}); using the "
-                  f"automatic slice")
+        # A 2-D model (planar, r-z) has no lattice across a transport view
+        # -- its A is 2-D and it carries no h_mm -- so there is nothing to
+        # cut and the automatic slice is the answer (the r-z yz contours
+        # label the station they use). That case is named here; it used to
+        # be reached by an `except Exception` that ALSO hid real failures
+        # (L-541): a broken model or slider left the slider showing the
+        # user's value while the view drew the automatic cut, with the
+        # reason only on the console. Every 3-D route builds a
+        # Stl3DModel (A 3-D, h_mm set), so anything that fails below it is
+        # a defect and raises to the redraw's reporting boundary.
+        A = getattr(model, "A", None)
+        h = getattr(model, "h_mm", None)
+        if getattr(A, "ndim", 0) != 3 or not h:
+            return q, None
+        h = float(h)
+        ax = {"xy": 2, "xz": 1, "yz": 0}[plane]
+        n = A.shape[ax]
+        # world_off_mm composes mirror + declared origin (signed
+        # frames); mirror_off_mm alone left a signed-origin 3-D
+        # deck's slice slider in the stored frame.
+        off = (getattr(model, "world_off_mm", None)
+               or getattr(model, "mirror_off_mm", (0.0, 0.0, 0.0)))[ax]
+        lo, hi = off, off + (n - 1) * h
+        step = max(h, (hi - lo) / 200.0)
+        if abs(self.w_viewslice.end - hi) > 1e-9:   # re-range per plane
+            self.w_viewslice.start = lo - step
+            self.w_viewslice.end = hi
+            self.w_viewslice.step = step
+        idx = None          # at the slider's floor: the automatic slice
+        if self.w_viewslice.value > self.w_viewslice.start:
+            idx = int(round((self.w_viewslice.value - off) / h))
         return q, idx
 
     def _mirror_display_offset(self):
@@ -4706,6 +4829,16 @@ class SimApp:
         if mo is not None:
             out["x"], out["y"], out["z"] = (float(v) for v in mo)
         return out
+
+    def _user_bounds(self, lbl):
+        """The Bounds tab's (min, max) for one axis when BOTH are enabled
+        and max > min, else None. Read on the document loop (widgets); the
+        preview gets a snapshot of it."""
+        bw = getattr(self, "w_bnd", {}).get(lbl)
+        if bw is None or not (bw["min_on"].value and bw["max_on"].value):
+            return None
+        lo, hi = float(bw["min"].value), float(bw["max"].value)
+        return (lo, hi) if hi > lo else None
 
     def _domain_range(self, lbl):
         """Declared view extent for one axis, in mm.  ONE rule, both views.
@@ -5090,12 +5223,7 @@ class SimApp:
         self._solve_worker = worker
 
         def _stop_own():
-            if own["pcb"] is not None:
-                try:
-                    own["pcb"].stop()      # already-stopped callback: benign
-                except (ValueError, RuntimeError):
-                    pass
-                own["pcb"] = None
+            own["pcb"] = _stop_periodic(own["pcb"], "solve")
 
         def poll():
             if self._solve_gen != gen:
@@ -5110,7 +5238,8 @@ class SimApp:
                     try:
                         self.pane.loading = False
                     except (AttributeError, RuntimeError):
-                        pass
+                        pass    # pane torn down (session closed) mid-solve:
+                        #         no spinner left to clear, nothing to report
                 return
             if not st["done"]:
                 # H9e: a worker that DIES without setting done (e.g. an
@@ -5125,7 +5254,8 @@ class SimApp:
                         try:
                             self.pane.loading = False
                         except (AttributeError, RuntimeError):
-                            pass
+                            pass    # pane torn down mid-solve: no spinner
+                            #         to clear; the status below reports
                     self.status.object = (
                         "**build stopped unexpectedly** — the solve thread "
                         "ended without a result (most likely out of memory "
@@ -5315,15 +5445,26 @@ class SimApp:
     def _rebuild_scene(self, model):
         """The app builds a Scene — the
         R1 single-source-of-truth for every geometry question (viz R2:
-        dimensionality and extents come from the BODIES). Failure is loud
-        but never blocks a solve."""
+        dimensionality and extents come from the BODIES).
+
+        A REFUSAL (VizError / ValueError: the scene builder naming what it
+        cannot draw) never blocks a solve: the scene is None, axis ranges
+        fall back to the spec/autorange rule (_domain_range), and the
+        reason is kept in self._scene_warning, which the field-draw and
+        fly completion lines append -- it was printed to the console only
+        (L-541). Any other exception is a defect and raises."""
+        from ion_gym.viz.viz_core import scene_from_simspec, VizError
+        self._scene_warning = ""
         try:
-            from ion_gym.viz.viz_core import scene_from_simspec
             self._scene = scene_from_simspec(self.spec, model)
-        except Exception as e:
+        except (VizError, ValueError) as e:
             self._scene = None
-            print(f"scene build FAILED ({e!r}) — geometry questions fall "
-                  f"back to spec/autorange until the next solve")
+            self._scene_warning = (
+                f"\n\n⚠ **scene not built** ({type(e).__name__}: {e}) — "
+                f"view ranges come from the spec/autorange until the "
+                f"next solve.")
+            print(f"[sim_app] scene build refused ({type(e).__name__}: "
+                  f"{e})", flush=True)
 
     def _draw_background(self, done_msg=None, allow_solve=True):
         self._sync_planes()   # a control must not offer an impossible plane
@@ -5366,7 +5507,11 @@ class SimApp:
             def _publish(fig):
                 self.pane.object = fig
                 if done_msg:
-                    self.status.object = done_msg
+                    self.status.object = (done_msg
+                                          + getattr(self, "_scene_warning",
+                                                    ""))
+                elif getattr(self, "_scene_warning", ""):
+                    self.status.object += self._scene_warning
                 if getattr(self, "_pe_tab", None) is not None:
                     self._pe_tab.refresh()
                 if getattr(self, "_fs_tab", None) is not None:
@@ -5577,6 +5722,8 @@ class SimApp:
         mz_list = list(self.spec.source.mz_list)
         mz_color = _mz_color_map(mz_list)
         _mz_fallbacks = [0]
+        from ion_gym.physics.ion_envelope import (summary_fate, summary_value,
+                                                  fate_name, fate_color)
         def _mz_of_result(i):
             try:
                 return mz_of(self.spec, i)
@@ -5669,9 +5816,11 @@ class SimApp:
                          legendgroup=f"mz{m:g}", showlegend=True,
                          kind="path")
             elif cidx is None:
+                # the fate through THE accessor and colour table (L-530,
+                # D5): a summary with no fate is the named unknown (grey);
+                # it was drawn as a timeout via .get("kind", 2)
                 col = (solid if solid is not None
-                       else _FATE_COLOR.get(r.summary.get("kind", 2),
-                                            "#888"))
+                       else fate_color(summary_fate(r.summary)))
                 g = _grp(("solid", col), color=col, name=None,
                          legendgroup=None, showlegend=False, kind="path")
             else:
@@ -5688,13 +5837,28 @@ class SimApp:
             g["y"] = np.concatenate(g["y"]) if g["y"] else _E
             g["cvals"] = (np.concatenate(g["cvals"])
                           if g["cvals"] else _E)
-        # fate-marker arrays come from EVERY result (never the subset)
+        # fate-marker arrays come from EVERY result (never the subset),
+        # through the summary accessor (L-530, D5). Grouped by the fates
+        # PRESENT, so an ion with no fate gets the named unknown marker
+        # (the loops below walked the known codes only and dropped it). An
+        # ion whose summary lacks this plane's end position cannot be
+        # placed: it is COUNTED and reported, not indexed into a KeyError.
+        _fate_pts, _no_end = {}, [0]
+        for r in results:
+            _xa = summary_value(r.summary, ka)
+            _ya = summary_value(r.summary, kb)
+            if _xa is None or _ya is None:
+                _no_end[0] += 1
+                continue
+            _px, _py = _fate_pts.setdefault(summary_fate(r.summary),
+                                            ([], []))
+            _px.append(_xa)
+            _py.append(_ya)
+        _fates_present = sorted(_fate_pts)
+
         def _fate_xy(code):
-            xs = np.array([r.summary[ka] for r in results
-                           if r.summary.get("kind") == code], float)
-            ys = np.array([r.summary[kb] for r in results
-                           if r.summary.get("kind") == code], float)
-            return xs, ys
+            _px, _py = _fate_pts.get(code, ([], []))
+            return np.array(_px, float), np.array(_py, float)
 
         def _add_group(fig, g):
             if g["kind"] == "channel":
@@ -5717,8 +5881,8 @@ class SimApp:
 
         def _fate_trace(fig, code, xs, ys):
             fig.add_scatter(
-                x=xs, y=ys, mode="markers", name=_FATE_NAME[code],
-                marker=dict(color=_FATE_COLOR[code],
+                x=xs, y=ys, mode="markers", name=fate_name(code),
+                marker=dict(color=fate_color(code),
                             size=self.w_impactsize.value,
                             symbol=self.w_impactsym.value,
                             line=dict(width=0.5, color="white")))
@@ -5775,8 +5939,8 @@ class SimApp:
 
         def _fate_dict(code, xs, ys):
             return dict(type="scatter", x=xs, y=ys, mode="markers",
-                        name=_FATE_NAME[code],
-                        marker=dict(color=_FATE_COLOR[code],
+                        name=fate_name(code),
+                        marker=dict(color=fate_color(code),
                                     size=self.w_impactsize.value,
                                     symbol=self.w_impactsym.value,
                                     line=dict(width=0.5, color="white")))
@@ -5808,8 +5972,7 @@ class SimApp:
                 "data": (_bank["base_data"]
                          + [_path_dict(g) for g in _groups.values()]
                          + [_fate_dict(c, *_fate_xy(c))
-                            for c in sorted(_FATE_NAME)
-                            if _fate_xy(c)[0].size]),
+                            for c in _fates_present]),
                 "layout": {**_bank["base_layout"],
                            "annotations": (_bank["base_anns"]
                                            + _disclosure_ann())},
@@ -5829,15 +5992,13 @@ class SimApp:
                                    or []))
             for key, g in _groups.items():
                 _add_group(fig, g)
-            # EVERY known fate, from the single table — not a hardcoded
-            # (0,1,2,3). Station absorptions (5 impact plane, 6 detect)
-            # were being dropped here, so an ion stopped by a detector
-            # patch left no impact marker and the working splat looked
-            # like it had done nothing (2026-09-12).
-            for code in sorted(_FATE_NAME):
+            # EVERY fate PRESENT, named and coloured by the single table —
+            # not a hardcoded (0,1,2,3) (station absorptions 5/6 were once
+            # dropped here, 2026-09-12) and not the table's known codes
+            # either (that dropped the unknown fate; D5, 2026-10-16).
+            for code in _fates_present:
                 xs, ys = _fate_xy(code)
-                if xs.size:
-                    _fate_trace(fig, code, xs, ys)
+                _fate_trace(fig, code, xs, ys)
             _apply_disclosure()
             self.pane.object = fig
             if not live:
@@ -5849,6 +6010,11 @@ class SimApp:
                 f"**m/z colour caveat** — {_mz_fallbacks[0]} ion(s) have no "
                 f"recorded m/z (pre-v280 run); coloured as the first "
                 f"species. Re-fly to record per-ion m/z.")
+        if _no_end[0]:
+            self.status.object += (
+                f"\n\n⚠ {_no_end[0]} ion(s) carry no recorded "
+                f"{ka}/{kb} end position, so they have no fate marker in "
+                f"this view (damaged or legacy summaries).")
         self.stats.update(results, self.spec,
                           stations=self._station_stats(results))
         if getattr(self, "stats_impact", None) is not None:
@@ -6208,12 +6374,7 @@ class SimApp:
         t0 = time.time()
 
         def _stop_own():
-            if own["pcb"] is not None:
-                try:
-                    own["pcb"].stop()          # already-stopped: benign
-                except (ValueError, RuntimeError):
-                    pass
-                own["pcb"] = None
+            own["pcb"] = _stop_periodic(own["pcb"], "trajectory save")
 
         def poll():
             if not st["done"]:
@@ -6233,22 +6394,27 @@ class SimApp:
                 return
             _stop_own()
             if st["err"] is not None:
+                e = st["err"]
                 self.status.object = (
-                    f"**trajectory save failed:** {st['err']}")
+                    f"**trajectory save failed:** {type(e).__name__}: {e}")
                 return
             path = st["path"]
+            # The file is written: a failed re-read of its metadata or size
+            # is not a save failure and is not reported as one -- but it is
+            # NAMED, because the skipped-ion count is information the user
+            # would otherwise silently lose (L-541).
             try:
                 meta = field_io.read_trajectory_meta(path)
                 skipped = (f" ({meta['n_skipped']} ions had no recorded "
                            f"trajectory and were skipped)"
                            if meta.get("n_skipped") else "")
-            except (OSError, ValueError, field_io.TrajectoryFormatError):
-                skipped = ""     # file is written; a meta re-read hiccup is
-                #                  not a save failure, so do not claim one
+            except (OSError, ValueError, field_io.TrajectoryFormatError) as e:
+                skipped = (f" (saved, but its metadata could not be re-read "
+                           f"to count skipped ions: {type(e).__name__}: {e})")
             try:
                 size_note = f", {os.path.getsize(path) / 1e6:,.1f} MB on disk"
-            except OSError:
-                size_note = ""
+            except OSError as e:
+                size_note = f", size unavailable ({e})"
             self._refresh_field_picker()
             self.status.object = (
                 f"**trajectories saved** in {st['elapsed']:0.1f}s"
@@ -6268,9 +6434,17 @@ class SimApp:
                 own["pcb"] = pn.state.add_periodic_callback(poll, 200)
                 self._ensure_watchdog_pulse()
                 started = True
-            except (RuntimeError, ValueError):
+            except (RuntimeError, ValueError) as e:
+                # A served session that cannot schedule the poll: the save
+                # must still complete and report, so wait for it here, on
+                # the loop -- said out loud, since it blocks the UI
+                # (L-555).
+                print(f"[sim_app] trajectory save: could not schedule the "
+                      f"progress poll ({type(e).__name__}: {e}); waiting "
+                      f"on the UI thread", flush=True)
                 started = False
         if not started:
+            # headless (no loop to keep responsive), or unschedulable above
             worker.join()
             poll()
 
@@ -6291,12 +6465,16 @@ class SimApp:
         except (field_io.TrajectoryFormatError, OSError, ValueError) as e:
             self.status.object = f"**trajectories unreadable:** {e}"
             return
-        summs = meta.get("summaries") or [{}] * len(trajs)
+        # an ion with no stored summary loads with an EMPTY one, which the
+        # summary accessor reads as fate UNKNOWN (L-530) -- and the count
+        # is reported below, never hidden
+        from ion_gym.physics.ion_envelope import summary_fate
+        summs = list(meta.get("summaries") or [])
         results = [IonResult(index=i, traj=trajs[i],
                              summary=(summs[n] if n < len(summs) else {}))
                    for n, i in enumerate(sorted(trajs))]
-        n_term = sum(1 for r in results
-                     if r.summary.get("kind") == 0)
+        n_nosum = max(0, len(results) - len(summs))
+        n_term = sum(1 for r in results if summary_fate(r.summary) == 0)
         fin = EnsembleProgress(done=len(results), total=len(results),
                                elapsed_s=0.0, n_terminated=n_term,
                                results=results)
@@ -6309,6 +6487,10 @@ class SimApp:
         self._redraw(results)
         msg = (f"**trajectories loaded** as run '{name}' "
                f"({len(results)} ions).")
+        if n_nosum:
+            msg += (f" ⚠ {n_nosum} ion(s) carry no stored summary: their "
+                    f"fate, m/z and end point are UNKNOWN (shown as such, "
+                    f"not guessed).")
         if warn:
             msg += f" ⚠ {warn}."
         self.status.object = msg
@@ -6347,19 +6529,34 @@ class SimApp:
                 "loading a 3-D geometry (scene or STL)_")
 
     def _on_raster(self, _=None):
+        """3-D voxel raster of the LOADED geometry — the labels the solver
+        consumes, per route's OWN rasterizer (never a second opinion):
+        scene3d -> rasterize3d.rasterize of the spec's scene; stl3d ->
+        stl_masks_3d; shapes3d -> the built model's native 3-D labels;
+        planar / r-z / stl2d -> the built model's 2-D labels, made 3-D by
+        the DECLARED symmetry (revolve r-z, extrude the rest).
+
+        The route comes from sim_build.build_route, the classification
+        build_run dispatches on (L-547). This used to re-derive it: any
+        all-STL deck went to the 3-D STL voxelizer even at depth_mm == 0,
+        where the solver is stl2d -- a second opinion of the labels -- and
+        the final else treated every other route as 2-D or native 3-D. An
+        unknown route now refuses by name."""
         if self._subject_is_assembly():
             self.status.object = ("**Raster is not available for a multi-FA instrument** — it operates on the single displayed FA. Use *Set FA View* first.")
             return
-        """3-D voxel raster of the LOADED geometry — the labels the solver
-        consumes, per route's OWN rasterizer (never a second opinion):
-        scene3d -> rasterize3d.rasterize; stl3d -> stl_masks_3d. 2-D
-        routes are refused with the reason (their standard view already
-        draws the solver labels)."""
-        from ion_gym.viz.viz_core import voxel_views, VizError
+        from ion_gym.viz.viz_core import voxel_views, voxel_views_2d, VizError
+        from ion_gym.physics.sim_build import build_route
         self._sync_spec()
         spec = self.spec
         try:
-            if spec.scene is not None:
+            route = build_route(spec).builder
+            if route == "scene3d":
+                if spec.scene is None:
+                    raise VizError(
+                        "scene3d route but the spec carries no scene — "
+                        "its builder rasterizes the embedded scene, so "
+                        "there are no labels to show")
                 from ion_gym.physics.scene3d import GeomScene
                 from ion_gym.physics.rasterize3d import rasterize
                 sc = GeomScene.from_json(dict(spec.scene))
@@ -6376,9 +6573,7 @@ class SimApp:
                 volts = {e.index: e.voltage for e in sc.electrodes
                          if isinstance(e.voltage, (int, float))}
                 title = sc.name or spec.name
-            elif spec.builder == "stl3d" or (
-                    spec.geometry.electrodes and
-                    all(e.stl for e in spec.geometry.electrodes)):
+            elif route == "stl3d":
                 import numpy as np
                 from ion_gym.physics.build_stl3d import stl_masks_3d
                 masks = stl_masks_3d(spec)
@@ -6392,12 +6587,8 @@ class SimApp:
                 volts = {i + 1: e.dc for i, e in
                          enumerate(spec.geometry.electrodes)}
                 title = spec.name
-            else:
-                # 2-D route (planar / r-z): the 3rd dimension is the
-                # DECLARED symmetry — revolve r-z, extrude planar. The
-                # labels come from the built model (a
-                # raster for ALL geometries incl. r-z).
-                from ion_gym.viz.viz_core import voxel_views_2d
+            elif route in ("shapes3d", "planar", "rz", "stl2d"):
+                # The labels come from the BUILT model (the solver's own).
                 model = getattr(self, "_model", None)
                 if model is None or not hasattr(model, "ele"):
                     self._raster_status.object = (
@@ -6405,20 +6596,19 @@ class SimApp:
                         "field first; the raster shows the solver's own "
                         "labels, which exist once the geometry is built.")
                     return
-                sym = getattr(self.spec.geometry.symmetry, "coords", "xyz")
-                mode = "rz" if sym == "rz" else "planar"
                 names = {i + 1: e.name for i, e in
                          enumerate(spec.geometry.electrodes)}
                 volts = {i + 1: e.dc for i, e in
                          enumerate(spec.geometry.electrodes)}
                 import numpy as np
                 ele = np.asarray(model.ele)
-                if ele.ndim == 3 and ele.shape[2] > 1:
-                    # a LOADED imported 3-D geometry lands here (not a
-                    # scene, electrodes carry no .stl), so its labels are
-                    # already a native 3-D grid — render with voxel_views,
-                    # NOT voxel_views_2d, which rejects a 3-D grid (the
-                    # raster refused on a loaded json).
+                if route == "shapes3d":
+                    # native 3-D labels (an imported/inline 3-D geometry:
+                    # no scene, no STL) -- voxel_views, not voxel_views_2d
+                    if ele.ndim != 3:
+                        raise VizError(
+                            f"shapes3d model labels are {ele.ndim}-D; "
+                            f"expected a 3-D grid")
                     figs = voxel_views(ele, spec.geometry.mm_per_gu,
                                        names=names, voltages=volts,
                                        title=spec.name)
@@ -6431,6 +6621,8 @@ class SimApp:
                         "**raster computed** (native 3-D grid from the "
                         "loaded geometry).")
                     return
+                # 2-D routes: the 3rd dimension is the DECLARED symmetry
+                mode = "rz" if route == "rz" else "planar"
                 figs = voxel_views_2d(
                     model.ele, spec.geometry.mm_per_gu, symmetry=mode,
                     names=names, voltages=volts, title=spec.name)
@@ -6440,9 +6632,13 @@ class SimApp:
                     for k, v in figs.items()]
                 self._apply_raster_visibility()
                 self._raster_status.object = (
-                    f"**raster computed** ({mode}: 3-D via declared "
+                    f"**raster computed** ({route}: 3-D via declared "
                     f"symmetry; 2-D views exact solver labels).")
                 return
+            else:
+                raise VizError(f"route {route!r} has no raster (known: "
+                               f"scene3d, stl3d, shapes3d, planar, rz, "
+                               f"stl2d)")
             figs = voxel_views(lab, h, names=names, voltages=volts,
                                title=title)
         except VizError as e:
@@ -6471,8 +6667,8 @@ class SimApp:
         make the disk footprint of a model visible and prunable, and move
         the clear controls out of Config › Runs to their own home."""
         import panel as pn
-        from ion_gym.io.fa_cache import DEFAULT_ROOT
-        self._cache_root = os.path.expanduser(DEFAULT_ROOT)
+        from ion_gym.io.paths import cache_root
+        self._cache_root = str(cache_root())
         self._cache_loc = pn.pane.Markdown("")
         import pandas as _pd
         # Tabulator, not a static DataFrame pane (ruled 2026-09-11):
@@ -6600,10 +6796,16 @@ class SimApp:
         matched, not a positional index."""
         try:
             df = self._cache_table.selected_dataframe
-        except (AttributeError, IndexError):
+        except (AttributeError, IndexError) as e:
+            # a selection index left over from the previous inventory (the
+            # table was refreshed under it): there is no row to follow, so
+            # the picker keeps its value -- said on the tab, not dropped
+            self._cache_status.object = (
+                f"_table selection is stale ({type(e).__name__}) — click "
+                f"the row again_")
             return
         if df is None or not len(df):
-            return
+            return          # selection cleared: nothing to follow
         lab = getattr(self, "_cache_label_of_key12", {}).get(
             str(df.iloc[0]["key"]))
         if lab:
@@ -6734,25 +6936,32 @@ class SimApp:
         if key is None:
             self._cache_status.object = "_nothing to remove (refresh first)_"
             return
-        ok, freed = remove(key)
-        if ok:
-            self._cache_status.object = (
-                f"**removed** `{key[:12]}` — freed {freed / 1e6:.1f} MB")
+        # an entry that cannot be fully deleted raises CachePurgeIncomplete
+        # (an OSError naming each path, C4/L-543); it was uncaught here, so
+        # the click died in the callback with nothing on the tab
+        try:
+            ok, freed = remove(key)
+        except OSError as e:
+            outcome = (f"**NOT fully removed** `{key[:12]}` — "
+                       f"{type(e).__name__}: {e}")
         else:
-            self._cache_status.object = (
-                f"**not found** `{key[:12]}` — already gone?")
+            outcome = (f"**removed** `{key[:12]}` — freed "
+                       f"{freed / 1e6:.1f} MB" if ok else
+                       f"**not found** `{key[:12]}` — already gone?")
         self._refresh_cache_tab()
+        self._cache_status.object = outcome   # after the refresh's own line
 
     def _on_cache_clear_all(self, _=None):
-        # reuse the audited clear (disk + in-memory), then re-inventory
+        # The audited clear (disk + every in-memory cache, including
+        # build_stl3d's compose gradients through its clear_memory_cache),
+        # then re-inventory. A second, hand-rolled _COMPOSE_GRAD_CACHE
+        # clear sat here behind an "AUDITED: stated skip (see above)" with
+        # nothing above it (L-555); it duplicated the line above and is
+        # gone. The outcome is shown on THIS tab too: the refresh used to
+        # overwrite it with "inventory current", hiding a partial purge.
         self._on_clear_cache()
-        try:
-            from ion_gym.physics.build_stl3d import _COMPOSE_GRAD_CACHE
-            _COMPOSE_GRAD_CACHE.clear()
-        except (ImportError, AttributeError):
-            # AUDITED: stated skip (see above).
-            pass
         self._refresh_cache_tab()
+        self._cache_status.object = self.status.object
 
     def _on_clear_cache(self, _=None):
         """Purge every solved-field cache: the disk basis cache
@@ -6808,15 +7017,18 @@ class SimApp:
         recorded state, not a second recording that could drift):
             speed  = |v|                       (mm/us)
             ke_ev  = 1/2 m v^2                  (eV, m from this ion's m/z)
-            radius = sqrt(x^2 + y^2)            (mm, transverse to z)
-        Field channels (e_field, e_axial, ...) are NOT derivable from the
-        trajectory alone (they need the field sampled at each step, which the
-        3-D tracer does not currently store per point) — asking for one
-        returns None so the caller can report it cleanly rather than plot
-        zeros.
+            radius, e_axial, e_radial          about the deck's axis
+        The radial channels come from THE one derivation,
+        records.radial_values, about self.spec.radial_frame() (built in on
+        r-z, declared elsewhere; L-539 -- this assumed z through the
+        origin for radius and x for e_axial). With no axis, or without the
+        inputs recorded, a channel returns None so the caller reports it
+        cleanly rather than plotting zeros or a wrong-axis value.
         """
         import numpy as np
-        from ion_gym.io.records import TrajRecord
+        from ion_gym.io.records import TrajRecord, radial_values
+        from ion_gym.io.sim_spec import RADIAL_CHANNELS
+        from ion_gym.physics.constants import KG_AMU, E_CHG
         rec = TrajRecord(traj, cols)
         if name in rec:
             return rec[name]
@@ -6826,20 +7038,15 @@ class SimApp:
                            + rec["vz"] ** 2)
         if name == "ke_ev" and {"vx", "vy", "vz"} <= have:
             # v in mm/us -> m/s (*1e3); KE = 1/2 m v^2 / e, m = mz*amu
-            AMU, E = 1.66053906660e-27, 1.602176634e-19
             v2 = ((rec["vx"] ** 2 + rec["vy"] ** 2
                    + rec["vz"] ** 2) * 1e6)      # (m/s)^2
-            return 0.5 * (float(mz) * AMU) * v2 / E
-        if name == "radius" and {"x", "y"} <= have:
-            return np.sqrt(rec["x"] ** 2 + rec["y"] ** 2)
-        # FIELD channels: e_x/e_y/e_z are recorded base columns now; e_field
-        # (magnitude) and e_axial (the transport-axis component, x) derive
-        # from them exactly.
+            return 0.5 * (float(mz) * KG_AMU) * v2 / E_CHG
+        if name in RADIAL_CHANNELS:
+            frame = self.spec.radial_frame()
+            return None if frame is None else radial_values(name, rec, frame)
         if name == "e_field" and {"e_x", "e_y", "e_z"} <= have:
             return np.sqrt(rec["e_x"] ** 2 + rec["e_y"] ** 2
                            + rec["e_z"] ** 2)
-        if name == "e_axial" and "e_x" in rec:
-            return rec["e_x"]                    # transport axis is x
         return None
 
     def _on_hotspot_map(self, _=None):
@@ -6862,7 +7069,37 @@ class SimApp:
                 "the Integration tab and re-fly.")
             return
         from ion_gym.io.records import TrajRecord
-        n_show = int(self.w_hot_nions.value or 40)
+        from ion_gym.physics.collision3d import resolve_collisions
+        from ion_gym.physics.constants import K_B_EV
+        from ion_gym.viz.viz_core import (hotspot_figure, mask_outline_mm,
+                                          HOTSPOT_DEFAULT_KT)
+        n_show, cell = self.w_hot_nions.value, self.w_hot_cell.value
+        if n_show is None or cell is None or not cell > 0:
+            # the inputs are read as given; a blank used to become a
+            # retyped default (40 ions, 0.12 mm) here
+            self.hotspot_note.object = (
+                "**set the number of ions and a cell size > 0** for the "
+                "hot-spot map.")
+            return
+        n_show, cell = int(n_show), float(cell)
+        # THE threshold: typed (0 is a value, not blank), else
+        # HOTSPOT_DEFAULT_KT at the deck's gas temperature through the one
+        # gas authority (L-531: this read T_k with a 300 K fallback, and
+        # 'or 300.0' replaced a real value). Vacuum has no bath to measure
+        # kT against, so it asks rather than assuming one.
+        if self.w_hot_thresh.value is not None:
+            thr = float(self.w_hot_thresh.value)
+            basis = "user-set"
+        else:
+            gas = resolve_collisions(self.spec.collisions)
+            if gas is None:
+                self.hotspot_note.object = (
+                    f"**vacuum run: there is no gas temperature for the "
+                    f"default threshold ({HOTSPOT_DEFAULT_KT:g} kT)** — "
+                    f"type a hot threshold in eV.")
+                return
+            thr = HOTSPOT_DEFAULT_KT * K_B_EV * float(gas.T_k)
+            basis = f"{HOTSPOT_DEFAULT_KT:g} kT at the gas {gas.T_k:g} K"
         X, Y, K = [], [], []
         for r in results[:n_show]:
             if r.traj is None or not len(r.traj):
@@ -6875,96 +7112,87 @@ class SimApp:
             self.hotspot_note.object = "**displayed run holds no samples**"
             return
         X, Y, K = (np.concatenate(a) for a in (X, Y, K))
-        T_k = float(getattr(self.spec.collisions, "T_k", 300.0) or 300.0)
-        thr = self.w_hot_thresh.value
-        thr = float(thr) if thr else 10 * 8.617333262e-5 * T_k
-        cell = float(self.w_hot_cell.value or 0.12)
+        # electrode outlines for context, closed loops from the model
+        outlines = ()
+        model = getattr(self, "_model", None)
+        if model is not None and hasattr(model, "potential_image"):
+            xs, ys, _, em = model.potential_image()
+            outlines = mask_outline_mm(em, self.spec.geometry.mm_per_gu,
+                                       (float(xs[0]), float(ys[0])))
         try:
-            from scipy.stats import binned_statistic_2d
+            fig, n_hot = hotspot_figure(
+                X, Y, K, threshold_ev=thr, cell_mm=cell, outlines=outlines,
+                title_suffix=f", {min(n_show, len(results))} ions")
         except ImportError as e:
             self.hotspot_note.object = (f"**scipy required for the "
                                         f"binned max-statistic**: {e}")
             return
-        nx = max(4, int(round((X.max() - X.min()) / cell)))
-        ny = max(4, int(round((Y.max() - Y.min()) / cell)))
-        st = binned_statistic_2d(X, Y, K, statistic="max", bins=[nx, ny])
-        Z = st.statistic.T
-        n_hot = int(np.nansum(Z >= thr))
-        import plotly.graph_objects as go
-        Zp = np.where(np.isnan(Z), None, Z)
-        fig = go.Figure(go.Heatmap(
-            x=0.5 * (st.x_edge[:-1] + st.x_edge[1:]),
-            y=0.5 * (st.y_edge[:-1] + st.y_edge[1:]),
-            z=Zp, zmin=thr, zmax=float(np.nanmax(Z)),
-            colorscale="Inferno",
-            colorbar=dict(title=f"max KE (eV)<br>floor {thr:.3g}")))
-        # electrode outlines for context, closed loops from the model
-        model = getattr(self, "_model", None)
-        if model is not None and hasattr(model, "potential_image"):
-            from ion_gym.viz.viz_core import mask_outline_mm
-            xs, ys, _, em = model.potential_image()
-            px, py = [], []
-            for lp in mask_outline_mm(
-                    em, self.spec.geometry.mm_per_gu,
-                    (float(xs[0]), float(ys[0]))):
-                px += list(lp[:, 0]) + [None]
-                py += list(lp[:, 1]) + [None]
-            fig.add_scatter(x=px, y=py, mode="lines",
-                            line=dict(color="#333", width=1.2),
-                            showlegend=False, hoverinfo="skip")
-        fig.update_layout(margin=dict(l=10, r=10, t=36, b=10),
-                          title=(f"hot spots — {n_hot} cells >= "
-                                 f"{thr:.3g} eV (cell {cell:g} mm, "
-                                 f"{min(n_show, len(results))} ions)"))
-        # This panel carried a live
-        # scaleanchor, so a drag rectangle was RESHAPED to 1:1 -- the
-        # long-thin boxes that matter here could not be drawn. Same
-        # policy as every other 2-D panel: free zoom, true scale from
-        # pane sizing, autoscale restores.
-        from ion_gym.viz import viz_core
-        try:
-            viz_core.apply_zoom_policy(fig, true_scale=True, px_width=760)
-        except viz_core.VizError as e:
-            print(f"[hotspot] zoom policy skipped: {e}")
         self.hotspot_pane.object = fig
         self.hotspot_note.object = (
             f"**{n_hot} hot cell(s)** at or above {thr:.3g} eV "
-            f"(threshold = {'user-set' if self.w_hot_thresh.value else f'10 kT at {T_k:g} K'}); "
+            f"(threshold = {basis}); "
             f"gray/empty = visited but cool or never visited.")
 
     def _on_thermal_assess(self, _=None):
-        if self._subject_is_assembly():
-            self.status.object = ("**Thermal assessment is not available for a multi-FA instrument** — it operates on the single displayed FA. Use *Set FA View* first.")
-            return
         """Two-estimator temperature assessment for the active run, via
         the framework (traj_stats.two_estimator_report +
         viz_core.temperature_estimator_figure) — the SAME code path as
-        notebook 05. The tail-fit percentile comes from w_therm_pctl."""
+        notebook 05. The tail-fit percentile comes from w_therm_pctl.
+
+        ONE SPECIES (L-530, D4): the estimators take one ion mass, and this
+        used mz_list[0] for every ion -- a mixed-m/z run got temperatures
+        from the wrong mass for every other species. It now assesses the
+        ions the Analysis m/z filter keeps, each at its own recorded m/z,
+        and refuses (naming the values) unless exactly one m/z remains.
+        Ions with no recorded m/z are left out and counted."""
+        if self._subject_is_assembly():
+            self.status.object = ("**Thermal assessment is not available for a multi-FA instrument** — it operates on the single displayed FA. Use *Set FA View* first.")
+            return
         import numpy as np
         from ion_gym.physics.traj_stats import (two_estimator_report,
-                                                slowest_rf_period_us,
-                                                KG_AMU)
-        from ion_gym.viz.viz_core import temperature_estimator_figure
+                                                slowest_rf_period_us)
+        from ion_gym.physics.constants import KG_AMU, E_CHG
+        from ion_gym.physics.collision3d import resolve_collisions
+        from ion_gym.physics.ion_envelope import summary_value
+        from ion_gym.viz.viz_core import temperature_estimator_figure, mz_key
         if self._active not in self._runs:
             self.status.object = ("**no run to assess** — fly or load a "
                                   "run first.")
             return
-        results = self._runs[self._active].results
         cols = self._cols or self.spec.column_names()
         if not all(c in cols for c in ("vx", "vy", "vz")):
             self.thermal_table.object = (
                 "**this run has no vx/vy/vz channels** — enable velocity "
                 "recording on the Integration tab and re-fly.")
             return
-        # m/z per ion from each result's summary (fallback to spec)
-        mz0 = float(self.spec.source.mz_list[0])
+        results, _mz_label = self._analysis_mz_filter(
+            self._runs[self._active].results,
+            lambda r: summary_value(r.summary, "mz"))
+        flown = [r for r in results if r.traj is not None and len(r.traj)]
+        no_mz = sum(1 for r in flown
+                    if summary_value(r.summary, "mz") is None)
+        flown = [r for r in flown
+                 if summary_value(r.summary, "mz") is not None]
+        species = sorted({summary_value(r.summary, "mz") for r in flown})
+        if len(species) != 1:
+            self.thermal_table.object = (
+                (f"**{len(species)} m/z values in the assessed ions** "
+                 f"({', '.join(mz_key(m) for m in species)}) — the "
+                 f"temperature estimators take ONE ion mass. Pick one m/z "
+                 f"in the **m/z filter** on the Analysis tab and assess "
+                 f"again."
+                 if species else
+                 f"**no assessable ions** ({_mz_label}): none carries a "
+                 f"trajectory with a recorded m/z.")
+                + (f" {no_mz} ion(s) carry no recorded m/z and are never "
+                   f"assessed." if no_mz else ""))
+            return
+        mz_run = species[0]
         V = {"x": [], "y": [], "z": []}
         KE = {"x": [], "y": [], "z": []}
         T = {"x": [], "y": [], "z": []}
-        for r in results:
-            if r.traj is None or not len(r.traj):
-                continue
-            mz = float(r.summary.get("mz", mz0))
+        for r in flown:
+            mz = mz_run
             vx = self._traj_column(r.traj, "vx", cols, mz)
             vy = self._traj_column(r.traj, "vy", cols, mz)
             vz = self._traj_column(r.traj, "vz", cols, mz)
@@ -7010,13 +7238,15 @@ class SimApp:
                     # is unbiased (random symmetric sign; the true velocity
                     # distribution is zero-mean symmetric — verified 296 K
                     # vs 300 true; unsigned |v| gives a biased 108 K).
-                    AMU, ECH = 1.66053906660e-27, 1.602176634e-19
-                    inv = 1.0 / (float(mz) * AMU)
-                    _rng = np.random.default_rng(
-                        abs(hash(("kesign", r.index))) % 2 ** 32)
+                    inv = 1.0 / (float(mz) * KG_AMU)
+                    # seeded by the ion index alone: hash() of a str is
+                    # salted per process, so the signs -- and T_var --
+                    # changed between sessions on the same run
+                    _rng = np.random.default_rng((_KE_SIGN_SEED,
+                                                  int(r.index)))
                     for axk, kev in (("x", kex), ("y", key), ("z", kez)):
                         mag = np.sqrt(np.clip(kev, 0, None)
-                                      * 2 * ECH * inv) / 1e3
+                                      * 2 * E_CHG * inv) / 1e3
                         V[axk].append(
                             mag * _rng.choice((-1.0, 1.0), size=mag.shape))
             else:
@@ -7042,16 +7272,18 @@ class SimApp:
         V = {k: np.concatenate(v) for k, v in V.items()}
         KE = {k: np.concatenate(v) for k, v in KE.items()}
         T = {k: np.concatenate(v) for k, v in T.items()}
-        m_kg = mz0 * KG_AMU
+        m_kg = mz_run * KG_AMU
         pctl = float(self.w_therm_pctl.value)
         nb = int(self.w_therm_bins.value)
         # secular/micromotion split needs the RF period; bath from the
-        # spec's collision temperature so the excess column is real.
+        # deck's gas through the one gas authority (L-531: getattr with a
+        # 298 K default). Vacuum has no bath: no excess column.
         try:
             rf_period = slowest_rf_period_us(self.spec)
         except ValueError:
             rf_period = None            # DC-only run: no split, reported
-        bath = float(getattr(self.spec.collisions, "T_k", 298.0))
+        gas = resolve_collisions(self.spec.collisions)
+        bath = None if gas is None else float(gas.T_k)
         rep = two_estimator_report(V, KE, m_kg, fit_from_pctl=pctl,
                                    n_bins=nb, t_by_axis=T,
                                    rf_period_us=rf_period, bath_K=bath)
@@ -7073,8 +7305,8 @@ class SimApp:
                     "{0}: n={1}, v_rms={2:.3e} mm/us, KE>0 count={3}, "
                     "mean KE(>0)={4:.3e} eV".format(ax, a.size, rms,
                                                     kpos, kmean))
-            model_kind = str(getattr(self.spec.collisions, "model", "?"))
-            gas_on = bool(getattr(self.spec.collisions, "enabled", False))
+            model_kind = str(self.spec.collisions.model)
+            gas_on = bool(self.spec.collisions.enabled)
             cause = ("SDS gas model carries NO thermal velocity by design "
                      "(drift + positional diffusion) — use HS for a "
                      "temperature read"
@@ -7108,21 +7340,27 @@ class SimApp:
                             _f(e.get("T_mic")), _f(e["T_mean"]),
                             _f(e["T_slope"]), _f(e.get("excess_K")),
                             "yes" if e["drift"] else "no"))
+        _bath_note = (
+            "a T_var below the {0:g} K bath is accounted for by "
+            "micromotion (T_mic), NOT sub-bath cooling. **excess vs bath** "
+            "= T_var - {0:g} K is the heating figure the audits quote."
+            .format(bath) if bath is not None else
+            "this is a VACUUM run: there is no bath, so no excess column.")
         note = ("\n\n_All temperatures are ABSOLUTE (K), not excess. "
+                "Assessed: {1} ion(s) at m/z {2}{3}. "
                 "T_var (secular) = T_sec; the full velocity spread is "
-                "T_sec + T_mic, so a T_var below the {1:g} K bath is "
-                "accounted for by micromotion (T_mic), NOT sub-bath "
-                "cooling. **excess vs bath** = T_var - {1:g} K is the "
-                "heating figure the audits quote. T_var vs T_slope "
+                "T_sec + T_mic, so {4} T_var vs T_slope "
                 "disagreement flags a non-thermal tail; tail fit from "
                 "the {0:g}th percentile (reliable band ~10-35%)._"
-                .format(pctl, bath))
+                .format(pctl, len(flown), mz_key(mz_run),
+                        (f"; {no_mz} without a recorded m/z left out"
+                         if no_mz else ""), _bath_note))
         # ride-height section: WHERE the cloud sits
         # relative to the carpets — T_mic is set by ride position, so the
         # standoff is the observable that explains the temperatures above.
         try:
             from ion_gym.physics.traj_stats import ride_height_report
-            rh = ride_height_report(results, cols, self.spec)
+            rh = ride_height_report(flown, cols, self.spec)
             if rh.get("standoff_mean_mm") is not None:
                 lines.append("")
                 lines.append("**Ride height** (standoff from nearest "
@@ -7177,14 +7415,17 @@ class SimApp:
         flown ions (each result's own summary mz — what actually flew, not
         the editor's mz_list). Preserves any still-valid selection; a
         selection whose m/z is absent from the new run is dropped, so a
-        stale filter can never silently empty the plot."""
+        stale filter can never silently empty the plot. Options are
+        viz_core.mz_key -- the same key the filter matches by."""
+        from ion_gym.physics.ion_envelope import summary_value
+        from ion_gym.viz.viz_core import mz_key
         opts = []
         if self._active in self._runs:
             seen = {}
             for r in self._runs[self._active].results:
-                mz = r.summary.get("mz")
+                mz = summary_value(r.summary, "mz")
                 if mz is not None:
-                    seen[f"{float(mz):g}"] = True
+                    seen[mz_key(mz)] = True
             opts = sorted(seen, key=float)
         set_options(self.w_amz, opts)
 
@@ -7199,29 +7440,21 @@ class SimApp:
             raise ValueError(f"unknown colour scheme '{name}'")
         return list(pal)
 
-    def _mz_palette(self, results, palette=None):
-        """Stable m/z -> colour mapping for the displayed results: unique
-        flown m/z values sorted numerically, assigned from the ACTIVE
-        colour scheme (cycled past its length). Sorted assignment keeps
-        a given m/z the same colour across replots of the same run and
-        scheme."""
-        pal = palette or self._scheme_colors(self.w_ascheme.value)
-        mzs = sorted({float(r.summary["mz"]) for r in results
-                      if r.summary.get("mz") is not None})
-        return {mz: pal[i % len(pal)] for i, mz in enumerate(mzs)}
-
-    def _analysis_mz_filter(self, results):
+    def _analysis_mz_filter(self, items, mz_of_item):
         """Apply the m/z selector: empty selection = ALL (default).
-        Returns (filtered_results, label). Filtering matches each ion's
-        OWN recorded m/z — the same value the tracer flew (mz_of
-        authority) — never an index-based guess."""
-        sel = [float(v) for v in (self.w_amz.value or [])]
+        Returns (kept_items, label). Matches each ion's OWN recorded m/z
+        (mz_of_item(item) -> float or None) by viz_core.mz_key, the key the
+        options were offered under -- no tolerance (L-552: the 1e-9 match
+        against 6-figure '%g' options could never select an m/z with more
+        digits). An ion with no recorded m/z matches no selection."""
+        from ion_gym.viz.viz_core import mz_key
+        sel = set(self.w_amz.value or [])
         if not sel:
-            return results, "all m/z"
-        kept = [r for r in results
-                if r.summary.get("mz") is not None
-                and any(abs(float(r.summary["mz"]) - s) < 1e-9 for s in sel)]
-        label = "m/z " + ", ".join(f"{s:g}" for s in sorted(sel))
+            return list(items), "all m/z"
+        kept = [it for it in items
+                if mz_of_item(it) is not None
+                and mz_key(mz_of_item(it)) in sel]
+        label = "m/z " + ", ".join(sorted(sel, key=float))
         return kept, label
 
     def _analysis_plot_assembly(self):
@@ -7235,7 +7468,8 @@ class SimApp:
         something else). Uses the tab's own axis/mode/alpha controls;
         the caption carries the operating point (arrivals/flown).
         """
-        import plotly.graph_objects as go
+        from ion_gym.viz.viz_core import (AnalysisSeries, analysis_figure,
+                                          ANALYSIS_MAX_ION_TRACES)
         per = getattr(self, "_assembly_per_ion", None)
         if not per:
             self.status.object = ("**no assembly flight to analyze** — "
@@ -7244,8 +7478,8 @@ class SimApp:
             return
         ax, ay = self.w_ax.value, self.w_ay.value
         mode = self.w_amode.value
-        _alpha = float(self.w_an_alpha.value)
-        _bm = (self._assembly_doc.get("beam") or {})
+        hist = mode in ("hist", "hist_traj")
+        _grp = self.w_agroup.value
 
         def _end_chan(p, nm):
             if nm in ("x", "y", "z", "vx", "vy", "vz"):
@@ -7262,7 +7496,7 @@ class SimApp:
                 mz = p.get("mz")
                 if s is None or mz is None:
                     return None
-                from ion_gym.physics.collision3d import E_CHG, KG_AMU
+                from ion_gym.physics.constants import E_CHG, KG_AMU
                 # mz carries the ion MASS in Da (ruled convention,
                 # 2026-09-09); the former *charge factor here treated it
                 # as m/z and doubled the KE of a 2+ ion. KE[eV] = E_J/e
@@ -7271,9 +7505,19 @@ class SimApp:
                         * (s * 1e3) ** 2) / E_CHG
             return "__unknown__"
 
+        def _arrival(fate):
+            # DETECTED is the only transmission (PI ruling 2026-10-16),
+            # as staged_flight.fly_packet counts it
+            return "detected" if fate == "detected" else "not detected"
+
+        def _fate_style(cat):
+            return (("detected", "#1f77b4") if cat == "detected"
+                    else ("not detected", "#b00020"))
+
         _END = "x, y, z, tof, vx, vy, vz, speed, ke_ev"
         _TRAJ = "x, y, z, t_us"
-        if mode == "traj":
+        _chans = (ax,) if hist else (ax, ay)
+        if mode in ("traj", "hist_traj"):
             tr = getattr(self, "_assembly_traces", None) or []
             if not tr:
                 self.status.object = ("**no retained paths** — the trace "
@@ -7281,82 +7525,39 @@ class SimApp:
                 return
             _ok = {"x": "x", "y": "y", "z": "z", "t": "t_us",
                    "t_us": "t_us", "tof": "t_us"}
-            if ax not in _ok or ay not in _ok:
+            if any(c not in _ok for c in _chans):
                 self.status.object = (
-                    f"**{ax}/{ay} not recorded per-point for an assembly "
-                    f"flight** — trajectory channels: {_TRAJ}. Endpoint "
-                    f"modes additionally offer: {_END}.")
+                    f"**{'/'.join(_chans)} not recorded per-point for an "
+                    f"assembly flight** — trajectory channels: {_TRAJ}. "
+                    f"Endpoint modes additionally offer: {_END}.")
                 return
-            # COLOUR / TRACE BY, honoured in trajectory mode (the
-            # m/z analysis plotting did not honour it — the
-            # rainbow was plotly's default per-trace cycle; this branch
-            # never read w_agroup at all, while its own help text
-            # promised m/z "works in all three plot modes"). Traces
-            # carry their flown mz; the palette and the m/z filter are
-            # the SAME authorities the endpoint modes use.
-            _grp = self.w_agroup.value
-            _sel = [float(v) for v in (self.w_amz.value or [])]
-            if _sel:
-                _tr_f = [t for t in tr if t.get("mz") is not None
-                         and any(abs(float(t["mz"]) - s) < 1e-9
-                                 for s in _sel)]
-            else:
-                _tr_f = list(tr)
-            _note = ""
-            if _grp == "m/z" and not any(t.get("mz") is not None
-                                         for t in _tr_f):
-                _note = (" · m/z colouring unavailable: these paths "
-                         "bank no per-ion mass (pre-fix flight) — "
-                         "per-ion colours shown")
-                _grp = "ion"
-            _pal = self._scheme_colors(self.w_ascheme.value)
-            _mzs = sorted({float(t["mz"]) for t in _tr_f
-                           if t.get("mz") is not None})
-            _mz_col = {m: _pal[i % len(_pal)]
-                       for i, m in enumerate(_mzs)}
-            _seen = set()
-            fig = go.Figure()
-            for _t in _tr_f:
-                xs = np.concatenate([np.asarray(r[_ok[ax]], float)
-                                     for r in _t.get("regions", [])])
-                ys = np.concatenate([np.asarray(r[_ok[ay]], float)
-                                     for r in _t.get("regions", [])])
-                _kw = dict(opacity=_alpha, showlegend=False,
-                           name=f"ion {_t.get('i')}")
-                if _grp == "m/z" and _t.get("mz") is not None:
-                    _m = float(_t["mz"])
-                    _kw.update(line=dict(color=_mz_col[_m]),
-                               name=f"m/z {_m:g}",
-                               legendgroup=f"mz{_m:g}",
-                               showlegend=_m not in _seen)
-                    _seen.add(_m)
-                elif _grp == "fate":
-                    _lost = _t.get("fate") not in ("detected", "completed")
-                    _kw.update(line=dict(
-                        color="#b00020" if _lost else "#1f77b4"),
-                        name=("lost" if _lost else "arrived"),
-                        legendgroup=("lost" if _lost else "ok"),
-                        showlegend=_lost not in _seen)
-                    _seen.add(_lost)
-                elif _grp == "all together":
-                    _kw.update(line=dict(color=_pal[0]))
-                fig.add_trace(go.Scattergl(x=xs, y=ys, mode="lines",
-                                           **_kw))
-            _flt = (f" · filtered to m/z "
-                    f"{', '.join(f'{v:g}' for v in sorted(_sel))}"
-                    if _sel else "")
-            _cap = (f"assembly · trajectory · {len(_tr_f)} retained "
-                    f"paths of {len(per)} flown{_flt}{_note}")
+            # Traces carry their flown mz; the m/z filter and the colour
+            # groups are the same authorities the endpoint modes use.
+            _tr_f, _flt = self._analysis_mz_filter(
+                tr, lambda t: t.get("mz"))
+
+            def _path(t, nm):
+                return np.concatenate([np.asarray(r[_ok[nm]], float)
+                                       for r in t.get("regions", [])])
+            series = [AnalysisSeries(
+                ion=t.get("i"), x=_path(t, ax),
+                y=(None if hist else _path(t, ay)), mz=t.get("mz"),
+                fate=_arrival(t.get("fate"))) for t in _tr_f]
+            _cap = (f"assembly · "
+                    f"{'samples' if hist else 'trajectory'} · "
+                    f"{len(series)} retained paths of {len(per)} flown · "
+                    f"{_flt}")
         else:
-            vals = [(_end_chan(p, ax), _end_chan(p, ay)) for p in per]
-            if any(v == "__unknown__" for pair in vals for v in pair):
+            vals = [(p, _end_chan(p, ax), _end_chan(p, ay)) for p in per]
+            if any(v == "__unknown__" for _p, a, b in vals
+                   for v in ((a,) if hist else (a, b))):
                 self.status.object = (
-                    f"**{ax}/{ay} not recorded for assembly arrivals** — "
-                    f"endpoint channels: {_END}; trajectory mode offers: "
-                    f"{_TRAJ}.")
+                    f"**{'/'.join(_chans)} not recorded for assembly "
+                    f"arrivals** — endpoint channels: {_END}; trajectory "
+                    f"mode offers: {_TRAJ}.")
                 return
-            pairs = [(a, b) for a, b in vals
-                     if a is not None and b is not None]
+            pairs = [(p, a, b) for p, a, b in vals
+                     if a is not None and (hist or b is not None)]
             _dropped = len(vals) - len(pairs)
             if not pairs:
                 # WHY it is empty matters. This used to say "lost ions
@@ -7366,61 +7567,111 @@ class SimApp:
                 # causes and name the one that applies.
                 _arrived = [p for p in per if p.get("arrived")]
                 _missing = sorted(
-                    {nm for nm in (ax, ay)
+                    {nm for nm in _chans
                      if _arrived and _end_chan(_arrived[0], nm) is None})
                 if _missing:
                     self.status.object = (
-                        f"**assembly arrivals do not carry "
+                        f"**assembly detections do not carry "
                         f"{', '.join(_missing)}** — {len(_arrived)} of "
-                        f"{len(per)} ions arrived, so this is not a loss "
-                        f"problem: the flight's arrival record has no such "
-                        f"field. Recorded per arrival: {_END}.")
+                        f"{len(per)} ions were detected, so this is not a "
+                        f"detection problem: the flight's detection record "
+                        f"has no such field. Recorded per detection: "
+                        f"{_END}.")
                 else:
                     self.status.object = (
-                        f"**no arrivals carry both {ax} and {ay}** — "
-                        f"{len(_arrived)} of {len(per)} ions arrived; lost "
-                        f"ions have no arrival state.")
+                        f"**no detections carry {' and '.join(_chans)}** — "
+                        f"{len(_arrived)} of {len(per)} ions were "
+                        f"detected; an undetected ion has no arrival "
+                        f"state.")
                 return
-            xs = np.asarray([p[0] for p in pairs], float)
-            ys = np.asarray([p[1] for p in pairs], float)
-            if mode == "hist":
-                fig = go.Figure(go.Histogram(x=xs, nbinsx=60,
-                                             opacity=_alpha))
-                fig.update_yaxes(title_text="ions")
-            else:
-                fig = go.Figure(go.Scattergl(
-                    x=xs, y=ys, mode="markers",
-                    marker=dict(size=5, opacity=_alpha),
-                    showlegend=False))
-            _cap = (f"assembly · endpoints · {len(pairs)} arrivals of "
-                    f"{len(per)} flown"
+            pairs, _flt = self._analysis_mz_filter(
+                pairs, lambda t: t[0].get("mz"))
+            series = [AnalysisSeries(
+                ion=p.get("i"), x=np.array([a], float),
+                y=(None if hist else np.array([b], float)), mz=p.get("mz"),
+                fate=("detected" if p.get("arrived") else "not detected"))
+                for p, a, b in pairs]
+            _cap = (f"assembly · endpoints · {len(series)} ions of "
+                    f"{len(per)} flown · {_flt}"
                     + (f" · {_dropped} lacking a channel (named, not "
                        f"silently dropped)" if _dropped else ""))
-        fig.update_xaxes(title_text=ax)
-        if mode != "hist":
-            fig.update_yaxes(title_text=ay)
-        fig.update_layout(height=560, margin=dict(l=50, r=20, t=40, b=44),
-                          title=dict(text=_cap, x=0.01,
-                                     font=dict(size=12)))
+        if not series:
+            self.status.object = (
+                "**m/z filter matched no ions in this flight** — clear the "
+                "filter (empty = all) or pick from the offered options.")
+            return
+        fig, _info = analysis_figure(
+            series, kind=("hist" if hist else
+                          "traj" if mode == "traj" else "end"),
+            group=_grp, palette=self._scheme_colors(self.w_ascheme.value),
+            alpha=float(self.w_an_alpha.value),
+            line_mode=self.w_astyle.value, bins=int(self.w_bins.value),
+            fate_style=_fate_style, x_label=self._chan_label(ax),
+            y_label=self._chan_label(ay), title=_cap, height=560)
         self.analysis_pane.object = fig
-        self.status.object = f"**analysis drawn** — {_cap}"
+        self.status.object = (
+            f"**analysis drawn** — {_cap}"
+            + (f" — showing the first {ANALYSIS_MAX_ION_TRACES} paths "
+               f"(trace cap); use 'all together', 'fate' or 'm/z' to see "
+               f"every path" if _info["ion_traces_capped"] else ""))
+
+    def _analysis_nan_note(self, results, cols, chans):
+        """' -- <channel> has no values ...' for each RECORDED channel among
+        `chans` that is NaN in every stored sample of this run, so an empty
+        plot says why instead of looking like a drawing failure. n_col
+        under SDS carries the model's reason (sds.SDS_NO_COLLISION_COUNT
+        is the full text, stated as an advisory at build)."""
+        import numpy as np
+        from ion_gym.physics.sds import sds_active
+        notes = []
+        for ch in dict.fromkeys(chans):
+            if ch not in cols:
+                continue            # derived channel: computed, never NaN-filled
+            k = cols.index(ch)
+            arrs = [np.asarray(r.traj)[:, k] for r in results
+                    if r.traj is not None and len(r.traj)]
+            if not arrs or not all(np.isnan(a).all() for a in arrs):
+                continue
+            if ch == "n_col" and sds_active(self.spec.collisions):
+                notes.append(
+                    " — **n_col has no values**: model='sds' does not "
+                    "simulate individual collisions, so there is no count "
+                    "(the build advisory explains why; use model='hs' for "
+                    "a collision count).")
+            else:
+                notes.append(f" — **{ch} has no values in this run** "
+                             f"(NaN in every sample).")
+        return "".join(notes)
 
     def _on_analysis_plot(self, _=None):
+        """Scatter/line/histogram of any recorded channel against any other
+        for the displayed run, drawn by viz_core.analysis_figure (L-548).
+        Trajectory mode uses every stored point; endpoint mode one point per
+        ion (the summary's end point when it has one -- a truncated record's
+        last row is NOT where the ion ended -- else the last record); the
+        histograms take x over those endpoints or over every sample.
+
+        Every summary field is read through the ion_envelope accessor
+        (L-530): an ion with no recorded m/z is drawn under 'm/z unknown',
+        and where ke_ev needs its mass it is left out and COUNTED -- it used
+        to be given the run's first m/z, or 1.0; an ion with no fate is the
+        named unknown fate (it was drawn as a timeout, or dropped from the
+        fate-grouped plots)."""
         if self._subject_is_assembly():
             # Wired, not refused. Assembly flights record different
-            # quantities
-            # than single-stage runs, so this is its own honest branch.
+            # quantities than single-stage runs, so they have their own
+            # extraction (same figure).
             return self._analysis_plot_assembly()
-        """Scatter/line of any recorded channel vs any other for the active
-        run. Trajectory mode uses every stored point; endpoint mode uses one
-        point per ion."""
-        import plotly.graph_objects as go
         import numpy as np
+        from ion_gym.physics.ion_envelope import summary_fate, summary_value
+        from ion_gym.viz.viz_core import (AnalysisSeries, analysis_figure,
+                                          ANALYSIS_MAX_ION_TRACES)
         if self._active not in self._runs:
             self.status.object = "**no run to plot** — Fly some ions first."
             return
-        results = self._runs[self._active].results
-        results, _mz_label = self._analysis_mz_filter(results)
+        results, _mz_label = self._analysis_mz_filter(
+            self._runs[self._active].results,
+            lambda r: summary_value(r.summary, "mz"))
         if not results:
             self.status.object = (
                 "**m/z filter matched no ions in this run** — the selected "
@@ -7429,12 +7680,6 @@ class SimApp:
             return
         cols = self._cols or self.spec.column_names()
         ax, ay = self.w_ax.value, self.w_ay.value
-        # a per-run m/z for ke_ev (derived); take the active run's first ion
-        _run = self._runs[self._active]
-        _mz = 1.0
-        for _r in _run.results:
-            _mz = float(_r.summary.get("mz", 1.0))
-            break
         # derivable-or-present: speed/ke_ev/radius from position+velocity;
         # e_field (|E|) and e_axial from the recorded e_x/e_y/e_z columns.
         _DERIVED = ("speed", "ke_ev", "radius", "e_field", "e_axial")
@@ -7446,199 +7691,82 @@ class SimApp:
                                   f"— have: {', '.join(cols)}; derivable: "
                                   f"{', '.join(_DERIVED)}")
             return
-        mode = self.w_astyle.value
+        amode = self.w_amode.value
+        hist = amode in ("hist", "hist_traj")
         grp = self.w_agroup.value
-        # Read the ANALYSIS tab's own slider — before the
-        # collision fix this read whichever object had last claimed
-        # self.w_alpha, so the visible Analysis slider changed nothing.
-        _alpha = float(self.w_an_alpha.value)
-        _scheme = self._scheme_colors(self.w_ascheme.value)
-        if grp == "m/z" and not any(r.summary.get("mz") is not None
+        nb = int(self.w_bins.value)
+        _chans = (ax,) if hist else (ax, ay)
+        if grp == "m/z" and not any(summary_value(r.summary, "mz") is not None
                                     for r in results):
             self.status.object = (
                 "**this run carries no per-ion m/z** — it was flown or "
                 "saved before per-ion m/z recording (v280). Re-fly to get "
                 "m/z colouring; the other colour modes work on this run.")
             return
-        fig = go.Figure()
-        if self.w_amode.value in ("hist", "hist_traj"):
-            # histogram of the x-axis quantity: per-ion ENDPOINTS ("hist")
-            # or EVERY recorded sample of every ion ("hist_traj" -- a
-            # residence profile along the chosen quantity; by
-            # design trajectories are Analysis, not Impact). One
-            # aligned per-SAMPLE collection serves both.
-            _samples = self.w_amode.value == "hist_traj"
-            vals, fates, mz_vals = [], [], []
-            for r in results:
-                if r.traj is not None and len(r.traj):
-                    _rmz = r.summary.get("mz", _mz)
-                    _ca = self._traj_column(r.traj, ax, cols, _rmz)
-                    if _ca is None:
-                        continue
-                    take = _ca if _samples else _ca[-1:]
-                    vals.extend(float(v) for v in take)
-                    fates.extend([r.summary.get("kind", 2)] * len(take))
-                    mz_vals.extend([float(_rmz) if _rmz is not None
-                                    else float("nan")] * len(take))
-            nb = int(self.w_bins.value)
-            if grp == "m/z":
-                cmap = self._mz_palette(results)
-                for mz, cname in cmap.items():
-                    mv = [v for v, m in zip(vals, mz_vals) if m == mz]
-                    if mv:
-                        fig.add_histogram(x=mv, nbinsx=nb, opacity=_alpha,
-                                          name=f"m/z {mz:g}",
-                                          marker=dict(color=cname))
-                fig.update_layout(barmode="overlay")
-            elif grp == "fate":
-                for code, cname in _FATE_COLOR.items():
-                    fv = [v for v, f in zip(vals, fates) if f == code]
-                    if fv:
-                        fig.add_histogram(x=fv, nbinsx=nb, opacity=_alpha,
-                                          name=_FATE_NAME.get(code, str(code)),
-                                          marker=dict(color=cname))
-                fig.update_layout(barmode="overlay")
-            else:
-                fig.add_histogram(x=vals, nbinsx=nb, opacity=_alpha,
-                                  marker=dict(color=_scheme[0]))
-            fig.update_layout(height=460, xaxis_title=self._chan_label(ax),
-                              yaxis_title="count",
-                              title=f"{ax} distribution ({len(vals)} ions, "
-                              f"{nb} bins, {_mz_label}) — {self._active}",
-                              margin=dict(l=55, r=15, t=45, b=45))
-            self.analysis_pane.object = fig
-            self.status.object = f"**histogram** of {ax} ({nb} bins)."
-            return
-        if self.w_amode.value == "end":
-            xs, ys, fates, mzs_end = [], [], [], []
-            for r in results:
-                if r.traj is not None and len(r.traj):
-                    _ca = self._traj_column(r.traj, ax, cols,
-                                            r.summary.get("mz", _mz))
-                    _cb = self._traj_column(r.traj, ay, cols,
-                                            r.summary.get("mz", _mz))
-                    if _ca is None or _cb is None:
-                        continue
-                    # true point of stoppage when the summary has it (a
-                    # truncated record's last row is NOT where the ion
-                    # ended)
-                    _sx = r.summary.get(f"{ax}_end")
-                    _sy = r.summary.get(f"{ay}_end")
-                    xs.append(float(_sx) if _sx is not None
-                              else float(_ca[-1]))
-                    ys.append(float(_sy) if _sy is not None
-                              else float(_cb[-1]))
-                    fates.append(r.summary.get("kind", 2))
-                    mzs_end.append(float(r.summary.get("mz", _mz)))
-            if grp == "m/z":
-                cmap = self._mz_palette(results)
-                for mz, cname in cmap.items():
-                    px = [x for x, m in zip(xs, mzs_end) if m == mz]
-                    py = [y for y, m in zip(ys, mzs_end) if m == mz]
-                    if px:
-                        fig.add_scatter(x=px, y=py, mode="markers",
-                                        opacity=_alpha,
-                                        name=f"m/z {mz:g}",
-                                        marker=dict(color=cname))
-            elif grp == "fate":
-                for code, cname in _FATE_COLOR.items():
-                    px = [x for x, f in zip(xs, fates) if f == code]
-                    py = [y for y, f in zip(ys, fates) if f == code]
-                    if px:
-                        fig.add_scatter(x=px, y=py, mode="markers",
-                                        opacity=_alpha,
-                                        name=_FATE_NAME.get(code, str(code)),
-                                        marker=dict(color=cname))
-            else:
-                fig.add_scatter(x=xs, y=ys, mode="markers", opacity=_alpha,
-                                marker=dict(color=_scheme[0]))
+        series, no_mz, no_chan = [], 0, 0
+        for r in results:
+            if r.traj is None or not len(r.traj):
+                continue
+            mz = summary_value(r.summary, "mz")
+            if "ke_ev" in _chans and mz is None:
+                no_mz += 1
+                continue
+            arr = [self._traj_column(r.traj, c, cols, mz) for c in _chans]
+            if any(a is None for a in arr):
+                no_chan += 1
+                continue
+            if amode in ("end", "hist"):
+                ends = []
+                for c, a in zip(_chans, arr):
+                    v = summary_value(r.summary, f"{c}_end")
+                    ends.append(np.array([float(a[-1]) if v is None else v]))
+                arr = ends
+            series.append(AnalysisSeries(
+                ion=r.index, x=np.asarray(arr[0], float),
+                y=(None if hist else np.asarray(arr[1], float)), mz=mz,
+                fate=summary_fate(r.summary)))
+        if hist:
+            _n = sum(len(s.x) for s in series)
+            _what = "samples" if amode == "hist_traj" else "ions"
+            title = (f"{ax} distribution ({_n} {_what}, {nb} bins, "
+                     f"{_mz_label}) — {self._active}")
         else:
-            allx, ally = [], []
-            mz_groups = {}
-            n_ion_traces = 0
-            # WebGL renderer for trajectory plots: an SVG scatter chokes the
-            # browser at ~10^5 points / many traces (plotting all ions
-            # of the funnel hangs — ~100 ions x ~1000 pts). scattergl draws
-            # the same data on the GPU and stays responsive into the millions
-            # of points. Per-ion mode also caps the number of separate traces
-            # (each trace is browser overhead) and decimates within a trace.
-            _MAX_ION_TRACES = 400
-            _MAX_PTS_PER_TRACE = 5000
-            for r in results:
-                if r.traj is None or not len(r.traj):
-                    continue
-                x = self._traj_column(r.traj, ax, cols,
-                                      r.summary.get("mz", _mz))
-                y = self._traj_column(r.traj, ay, cols,
-                                      r.summary.get("mz", _mz))
-                if x is None or y is None:
-                    continue
-                if grp == "ion":
-                    if n_ion_traces >= _MAX_ION_TRACES:
-                        continue          # cap traces; reported below
-                    if len(x) > _MAX_PTS_PER_TRACE:
-                        step = len(x) // _MAX_PTS_PER_TRACE + 1
-                        x = x[::step]
-                        y = y[::step]
-                    fig.add_scattergl(x=x, y=y, mode=mode,
-                                      line=dict(width=1), opacity=_alpha,
-                                      name=f"ion {r.index}", showlegend=False)
-                    n_ion_traces += 1
-                elif grp == "m/z":
-                    mz_groups.setdefault(
-                        float(r.summary.get("mz", _mz)), []).append((x, y))
-                else:
-                    allx.append(x)
-                    ally.append(y)
-            if grp == "m/z" and mz_groups:
-                # one trace PER m/z (few traces, GPU-drawn): each ion's
-                # points join its OWN flown-m/z series; NaN separators keep
-                # per-ion lines from joining across ions in line styles.
-                cmap = self._mz_palette(results)
-                for mz in sorted(mz_groups):
-                    seg = []
-                    for x, y in mz_groups[mz]:
-                        if len(x) > _MAX_PTS_PER_TRACE:
-                            step = len(x) // _MAX_PTS_PER_TRACE + 1
-                            x = x[::step]
-                            y = y[::step]
-                        seg.append((x, y))
-                    cx = np.concatenate(
-                        [np.append(x, np.nan) for x, _ in seg])
-                    cy = np.concatenate(
-                        [np.append(y, np.nan) for _, y in seg])
-                    fig.add_scattergl(
-                        x=cx, y=cy, mode=mode, line=dict(width=1),
-                        opacity=_alpha, marker=dict(size=3),
-                        name=f"m/z {mz:g}",
-                        line_color=cmap.get(mz), showlegend=True)
-            elif grp not in ("ion", "m/z") and allx:
-                cx = np.concatenate(allx)
-                cy = np.concatenate(ally)
-                fig.add_scattergl(x=cx, y=cy, mode="markers",
-                                  marker=dict(size=3, color=_scheme[0],
-                                              opacity=_alpha),
-                                  showlegend=False)
-        fig.update_layout(height=460, colorway=_scheme,
-                          xaxis_title=self._chan_label(ax),
-                          yaxis_title=self._chan_label(ay),
-                          title=f"{ay} vs {ax} ({_mz_label}) — {self._active}",
-                          margin=dict(l=55, r=15, t=45, b=45))
+            title = f"{ay} vs {ax} ({_mz_label}) — {self._active}"
+        fig, info = analysis_figure(
+            series, kind=("hist" if hist else
+                          "end" if amode == "end" else "traj"),
+            group=grp, palette=self._scheme_colors(self.w_ascheme.value),
+            # the ANALYSIS tab's own slider (w_an_alpha, not w_alpha: the
+            # name collision once made the visible slider do nothing)
+            alpha=float(self.w_an_alpha.value),
+            line_mode=self.w_astyle.value, bins=nb,
+            x_label=self._chan_label(ax), y_label=self._chan_label(ay),
+            title=title)
         self.analysis_pane.object = fig
-        if self.w_amode.value == "traj" and not any(
-                r.traj is not None for r in results):
+        notes = self._analysis_nan_note(results, cols, _chans)
+        if no_mz:
+            notes += (f" — **{no_mz} ion(s) carry no recorded m/z**, so "
+                      f"ke_ev cannot be derived for them; they are left out "
+                      f"(never given a stand-in mass).")
+        if no_chan:
+            notes += (f" — **{no_chan} ion(s) cannot supply "
+                      f"{'/'.join(_chans)}** from what they recorded and "
+                      f"are left out.")
+        if amode == "traj" and not any(r.traj is not None for r in results):
             self.status.object = ("**this run stored no trajectories** "
                                   "(storage was off) — only endpoints/fates "
                                   "are available.")
-        elif (self.w_amode.value == "traj" and grp == "ion"
-              and n_ion_traces >= _MAX_ION_TRACES):
+        elif info["ion_traces_capped"]:
             self.status.object = (
                 f"**plotted {ay} vs {ax}** — showing the first "
-                f"{_MAX_ION_TRACES} ions (trace cap for responsiveness). "
-                "Use 'all together' to see every ion's points in one series, "
-                "or 'fate' to colour by outcome.")
+                f"{ANALYSIS_MAX_ION_TRACES} ions (trace cap for "
+                "responsiveness). Use 'all together' to see every ion's "
+                "points in one series, or 'fate' to colour by outcome."
+                + notes)
+        elif hist:
+            self.status.object = f"**histogram** of {ax} ({nb} bins)." + notes
         else:
-            self.status.object = f"**plotted** {ay} vs {ax}."
+            self.status.object = f"**plotted** {ay} vs {ax}." + notes
 
     def _poll_thread(self):
         # Fallback poller for the ion flight when there is no server session
@@ -7721,8 +7849,12 @@ class SimApp:
                 set_options(self.w_runsel, list(self._runs.keys()),
                             prefer=name)
                 self._redraw(fin.results)
+                # summaries through THE accessor (L-530): an ion with no
+                # fate is COUNTED as the named unknown, not left out
+                from ion_gym.physics.ion_envelope import (
+                    summary_fate, summary_value, fate_name)
                 plate = sum(1 for r in fin.results
-                            if r.summary.get("kind") == 0)
+                            if summary_fate(r.summary) == 0)
                 self._fly_chip("stopped" if fin.stopped_early
                                else "done",
                                done=fin.done, total=fin.total,
@@ -7738,20 +7870,20 @@ class SimApp:
                 # full detail; this is the headline.
                 _kinds = {}
                 for r in fin.results:
-                    k = r.summary.get("kind")
-                    if k is not None:
-                        _kinds[int(k)] = _kinds.get(int(k), 0) + 1
+                    k = summary_fate(r.summary)
+                    _kinds[k] = _kinds.get(k, 0) + 1
                 _fates = ", ".join(
-                    f"{n} {_FATE_NAME.get(k, f'kind {k}')}"
+                    f"{n} {fate_name(k)}"
                     for k, n in sorted(_kinds.items(), key=lambda kv: -kv[1]))
-                _tofs = [float(r.summary["tof"]) for r in fin.results
-                         if r.summary.get("tof") is not None]
+                _tofs = [summary_value(r.summary, "tof") for r in fin.results]
+                _tofs = [t for t in _tofs if t is not None]
                 _tof = (f" · median tof {float(np.median(_tofs)):.4g} µs"
                         if _tofs else "")
                 _stamp = getattr(self, "_last_flight_stamp", None)
                 _bank = f" · /flight #{_stamp}" if _stamp is not None else ""
                 _tail = (f" ({_fates}){_tof} · stored as '{name}' "
-                         f"(reloadable){_bank}")
+                         f"(reloadable){_bank}"
+                         + getattr(self, "_scene_warning", ""))
                 if fin.stopped_early:
                     # A stopped flight SAYS SO,
                     # first word, not as a suffix on "done".
@@ -7763,12 +7895,7 @@ class SimApp:
                     self.status.object = (
                         f"**done: {fin.done} ions in "
                         f"{fin.elapsed_s:.1f} s**" + _tail)
-            if self._pcb is not None:
-                try:
-                    self._pcb.stop()
-                except (RuntimeError, ValueError):
-                    pass        # panel guard: callback already stopped
-                self._pcb = None
+            self._pcb = _stop_periodic(self._pcb, "flight tick")
 
     def _set_plane(self, plane):
         """Quick view-plane switch (the top-row buttons). Sets the Display
@@ -8018,6 +8145,7 @@ class SimApp:
         self._active = None
         self._model = None            # force geometry preview until re-solved
         self._scene = None             # scene lives and dies with the model
+        self._scene_warning = ""       # ...and so does its refusal
         self._built = None             # drop the reuse cache: new geometry
         # LARGE-GEOMETRY FEEDBACK: rendering a big json
         # (e.g. surround SLIM) takes 10-30 s with no sign of life. Set the
@@ -8100,15 +8228,16 @@ class SimApp:
         label_on = bool(self.w_ellabel.value)
         st = self._el_style()
         dr = {la: self._domain_range(la), lb: self._domain_range(lb)}
+        ub = {la: self._user_bounds(la), lb: self._user_bounds(lb)}
         self._dispatch_figure(
             "geometry preview",
             build=lambda: self._build_geometry_preview(
-                spec, model, la, lb, uirev, label_on, st, dr),
+                spec, model, la, lb, uirev, label_on, st, dr, ub),
             publish=lambda payload: self._finish_preview(*payload))
 
     @staticmethod
     def _build_geometry_preview(spec, model, la, lb, uirev, label_on, st,
-                                dr):
+                                dr, ub):
         """WORKER-SIDE geometry-preview build: (fig, la, lb, ra, rb).
 
         A staticmethod on purpose — it can see no widget and no pane, so
@@ -8255,28 +8384,15 @@ class SimApp:
             _zext = (_o3[2], _o3[2] + _span)
 
         def _rng(lbl):
-            dr_ax = dr[lbl]   # ONE rule (mirrors incl.), snapshotted on
-            #                   the loop by _draw_geometry_only
-            # dr_ax WINS whenever it has an answer: the old
-            # `_zext`-override preferred the stored-half extent over
-            # the canonical [-H,+H] frame on a declared z-mirror —
-            # the exact range-vs-drawing disagreement _domain_range's
-            # own docstring exists to prevent. The mask extent is the
-            # FALLBACK for depth==0 z-transport geometries, where the
-            # body's z extent is not in the spec and the range is
-            # honestly None pre-solve.
-            if dr_ax is not None:
-                lo, hi = dr_ax
-            elif lbl == "x":
-                lo, hi = 0.0, g.width_mm
-            elif lbl == "y":
-                lo, hi = 0.0, g.height_mm
-            elif lbl == "z" and _zext is not None:
-                lo, hi = _zext
-            else:
-                return None
-            pad = 0.04 * (hi - lo)
-            return [lo - pad, hi + pad]
+            # THE view-range rule (module _axis_view_range), from the
+            # domain ranges and Bounds-tab limits snapshotted on the loop
+            # by _draw_geometry_only (this runs on a worker). The preview
+            # ignored the Bounds tab before; its (0, width)/(0, height)
+            # fallbacks ignored origin_mm and were unreachable (the domain
+            # rule always answers x and y).
+            r = _axis_view_range(ub.get(lbl), dr[lbl],
+                                 _zext if lbl == "z" else None)
+            return None if r is None else list(r)
 
         fig.update_layout(
             height=560, xaxis_title=f"{la} (mm)",
@@ -8444,10 +8560,20 @@ class SimApp:
         for i, el in enumerate(s.geometry.electrodes):
             if el.dc_group is None:
                 continue
-            m = masks.get(el.basis if el.basis else i + 1)
+            m = self._el_mask(masks, i, el)
             if m is None or not m.any():
                 continue
-            zc = float(np.argwhere(m)[:, -1].mean() * h)
+            # the DECLARED axial axis (_axial_axis), not the last one: on
+            # r-z the last mask axis is r, so every ring tied and the
+            # "by z" numbering was list order (L-440, measured)
+            ax = _axial_axis(s.geometry, m.ndim)
+            if ax is None:
+                self.status.object = (
+                    "**auto-number refused** — this is a 2-D x-y "
+                    "cross-section; z is the uniform direction, so there "
+                    "is no axial order to read from the masks.")
+                return
+            zc = float(np.argwhere(m)[:, ax].mean() * h)
             by_group.setdefault(el.dc_group, []).append((zc, i))
         if not by_group:
             self.status.object = "**no DC-group members to number**"
@@ -9020,7 +9146,7 @@ class SimApp:
         keeps one object.
         """
         if getattr(self, "_impact_col", None) is None:
-            from ion_gym.physics.stats import stats_card
+            from ion_gym.ui.stats_card import stats_card
             # A SECOND stats_card INSTANCE, fed the same results as the
             # Ion Source one (the stats table is repeated
             # here). Re-using the SAME card object would put one Bokeh
@@ -9646,10 +9772,15 @@ class SimApp:
             _b = (self._assembly_doc or {}).get("beam", {}) or {}
             _m = (float(_b["mz"])              # beam mz carries MASS (Da)
                   if isinstance(_b.get("mz"), (int, float)) else None)
-            _det = [(float(p["x"]), float(p.get("y", 0.0)),
-                     float(p.get("z", 0.0)))
-                    for p in (getattr(self, "_impact_hits", None) or [])
-                    if p.get("x") is not None]
+            # a detection is published only with ALL THREE coordinates
+            # (L-530: a missing y or z was published at 0.0); the ones left
+            # out are counted on the completion stamp
+            from ion_gym.physics.ion_envelope import summary_value
+            _hits = list(getattr(self, "_impact_hits", None) or [])
+            _xyz = [tuple(summary_value(p, k) for k in ("x", "y", "z"))
+                    for p in _hits]
+            _det = [c for c in _xyz if None not in c]
+            _n_partial = len(_xyz) - len(_det)
             rec = last_flight.publish(
                 site="fly assembly",
                 subject={"kind": "assembly", "doc": self._assembly_doc},
@@ -9659,7 +9790,9 @@ class SimApp:
             # the stamp rides the completion message via
             # _last_flight_stamp; success does not append-chain onto
             # the visible status.
-            self._last_flight_stamp = rec["stamp"]
+            self._last_flight_stamp = rec["stamp"] + (
+                f" ({_n_partial} detection(s) without a full x/y/z left "
+                f"out)" if _n_partial else "")
         except Exception as e:
             self.status.object = (f"**/flight NOT banked:** "
                                   f"{type(e).__name__}: {e}")
@@ -9865,19 +9998,17 @@ class SimApp:
         w_b = pn.widgets.FloatInput(name="—", value=0.0, width=95,
                                     visible=False)
         def _labels(*_):
+            # labelled from beam_spec.DIST_FIELDS (the kind chain that sat
+            # here had no catch-all: a new kind kept stale labels; L-554)
             k = w_kind.value
-            if k == "single":
-                w_a.name, w_b.visible = "value", False
-            elif k == "uniform":
-                w_a.name, w_b.name, w_b.visible = "min", "max", True
-            elif k == "gaussian":
-                w_a.name, w_b.name, w_b.visible = "mean", "sigma", True
-            elif k == "grid":
-                w_a.name, w_b.name, w_b.visible = "min", "max", True
-            elif k == "maxwellian":
-                w_a.name, w_b.visible = "temperature (K)", False
-            elif k == "list":
+            if k == "list":
                 w_a.name, w_b.visible = "(use JSON for lists)", False
+                return
+            fields = _beam_panel_fields(k)
+            w_a.name = _BEAM_PARAM_LABEL.get(fields[0], fields[0])
+            w_b.visible = len(fields) > 1
+            if w_b.visible:
+                w_b.name = _BEAM_PARAM_LABEL.get(fields[1], fields[1])
         w_kind.param.watch(_labels, "value")
         _labels()
         self._beam_scalar_w[key] = (w_kind, w_a, w_b)
@@ -9992,24 +10123,20 @@ class SimApp:
                 "position_format": self.w_beam_pf.value,
                 "velocity_format": self.w_beam_vf.value,
                 "scalars": {}}
+        from ion_gym.physics.beam_spec import SEEDED_DISTRIBUTIONS
         for key, (w_kind, w_a, w_b) in self._beam_scalar_w.items():
             k = w_kind.value
-            if k == "single":
-                d = {"kind": "single", "value": float(w_a.value)}
-            elif k in ("uniform", "grid"):
-                d = {"kind": k, "min": float(w_a.value),
-                     "max": float(w_b.value)}
-            elif k == "gaussian":
-                d = {"kind": "gaussian", "mean": float(w_a.value),
-                     "sigma": float(w_b.value)}
-            elif k == "maxwellian":
-                d = {"kind": "maxwellian",
-                     "temperature_k": float(w_a.value)}
-            else:
+            if k == "list":
                 raise ValueError(
-                    f"{key}: the {k!r} distribution is declared in JSON, "
+                    f"{key}: the 'list' distribution is declared in JSON, "
                     f"not in this panel")
-            if k in ("uniform", "gaussian", "maxwellian"):
+            # field names and the seed rule from beam_spec's tables (a
+            # third hand-written copy of the kind chain sat here)
+            fields = _beam_panel_fields(k)
+            d = {"kind": k}
+            for f, w in zip(fields, (w_a, w_b)):
+                d[f] = float(w.value)
+            if k in SEEDED_DISTRIBUTIONS:
                 d["seed"] = self._ui_seed()
             decl["scalars"][key] = d
         if self.w_beam_pf.value == "beam_envelope":
@@ -10193,19 +10320,27 @@ class SimApp:
                 w_f.value = float(p_["focus_mm"])
         self._derived_decl = decl
         _ke = (decl.get("scalars") or {}).get("ke_ev") or {}
+        ke_note = ""
         if "ke_ev" in self._beam_scalar_w and _ke.get("kind"):
             w_kind, w_a, w_b = self._beam_scalar_w["ke_ev"]
-            w_kind.value = _ke["kind"]
-            if _ke["kind"] == "single":
-                w_a.value = float(_ke["value"])
-            elif _ke["kind"] == "uniform":
-                w_a.value, w_b.value = float(_ke["min"]), float(_ke["max"])
-            elif _ke["kind"] == "gaussian":
-                w_a.value, w_b.value = float(_ke["mean"]), float(_ke["sigma"])
+            if _ke["kind"] == "list":
+                # a list cannot be shown in two number fields: SAID, and
+                # the derived declaration still carries it (it set the
+                # kind and left the previous numbers in the fields)
+                ke_note = (" ke_ev was derived as a LIST -- not shown in "
+                           "this panel; it is carried in the declaration.")
+            else:
+                # every kind through beam_spec.DIST_FIELDS (this filled
+                # only single/uniform/gaussian; L-554)
+                w_kind.value = _ke["kind"]
+                for f, w in zip(_beam_panel_fields(_ke["kind"]),
+                                (w_a, w_b)):
+                    w.value = float(_ke[f])
+        from ion_gym.physics.beam_spec import DERIVE_RESIDUAL_WARN
         res = decl["derived_from"]["residual_frac"]
         worst = max(res.values()) if res else 0.0
         warn = ""
-        if worst > 0.3:
+        if worst > DERIVE_RESIDUAL_WARN:
             warn = (f"  \n**⚠ the ellipse describes this packet only "
                     f"approximately** (worst residual {worst:.2f} — 0 is a "
                     f"perfect ellipse). Regenerating from it produces a "
@@ -10217,7 +10352,8 @@ class SimApp:
         self.w_beam_msg.object = (
             f"**derived from {len(rows)} ions** — axis {decl['axis']}, "
             f"residuals " + ", ".join(f"{k} {v:.2f}" for k, v in res.items())
-            + ". Set the ion count and press *Regenerate beam*." + warn)
+            + ". Set the ion count and press *Regenerate beam*." + ke_note
+            + warn)
         self._beam_sync_derived()
 
     def _sync_plane_controls(self):
@@ -10532,6 +10668,10 @@ class SimApp:
         self._afly = {"msgs": collections.deque(), "done": False,
                       "error": None, "mode": None, "out": None,
                       "res": None, "extras": {},
+                      # read HERE, on the loop: the worker prices the
+                      # loaded regions against it and touches no widget
+                      "budget_gb": self._record_budget(),
+                      "record_v": None, "record_shown": False,
                       "n_req": (int(self.w_n.value)
                                 if getattr(self, "w_n", None) is not None
                                 else 0)}
@@ -10745,6 +10885,16 @@ class SimApp:
                                             dict.fromkeys(_idx)])
                 _frac, _floor = trace_policy(self._assembly_doc)
                 _keep = trace_keep_count(len(beam["ions"]), _frac, _floor)
+                # RECORD GUARD (L-413): the kept traces are what this
+                # flight retains, priced on the LOADED regions (stage
+                # overrides applied) before any ion flies. The verdict is
+                # rendered on the loop by the same _record_guard the
+                # single-stage fly uses; a refusal flies nothing.
+                from ion_gym.physics.sizing import staged_record_volume
+                st["record_v"] = staged_record_volume(
+                    regions, _keep, budget_gb=st["budget_gb"])
+                if st["record_v"]["tier"] == "refuse":
+                    return
                 _say(f"flying {len(beam['ions'])} ions "
                      f"({_keep} traces kept) — 3-D kernels compile on "
                      f"first use")
@@ -10791,6 +10941,17 @@ class SimApp:
             return
         while st["msgs"]:
             self.status.object = st["msgs"].popleft()
+        _v = st.get("record_v")
+        if _v is not None and not st["record_shown"]:
+            st["record_shown"] = True
+            if not self._record_guard(None, volume=_v):
+                # refused: the worker returned before flying; the guard
+                # has written the status line and the chip
+                self._afly_cb = _stop_periodic(
+                    getattr(self, "_afly_cb", None), "fly assembly")
+                if hasattr(self, "w_apply_busy"):
+                    self.w_apply_busy.value = False
+                return
         if not st["done"]:
             self._fly_chip("progress", done=st.get("i_fly"),
                            total=st.get("n_fly"),
@@ -10818,12 +10979,8 @@ class SimApp:
                         f"redraw.")
                     raise
         finally:
-            if getattr(self, "_afly_cb", None) is not None:
-                try:
-                    self._afly_cb.stop()
-                except Exception as e:
-                    print(f"[fly assembly] callback stop: {e}", flush=True)
-                self._afly_cb = None
+            self._afly_cb = _stop_periodic(getattr(self, "_afly_cb", None),
+                                           "fly assembly")
             if hasattr(self, "w_apply_busy"):
                 self.w_apply_busy.value = False
 
@@ -10908,15 +11065,21 @@ class SimApp:
             _flown_mz = sorted({float(p["mz"]) for p in out["per_ion"]
                                 if p.get("mz") is not None})
             if _flown_mz and getattr(self, "w_amz", None) is not None:
-                set_options(self.w_amz, [f"{m:g}" for m in _flown_mz])
+                from ion_gym.viz.viz_core import mz_key
+                set_options(self.w_amz, [mz_key(m) for m in _flown_mz])
             self.stats.update(results,
                               self._assembly_specs.get(_final.name,
                                                        self.spec))
             self.stats_impact.update(results,
                                      self._assembly_specs.get(
                                          _final.name, self.spec))
+            # DETECTED / FLOWN is the only transmission figure (PI ruling
+            # 2026-10-16); without a detector there is none to state
             msg = (f"**assembly flown** ({dt:.1f} s) — "
-                   f"{out['n_arrived']}/{out['n']} arrived")
+                   + (f"{out['n_arrived']}/{out['n']} detected"
+                      if out.get("detector_declared", True) else
+                      f"{out['n']} flown, **no detector declared** — none "
+                      f"can be counted as transmitted"))
             # BEAM PROVENANCE. An assembly flies the
             # INSTRUMENT'S inline packet, never the Ion tab's source:
             # the Ion tab edits the displayed STAGE's source, and no
@@ -10949,8 +11112,9 @@ class SimApp:
             else:
                 msg += f" · beam: {_src_txt} ({out['n']} ions)"
             if out["n_lost"]:
-                # Losses are named, never folded into the headline.
-                msg += (f", **{out['n_lost']} lost**: "
+                # How each undetected ion ended, named, never folded into
+                # the headline.
+                msg += (f", **{out['n_lost']} not detected**: "
                         + "; ".join(f"{v}x {k}"
                                     for k, v in out["losses"].items()))
             ks = sorted({p.get("k") for p in out["per_ion"]
@@ -11089,11 +11253,15 @@ class SimApp:
         rather than a derivation from the declared channels."""
         from ion_gym.physics.sizing import record_volume
         n_cols = len(self._cols) if getattr(self, "_cols", None) else None
-        # 0 (or the widget absent, e.g. before the Status tab is built)
-        # means "no declared budget" -> the machine fraction decides.
+        return record_volume(spec, n_cols=n_cols,
+                             budget_gb=self._record_budget())
+
+    def _record_budget(self):
+        """The declared RAM budget in GB, or None. 0 (or the widget
+        absent, e.g. before the Status tab is built) means "no declared
+        budget" -> the machine fraction decides."""
         _w = getattr(self, "w_ram_budget", None)
-        budget = float(_w.value) if (_w is not None and _w.value) else None
-        return record_volume(spec, n_cols=n_cols, budget_gb=budget)
+        return float(_w.value) if (_w is not None and _w.value) else None
 
     def _record_quote_md(self, spec):
         """The record quote as markdown, loud in proportion to the tier."""
@@ -11115,13 +11283,15 @@ class SimApp:
         levers = "\n".join(f"- {x}" for x in v["levers"])
         return f"{head}\n\n{body}\n\n**Cheapest fixes:**\n{levers}"
 
-    def _record_guard(self, spec) -> bool:
+    def _record_guard(self, spec, volume=None) -> bool:
         """True if the fly may proceed. Refuses LOUDLY and by name when
         the record would not fit, and warns on the status line when it
         is merely large -- the numbers are the same ones the sizing
-        readout shows, from the same call."""
+        readout shows, from the same call. `volume` is a quote already
+        computed (the assembly prices its loaded regions on the worker,
+        sizing.staged_record_volume); `spec` is then unused."""
         try:
-            v = self._record_volume(spec)
+            v = volume if volume is not None else self._record_volume(spec)
         except (ValueError, TypeError, AttributeError) as e:
             # Same narrow set as the readout above. An estimate that
             # cannot be computed is reported, never treated as
@@ -11148,8 +11318,9 @@ class SimApp:
                 f"{v['n_ions']:,} ion(s) x {v['samples_per_ion']:,} samples "
                 f"x {v['n_cols']} channels. Nothing was flown. "
                 + " ".join(v["levers"][:3])
-                + " rec_every is STORAGE ONLY: tof, fate, impact position "
-                  "and collision count are identical at any rec_every.")
+                + ("" if "per_region" in v else
+                   " rec_every is STORAGE ONLY: tof, fate, impact position "
+                   "and collision count are identical at any rec_every."))
             print("[record guard] REFUSED: " +
                   "; ".join(x.replace("**", "") for x in v["lines"]),
                   flush=True)
@@ -11170,8 +11341,10 @@ class SimApp:
                 f"x {v['n_cols']} channels), over half of "
                 + (f"your {v['budget_gb']:.0f} GB budget"
                    if v.get("budget_gb") else "what this machine should hold")
-                + " — flying anyway. Raise rec_every to shrink it; it is a "
-                  "STORAGE setting, not a physics one.")
+                + (" — flying anyway. " + v["levers"][0]
+                   if "per_region" in v else
+                   " — flying anyway. Raise rec_every to shrink it; it is a "
+                   "STORAGE setting, not a physics one."))
             print("[record guard] WARNING: " +
                   "; ".join(x.replace("**", "") for x in v["lines"]),
                   flush=True)
@@ -11398,7 +11571,7 @@ class SimApp:
                     f"for an STL deck); got {len(jsons)}: "
                     f"{sorted(jsons) if jsons else '(none)'}")
             import json as _json
-            from ion_gym.io.paths import repo_root
+            from ion_gym.io.paths import uploads_dir
             from ion_gym.io.stl_resolve import install_stl_payload
             text = next(iter(jsons.values())).decode()
             doc = _json.loads(text)
@@ -11406,7 +11579,7 @@ class SimApp:
             # draw against an unresolvable stl_dir is exactly the refusal
             # this door exists to prevent.
             where, notes = install_stl_payload(
-                doc, stls, repo_root() / "uploads" / "decks")
+                doc, stls, uploads_dir("decks"))
             if where is not None:
                 text = _json.dumps(doc, indent=1)
             self._box_base = None      # foreign text until apply adopts it
@@ -11477,10 +11650,10 @@ class SimApp:
         # must keep resolving; only the download is rewritten, and the
         # rewrite is stated on the status line, never silent.
         import json as _json
-        from ion_gym.io.paths import repo_root
+        from ion_gym.io.paths import uploads_dir
         from ion_gym.io.stl_resolve import portable_stl_dir
         doc = _json.loads(self.spec.to_json())
-        note = portable_stl_dir(doc, repo_root() / "uploads" / "decks")
+        note = portable_stl_dir(doc, uploads_dir("decks"))
         if note:
             self.status.object = f"**saved spec:** {note}"
         return io.BytesIO(_json.dumps(doc, indent=1).encode())
@@ -11500,16 +11673,23 @@ class SimApp:
         import io as _io
         import json
         import datetime
+        import plotly as _plotly
 
-        def _fig_html(fig):
+        def _fig_html(fig, embed_js):
             # D-block: this was a CAPABILITY SNIFF BY EXCEPTION -- call
             # fig.to_html and, on any failure, assume the plotly version is old
             # and re-render through pio.  It would equally have caught a genuine
             # error INSIDE the render and silently produced a DIFFERENT figure
             # (no width/height) in the report.  pio.to_html is the stable API and
             # is present in every plotly that ion_gym supports; use it always.
+            # PLOTLY IS EMBEDDED (PI ruling 2026-10-15, L-559): the INSTALLED
+            # plotly.js rides in the file once (the first figure), so the
+            # export opens offline and renders with the version that drew it.
+            # It loaded plotly 2.27.0 from a CDN -- maybe not the installed
+            # version, and nothing without a network.
             import plotly.io as pio
-            return pio.to_html(fig, include_plotlyjs=False, full_html=False,
+            return pio.to_html(fig, include_plotlyjs=bool(embed_js),
+                               full_html=False,
                                default_width="900px", default_height="600px")
 
         fig = self.pane.object
@@ -11518,10 +11698,10 @@ class SimApp:
                                b"Fly some ions first.</body></html>")
         # main view (field/trajectories) + the PE surface if one has been
         # generated on the PE tab — both in one self-contained file.
-        sections = [("Field / trajectories view", _fig_html(fig))]
+        sections = [("Field / trajectories view", _fig_html(fig, True))]
         pe_fig = getattr(getattr(self, "_pe_tab", None), "_fig", None)
         if pe_fig is not None and pe_fig is not fig:
-            sections.append(("PE surface", _fig_html(pe_fig)))
+            sections.append(("PE surface", _fig_html(pe_fig, False)))
         plot_html = "".join(
             f'<h3>{t}</h3><div>{h}</div>' for t, h in sections)
         # metadata: full spec + run summary
@@ -11531,24 +11711,26 @@ class SimApp:
                 "field_shading": (self.w_fieldmode.value
                                   if self.w_showfield.value else "off"),
                 "pe_mz": self._pe_tab.w_mz.value,
+                "plotly_version": _plotly.__version__,  # the embedded one
                 "spec": self.spec.to_dict()}
         if self._active in self._runs:
+            # THE fate table and the summary accessor (L-547: this was a
+            # fifth, four-entry copy that showed fates 4-6 as bare numbers;
+            # L-530: an absent fate is the named unknown, not a bare -1)
+            from ion_gym.physics.ion_envelope import (summary_fate,
+                                                      fate_name)
             res = self._runs[self._active].results
             fates = {}
             for r in res:
-                k = r.summary.get("kind", -1)
+                k = summary_fate(r.summary)
                 fates[k] = fates.get(k, 0) + 1
-            fate_name = {0: "hit electrode", 1: "left domain",
-                         2: "timed out", 3: "bounding plane"}
             meta["run"] = {
                 "label": self._active, "n_ions": len(res),
-                "fates": {fate_name.get(k, str(k)): v
-                          for k, v in fates.items()}}
+                "fates": {fate_name(k): v for k, v in sorted(fates.items())}}
         meta_json = json.dumps(meta, indent=2)
         title = self.spec.name
         html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>{title} — ion_gym run</title>
-<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>body{{font-family:system-ui,sans-serif;margin:24px;color:#222}}
 h2{{font-weight:600}} h3{{font-weight:600;margin-top:22px}}
 details{{margin-top:18px}}
@@ -11591,25 +11773,38 @@ summary{{cursor:pointer;font-weight:600;color:#555}}</style></head>
         PURE COMPUTE on its arguments — no self, no widgets, no UI — so it is
         safe to run on a worker thread (see _pregen_npz)."""
         from ion_gym.physics.sim_build import mz_of
+        from ion_gym.physics.ion_envelope import (summary_fate,
+                                                  summary_value)
+
+        def _nan(v):
+            return np.nan if v is None else v
         arrs = {}
         summ_rows = []
         mz_list = []
+        mz_src = []
         for r in results:
             if r.traj is not None:
                 arrs[f"ion_{r.index:04d}"] = r.traj.astype(np.float32)
-            mz = r.summary.get("mz")
+            # every summary field through THE accessor (L-530): NaN marks a
+            # genuinely-absent number, the fate is UNKNOWN_FATE (-1) when
+            # absent, and where each m/z came from is RECORDED by name
+            # (mz_source) -- a failed lookup is no longer an anonymous NaN
+            mz = summary_value(r.summary, "mz")
+            src = "summary"
             if mz is None:
                 try:
-                    mz = float(mz_of(spec, int(r.index)))
-                except (ValueError, TypeError, IndexError, AttributeError):
-                    mz = np.nan
-            mz_list.append(float(mz) if mz is not None else np.nan)
-            summ_rows.append([r.index, r.summary.get("kind", -1),
-                              r.summary.get("tof", np.nan),
-                              r.summary.get("x_end", np.nan),
-                              r.summary.get("y_end", np.nan),
-                              r.summary.get("z_end", np.nan),
-                              mz_list[-1]])
+                    mz, src = float(mz_of(spec, int(r.index))), "spec"
+                except (ValueError, TypeError, IndexError,
+                        AttributeError) as e:
+                    mz, src = np.nan, f"unknown ({type(e).__name__})"
+            mz_list.append(mz)
+            mz_src.append(src)
+            summ_rows.append([r.index, summary_fate(r.summary),
+                              _nan(summary_value(r.summary, "tof")),
+                              _nan(summary_value(r.summary, "x_end")),
+                              _nan(summary_value(r.summary, "y_end")),
+                              _nan(summary_value(r.summary, "z_end")),
+                              mz])
         buf = io.BytesIO()
         np.savez_compressed(
             buf, columns=np.array(cols),
@@ -11617,6 +11812,7 @@ summary{{cursor:pointer;font-weight:600;color:#555}}</style></head>
             summary_cols=np.array(["ion", "fate", "tof",
                                    "x_end", "y_end", "z_end", "mz_da"]),
             mz_da=np.array(mz_list, float),
+            mz_source=np.array(mz_src),
             **arrs)
         return buf.getvalue()
 
@@ -11641,13 +11837,19 @@ summary{{cursor:pointer;font-weight:600;color:#555}}</style></head>
         results = list(self._runs[self._active].results)
         cols = list(self._cols)
         spec = self.spec
-        st = {"buf": None, "done": False}
+        st = {"buf": None, "done": False, "err": None}
 
         def work():
+            # The refusals the NPZ build can meet (bad array shapes, a
+            # value numpy cannot store, memory) are recorded and REPORTED by
+            # poll(); this used to be `except Exception` that left the cache
+            # cold with no word to anyone (L-541). Anything else is a defect:
+            # the thread's traceback prints and poll() reports the thread
+            # ended without a result.
             try:
                 st["buf"] = self._build_npz_bytes(results, cols, spec)
-            except Exception:                    # a failed pre-gen leaves the
-                st["buf"] = None                 # cache cold; the click rebuilds
+            except (ValueError, TypeError, MemoryError) as e:
+                st["err"] = e
             finally:
                 st["done"] = True
 
@@ -11655,42 +11857,55 @@ summary{{cursor:pointer;font-weight:600;color:#555}}</style></head>
         worker.start()
         own = {"pcb": None}
 
-        def _stop_own():
-            if own["pcb"] is not None:
-                try:
-                    own["pcb"].stop()            # already-stopped: benign
-                except (ValueError, RuntimeError):
-                    pass
-                own["pcb"] = None
+        def _report(why):
+            # appended, not replacing: this runs after a flight, and the
+            # status line is carrying that flight's summary
+            self.status.object += (
+                f"\n\n⚠ **download NPZ not pre-built** ({why}) — the "
+                f"Download button will build it when clicked.")
 
         def poll():
             if not st["done"]:
                 if not worker.is_alive():        # died without finishing
-                    _stop_own()
+                    own["pcb"] = _stop_periodic(own["pcb"], "npz pre-gen")
                     if self._npz_building == key:
                         self._npz_building = None
+                    _report("the build thread ended without a result — "
+                            "see the console")
                 return
-            _stop_own()
-            if st["buf"] is not None and self._npz_building == key:
+            own["pcb"] = _stop_periodic(own["pcb"], "npz pre-gen")
+            if self._npz_building != key:
+                return                           # superseded by a newer run
+            self._npz_building = None
+            if st["buf"] is not None:
                 self._npz_cache = {"key": key, "buf": st["buf"]}
-            if self._npz_building == key:
-                self._npz_building = None
+            elif st["err"] is not None:
+                _report(f"{type(st['err']).__name__}: {st['err']}")
+            else:
+                _report("the build raised — see the console")
 
         in_server = False
         try:
             in_server = pn.state.curdoc is not None
         except (RuntimeError, AttributeError):
             in_server = False
-        if in_server:
-            try:
-                own["pcb"] = pn.state.add_periodic_callback(poll, 200)
-                self._ensure_watchdog_pulse()
-                return
-            except (RuntimeError, ValueError):
-                pass
-        # headless / unschedulable: no loop to protect, so build and store now
-        worker.join()
-        poll()
+        if not in_server:
+            # headless: no loop to protect, so build and store now
+            worker.join()
+            poll()
+            return
+        try:
+            own["pcb"] = pn.state.add_periodic_callback(poll, 200)
+            self._ensure_watchdog_pulse()
+        except (RuntimeError, ValueError) as e:
+            # A served session that cannot schedule the poll: the cache
+            # stays cold and the click builds. It used to fall through to
+            # worker.join() HERE, on the document thread -- the very
+            # blocking compress this function exists to keep off the loop
+            # (L-555).
+            self._npz_building = None
+            _report(f"could not schedule the background poll: "
+                    f"{type(e).__name__}: {e}")
 
     def _export_npz_bytes(self):
         """FileDownload callback. Serves the pre-generated bytes when the
@@ -11712,34 +11927,32 @@ summary{{cursor:pointer;font-weight:600;color:#555}}</style></head>
         return io.BytesIO(data)
 
     def _export_bytes(self):
-        import pandas as pd
+        """CSV download of the displayed run: THE rows builder,
+        results_dataframe (L-547: this repeated its loop)."""
         if self._active not in self._runs:
             return io.BytesIO(b"")
-        frames = []
-        for r in self._runs[self._active].results:
-            if r.traj is None:
-                continue
-            df = pd.DataFrame(r.traj, columns=self._cols)
-            df.insert(0, "ion", r.index)
-            df["fate"] = r.summary["kind"]
-            frames.append(df)
-        out = (pd.concat(frames, ignore_index=True) if frames
-               else pd.DataFrame())
+        out = self.results_dataframe()
         return io.BytesIO(out.to_csv(index=False).encode())
 
     def results_dataframe(self, run_name=None):
-        """The displayed (or named) run's channels as a DataFrame."""
+        """The displayed (or named) run's channels as a DataFrame: one row
+        per recorded step, with the ion index and its fate code. An ion
+        with NO recorded trajectory (a fates-only run) gets ONE row with
+        its index and fate and NaN channels -- it used to be skipped
+        silently (L-547). The fate is read through the summary accessor,
+        so a summary without one is ion_envelope.UNKNOWN_FATE (L-530)."""
         import pandas as pd
+        from ion_gym.physics.ion_envelope import summary_fate
         name = run_name or self._active
         if name not in self._runs:
             return pd.DataFrame()
         frames = []
         for r in self._runs[name].results:
-            if r.traj is None:
-                continue
-            df = pd.DataFrame(r.traj, columns=self._cols)
+            traj = (r.traj if r.traj is not None
+                    else np.full((1, len(self._cols)), np.nan))
+            df = pd.DataFrame(traj, columns=self._cols)
             df.insert(0, "ion", r.index)
-            df["fate"] = r.summary["kind"]
+            df["fate"] = summary_fate(r.summary)
             frames.append(df)
         return (pd.concat(frames, ignore_index=True) if frames
                 else pd.DataFrame())

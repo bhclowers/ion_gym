@@ -15,6 +15,7 @@ import numpy as np
 
 __all__ = ["station_hits", "first_detection",
            "kernel_stations", "unsupported_stations_notice",
+           "station_terminates",
            "station_planes", "bound_planes", "kernel_planes"]
 
 _AX = {"x": "x", "y": "y", "z": "z"}
@@ -26,6 +27,33 @@ _INF = float("inf")
 # consumes its output; they are named here so no route re-declares them.
 FATE_IMPACT_PLANE = 5
 FATE_DETECT = 6
+
+
+def _reaches_kernel(st):
+    """THE classification of one station: True when it becomes a kernel
+    plane (impact_plane; detect with on_hit='splat'), False when it is
+    post-hoc bookkeeping only (detect with on_hit='pass'). Anything else
+    REFUSES by name -- both callers below used to `continue` past an
+    unknown kind, or a detect with a missing on_hit, as if it were
+    post-hoc (L-554), so a station the deck declared could do nothing
+    with no word."""
+    kind = getattr(st, "kind", "")
+    name = getattr(st, "name", "<unnamed>")
+    if kind == "impact_plane":
+        return True
+    if kind == "detect":
+        on_hit = getattr(st, "on_hit", None)
+        if on_hit == "splat":
+            return True
+        if on_hit == "pass":
+            return False                  # pass-detect: post-hoc only
+        raise ValueError(
+            f"station {name!r}: kind='detect' needs on_hit 'pass' or "
+            f"'splat', got {on_hit!r}")
+    raise ValueError(
+        f"station {name!r}: kind {kind!r} is not a station kind "
+        f"(impact_plane, detect; 'record' and 'aperture' were retired -- "
+        f"SimSpec.validate names the replacement)")
 
 
 def station_planes(spec, world_off_mm=(0.0, 0.0, 0.0)):
@@ -66,11 +94,9 @@ def station_planes(spec, world_off_mm=(0.0, 0.0, 0.0)):
     off = dict(zip("xyz", [float(v) for v in world_off_mm]))
     out = []
     for st in (getattr(spec, "stations", None) or []):
-        kind = getattr(st, "kind", "")
-        if kind == "detect" and getattr(st, "on_hit", None) != "splat":
+        if not _reaches_kernel(st):
             continue                      # pass-detect: post-hoc only
-        if kind not in ("impact_plane", "detect"):
-            continue                      # record: post-hoc only
+        kind = st.kind
         sax = st.axis
         name = getattr(st, "name", "<unnamed>")
         t1, t2 = [a for a in "xyz" if a != sax]
@@ -99,12 +125,32 @@ def station_planes(spec, world_off_mm=(0.0, 0.0, 0.0)):
             win = (*_pair(t1), *_pair(t2))
         elif kind == "impact_plane":
             win = (_INF, -_INF, _INF, -_INF)  # wall: nothing inside
-        else:
+        else:   # detect+splat: _reaches_kernel admits only these two
             win = (-_INF, _INF, -_INF, _INF)  # full-plane detector
         out.append((sax, float(st.pos_mm) - off[sax], 0.0, win,
                     FATE_IMPACT_PLANE if kind == "impact_plane"
                     else FATE_DETECT))
     return out
+
+
+def station_terminates(st, point):
+    """The fate a crossing of station `st` at `point` (x, y, z, mm, in the
+    frame the station is authored in) assigns: FATE_IMPACT_PLANE,
+    FATE_DETECT, or None when the ion passes. The same window senses the
+    kernels apply to station_planes' output, for callers that meet a
+    station OUTSIDE a kernel -- the analytic drift beyond the solved
+    domain (L-286), where a wall downstream must still stop the ion."""
+    if not _reaches_kernel(st):
+        return None                       # pass-detect: never terminates
+    wd = st.window or {}
+    p = dict(zip("xyz", (float(v) for v in point)))
+    inside = bool(wd) and all(float(w[0]) <= p[a] <= float(w[1])
+                              for a, w in wd.items())
+    if st.kind == "impact_plane":
+        # a plate: inside the aperture passes; an empty window is a wall
+        return None if inside else FATE_IMPACT_PLANE
+    # detect + splat: a patch absorbs inside; empty window = full plane
+    return FATE_DETECT if (inside or not wd) else None
 
 
 def kernel_stations(spec):
@@ -117,15 +163,8 @@ def kernel_stations(spec):
     NOT listed, because it is fully served post-hoc on every route and
     warning about it would train users to ignore the notice.
     """
-    out = []
-    for st in (getattr(spec, "stations", None) or []):
-        kind = getattr(st, "kind", "")
-        if kind == "detect" and getattr(st, "on_hit", None) != "splat":
-            continue
-        if kind not in ("impact_plane", "detect"):
-            continue
-        out.append(st)
-    return out
+    return [st for st in (getattr(spec, "stations", None) or [])
+            if _reaches_kernel(st)]
 
 
 def unsupported_stations_notice(spec, route, fix):
@@ -144,7 +183,7 @@ def unsupported_stations_notice(spec, route, fix):
     lines = []
     for st in affected:
         nm = getattr(st, "name", "<unnamed>")
-        kind = getattr(st, "kind", "")
+        kind = st.kind      # kernel_stations: impact_plane or detect+splat
         what = ("would ABSORB ions crossing inside its window "
                 "(detector patch)" if kind == "detect"
                 else "would SPLAT ions crossing outside its window "

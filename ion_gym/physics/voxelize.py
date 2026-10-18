@@ -253,6 +253,17 @@ def _dist_to_tris(tris, pts, chunk=800):
 
 
 # --------------------------------------------------------------- facade
+class ElectrodeOverlap(ValueError):
+    """Two electrodes' metal claims the same node. A TYPED refusal (L-529):
+    stl_upload decided "overlap or other failure" by finding the word
+    'overlaps' in the message. Carries the pair, one node and the count."""
+
+    def __init__(self, a, b, node, n_nodes):
+        self.a, self.b, self.node, self.n_nodes = int(a), int(b), node, n_nodes
+        super().__init__(f"electrode {self.a} overlaps {self.b} at node "
+                         f"({','.join(str(v) for v in node)}) (+{n_nodes})")
+
+
 def voxelize_meshes(meshes, grid, surface_eps_gu=0.0):
     """{index -> mesh (gu, full frame)} -> (labeled grid int16, eps used).
     Stored/folded frame (nodes at integer gu, origin on the mirror axes)."""
@@ -264,8 +275,8 @@ def voxelize_meshes(meshes, grid, surface_eps_gu=0.0):
         clash = inside & (lab != 0) & (lab != idx)
         if clash.any():
             i, j, k = [int(v[0]) for v in np.where(clash)]
-            raise ValueError(f"electrode {idx} overlaps {int(lab[i, j, k])}"
-                             f" at node ({i},{j},{k}) (+{int(clash.sum())})")
+            raise ElectrodeOverlap(idx, int(lab[i, j, k]), (i, j, k),
+                                   int(clash.sum()))
         lab[inside] = idx
     return lab
 

@@ -479,8 +479,10 @@ def run_for(label, make_spec):
         app._afly_poll()                         # final drain after done
         msg = str(app.status.object)
         assert "failed" not in msg.lower(), f"assembly flight failed: {msg}"
-        assert "arrived" in msg or "fate" in msg, \
-            f"flight reported no outcome: {msg}"
+        # the outcome vocabulary is DETECTED (PI ruling 2026-10-16): a
+        # detection count, or the statement that no detector is declared
+        assert ("detected" in msg or "no detector declared" in msg
+                or "fate" in msg), f"flight reported no outcome: {msg}"
     check("Config: staged assembly loads, switches stage, and flies",
           assembly_load_switch_fly)
 
@@ -539,8 +541,13 @@ def run_station_and_retune_guards():
                     {"type": "rect", "x_mm": 1.0 + 2.0 * i, "y_mm": 1.0,
                      "width_mm": 1.0, "height_mm": 1.0}]}
                 for i in range(4)]},
+           # R2 (2026-10-15): physics keys are stated, at the values this
+           # fixture flew with as defaults before missing ones refused
            "source": {"x0_mm": 6.0, "y0_mm": 5.0, "mz_list": [100.0],
-                      "n_ions": 2, "seed": 3},
+                      "n_ions": 2, "seed": 3, "distribution": "disc",
+                      "z0_mm": 0.0, "r_mm": 4.0, "ke_lo": 0.1,
+                      "ke_hi": 1.9, "tob_span_us": 2.0},
+           "integration": {"dt_ns": 1.0, "t_max_us": 400.0},
            "stations": [
             {"name": "DET1", "kind": "detect", "on_hit": "pass",
              "axis": "x", "pos_mm": 6.0, "window": {}},

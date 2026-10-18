@@ -440,3 +440,50 @@ def test_collisional_crn_equivalence_tw2d_vs_3d():
             f"amplifies to mm scale, so this is a real desync")
         print(f"  Gate E q={q}: {nc2} collisions, CRN max dev "
               f"{max(dx, dy):.2e} mm  OK")
+
+
+def test_dict_collisions_reach_kernel_through_spec(monkeypatch):
+    """Gate F (L-531, A4): a collisions DICT reaches the kernel through the
+    spec's own loader. Authored in Torr with no T_k, it must fly at that
+    pressure and the spec's 273 K -- not the route's old P_pa default of
+    0, which flew a gas-ON deck silently in vacuum at 298 K. A dict naming
+    only the gas takes the spec's pressure. The kernel is intercepted, so
+    this reads exactly what the flyer hands it."""
+    import inspect
+    from ion_gym.io.sim_spec import CollisionSpec, RFGroupSpec
+    from ion_gym.physics import tracer_tw2d as T
+    from ion_gym.physics.constants import TORR_PA
+
+    n = 12
+    gs = [RFGroupSpec(name="G0", frequency_hz=1e4, amplitude_v=1.0)]
+    f = T.build_tw2d_fields({1: np.zeros((n, n))}, gs, {1: "G0"}, {1: 0.0},
+                            0.5)
+    names = list(inspect.signature(T._fly_tw2d.py_func).parameters)
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def spy(*a):
+        seen.update(zip(names, a))
+        raise _Stop
+
+    monkeypatch.setattr(T, "_fly_tw2d", spy)
+    spec_default = CollisionSpec()
+    for col, want_p_pa in ((dict(enabled=True, gas="He", P_torr=4.0),
+                            4.0 * TORR_PA),
+                           (dict(enabled=True, gas="He"),
+                            spec_default.P_pa)):
+        with pytest.raises(_Stop):
+            T.fly_tw2d(f, 100.0, (2.0, 2.0), (0.0, 0.0, 0.0), tob_us=0.0,
+                       dt_ns=1.0, t_max_us=0.1, collisions=col)
+        assert seen["collide_on"], f"gate F {col}: gas switched off"
+        assert abs(seen["P_pa"] - want_p_pa) < 1e-9 * want_p_pa, (
+            f"gate F {col}: kernel got P_pa={seen['P_pa']}, want "
+            f"{want_p_pa} -- the dict's pressure is not read through "
+            f"CollisionSpec")
+        assert seen["T_k"] == spec_default.T_k, (
+            f"gate F {col}: kernel got T_k={seen['T_k']}, want the spec "
+            f"default {spec_default.T_k}")
+    print("  Gate F: dict collisions (Torr / gas-only) reach the kernel "
+          "through CollisionSpec  OK")

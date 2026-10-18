@@ -1,0 +1,248 @@
+{
+ "schema_version": 1,
+ "name": "quadrupole (STL rods, axial transport)",
+ "notes": "Two masses flown: mz_stable stays bounded, mz_unstable grows and hits a rod \u2014 the Mathieu stable/unstable demo.",
+ "geometry": {
+  "width_mm": 28.0,
+  "height_mm": 28.0,
+  "depth_mm": 0.0,
+  "metal_depth_mm": 0.0,
+  "axial_extent_mm": [
+   0.0,
+   117.9
+  ],
+  "mm_per_gu": 0.2,
+  "symmetry": {
+   "coords": "xyz",
+   "planes": {
+    "x": "none",
+    "y": "none",
+    "z": "none"
+   }
+  },
+  "stl_manifest": {
+   "quad_rod_1.stl": "e14306f8c06bd5ce349117889ec27cfbb73a7de403e4482c36ac67cad1571aff",
+   "quad_rod_2.stl": "beb3763ab9fae8a62b9a95a939761d6e939f5efd46ab1d18958d49ca91a163ca",
+   "quad_rod_3.stl": "172ed5917a4fefeb74248f0eb7c7fbf45402771de557bc181d5d38351386f523",
+   "quad_rod_4.stl": "078136b053b4e75e66bb1264f5e4fd6b3eca6ede104376400fb12939b930db78"
+  },
+  "frame_offset_mm": [
+   14.0,
+   14.0,
+   0.0
+  ],
+  "electrodes": [
+   {
+    "name": "rod_1",
+    "shapes": [],
+    "stl": "quad_rod_1.stl",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RFA"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null,
+    "metal_depth_mm": null
+   },
+   {
+    "name": "rod_2",
+    "shapes": [],
+    "stl": "quad_rod_2.stl",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RFA"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null,
+    "metal_depth_mm": null
+   },
+   {
+    "name": "rod_3",
+    "shapes": [],
+    "stl": "quad_rod_3.stl",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RFB"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null,
+    "metal_depth_mm": null
+   },
+   {
+    "name": "rod_4",
+    "shapes": [],
+    "stl": "quad_rod_4.stl",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "RFB"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null,
+    "metal_depth_mm": null
+   }
+  ],
+  "rf_groups": [
+   {
+    "name": "RFA",
+    "frequency_hz": 2000000.0,
+    "amplitude_v": 241.33531661855656,
+    "phase_deg": 0.0,
+    "duty": 0.5,
+    "offset_v": 0.0,
+    "waveform": "sin",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   },
+   {
+    "name": "RFB",
+    "frequency_hz": 2000000.0,
+    "amplitude_v": 241.33531661855656,
+    "phase_deg": 180.0,
+    "duty": 0.5,
+    "offset_v": 0.0,
+    "waveform": "sin",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null
+   }
+  ],
+  "dc_groups": []
+ },
+ "source": {
+  "n_ions": 60,
+  "distribution": "box",
+  "x0_mm": 14.0,
+  "y0_mm": 14.3,
+  "z0_mm": 0.0,
+  "r_mm": 4.0,
+  "len_mm": 0.0,
+  "box_mm": [
+   1.5,
+   1.5,
+   0.5
+  ],
+  "axis": "z",
+  "direction": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "ke_lo": 8.0,
+  "ke_hi": 8.0,
+  "temperature_k": 0.0,
+  "dv_fwhm_ms": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "fwhm_mm": null,
+  "trunc_mm": null,
+  "v_drift_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "mz_list": [
+   100.0,
+   30.0
+  ],
+  "charge": 1,
+  "tob_span_us": 0.0,
+  "births_file": null,
+  "seed": null
+ },
+ "collisions": {
+  "enabled": false,
+  "gas": "N2",
+  "T_k": 273.0,
+  "P_torr": 1.0,
+  "sigma_m2": 2.27e-18,
+  "model": "hs",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "dt_ns": 2.0,
+  "t_max_us": 30.0,
+  "rec_every": 2,
+  "max_records": 100000,
+  "record_channels": [
+   "speed",
+   "radius"
+  ]
+ },
+ "bounds": {
+  "x_min_on": false,
+  "x_max_on": false,
+  "y_min_on": false,
+  "y_max_on": false,
+  "z_min_on": false,
+  "z_max_on": false,
+  "x_min": 0.0,
+  "x_max": 100.0,
+  "y_min": -50.0,
+  "y_max": 50.0,
+  "z_min": -50.0,
+  "z_max": 50.0
+ },
+ "stations": [],
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xz"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null,
+ "optic_axis": {
+  "axis": "z",
+  "through_mm": [
+   14.0,
+   14.0
+  ]
+ }
+}

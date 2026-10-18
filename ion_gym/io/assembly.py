@@ -37,10 +37,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import copy
+
 from ion_gym.io.lattice import cover_extent_mm
 from ion_gym.io.sim_spec import (SimSpec, GeometrySpec, ElectrodeSpec,
                                  ShapeSpec, SymmetrySpec, SourceSpec,
-                                 CollisionSpec, IntegrationSpec, ViewSpec)
+                                 CollisionSpec, IntegrationSpec, ViewSpec,
+                                 BoundsSpec, MissingPhysicsKey,
+                                 shift_shape_dict, shape_metal_bounds_mm)
 
 
 @dataclass
@@ -96,9 +100,14 @@ class AssemblySpec:
     other_extent_mm: float = 20.0          # radial (r-z) / transverse span
     name: str = "assembly"
     source: SourceSpec = field(default_factory=SourceSpec)
-    collisions: CollisionSpec = field(default_factory=CollisionSpec)
+    collisions: CollisionSpec = field(       # left out = vacuum (R3 Q1)
+        default_factory=lambda: CollisionSpec(enabled=False))
     integration: IntegrationSpec = field(default_factory=IntegrationSpec)
     view: Optional[ViewSpec] = None
+    # carried into the flattened SimSpec (L-525: both were listed as
+    # known keys and then never read, so they vanished on a round trip)
+    bounds: Optional[BoundsSpec] = None
+    notes: str = ""
 
     def to_dict(self):
         d = {"kind": "assembly", "name": self.name, "coords": self.coords,
@@ -110,6 +119,10 @@ class AssemblySpec:
              "integration": self.integration.to_dict()}
         if self.view is not None:
             d["view"] = self.view.to_dict()
+        if self.bounds is not None:
+            d["bounds"] = self.bounds.to_dict()
+        if self.notes:
+            d["notes"] = self.notes
         # PASSTHROUGH: foreign document keys survive; known wins.
         for k, v in (getattr(self, "_extras", None) or {}).items():
             if k not in d:
@@ -122,11 +135,15 @@ class AssemblySpec:
             raise ValueError(
                 f"not an assembly spec (kind={d.get('kind')!r}); load a "
                 f"single-FA spec with SimSpec.from_dict instead")
+        # Every key listed here is READ below. width_mm / height_mm were
+        # listed and never read (the flatten derives the axial span from
+        # the shapes and the other span from other_extent_mm), so a
+        # declared value silenced the warning and then vanished (L-525):
+        # they now warn as not interpreted.
         _known = {"kind", "units", "coords", "mm_per_gu", "axis",
-                  "other_extent_mm",
-                  "width_mm", "height_mm", "source", "collisions",
+                  "other_extent_mm", "source", "collisions",
                   "integration", "bounds", "view", "name", "notes",
-                  "schema_version", "_display_name"}
+                  "schema_version", "_display_name", "_ui_hidden"}
         _extra = sorted(k for k in d if k not in _known)
         if _extra:
             import warnings
@@ -135,50 +152,72 @@ class AssemblySpec:
                 f"retained in the saved file but NOT interpreted — "
                 f"misspelled or foreign parameter?",
                 stacklevel=3)
+        # R2 (PI ruling 2026-10-15), the SimSpec rule applied to the
+        # assembly door: the frame (coords, pitch, transverse span) and
+        # the source / integration blocks set the physics and their old
+        # defaults (rz, 1.0 mm/gu, 20 mm, the funnel source) are one
+        # deck's values -- refused when missing. The placement axis 'x'
+        # is the r-z axial convention (neutral). No collisions = vacuum.
+        _need = [k for k in ("coords", "mm_per_gu", "other_extent_mm",
+                             "source", "integration") if k not in d]
+        if _need:
+            raise MissingPhysicsKey(
+                f"AssemblySpec: the deck does not state {_need}. These "
+                f"set the physics, and a default would be one deck's "
+                f"value -- state them in the deck.")
+        if "name" not in d:
+            import warnings
+            warnings.warn("AssemblySpec: cosmetic key(s) not in the deck, "
+                          "loaded at their defaults: name='assembly'",
+                          stacklevel=3)
         obj = cls(
             units=[PlacedUnit.from_dict(u) for u in d["units"]],
-            coords=d.get("coords", "rz"), mm_per_gu=d.get("mm_per_gu", 1.0),
+            coords=d["coords"], mm_per_gu=d["mm_per_gu"],
             axis=d.get("axis", "x"),
-            other_extent_mm=d.get("other_extent_mm", 20.0),
+            other_extent_mm=d["other_extent_mm"],
             name=d.get("name", "assembly"),
-            source=(SourceSpec.from_dict(d["source"]) if "source" in d
-                    else SourceSpec()),
+            source=SourceSpec.from_dict(d["source"]),
             collisions=(CollisionSpec.from_dict(d["collisions"])
-                        if "collisions" in d else CollisionSpec()),
-            integration=(IntegrationSpec.from_dict(d["integration"])
-                         if "integration" in d else IntegrationSpec()),
-            view=(ViewSpec.from_dict(d["view"]) if "view" in d else None))
+                        if "collisions" in d
+                        else CollisionSpec(enabled=False)),   # R3 Q1: vacuum
+            integration=IntegrationSpec.from_dict(d["integration"]),
+            view=(ViewSpec.from_dict(d["view"]) if "view" in d else None),
+            bounds=(BoundsSpec.from_dict(d["bounds"]) if "bounds" in d
+                    else None),
+            notes=d.get("notes", ""))
         if _extra:
             obj._extras = {k: d[k] for k in _extra}   # retained foreign keys
         return obj
 
 
-# axis name -> which shape param the offset shifts (r-z: axial=x, radial=y)
-_AXIS_PARAM = {"x": "x_mm", "y": "y_mm"}
+# placement axis -> its in-plane index (r-z: axial = x, radial = y)
+_AXIS_INDEX = {"x": 0, "y": 1}
 
 
 def _shift_electrode(el: ElectrodeSpec, dax: float, drad: float,
                      axis: str) -> ElectrodeSpec:
-    """Copy an electrode with its shapes shifted by (dax along `axis`,
-    drad along the other in-plane axis). Only inline-shape electrodes are
-    placeable; an STL-backed unit in a coaxial flatten is refused (its
-    offset belongs in the STL frame, not here)."""
+    """A FULL copy of an electrode (every field: dc ganging, color, basis,
+    metal depth, retained foreign keys) with its shapes shifted by (dax
+    along `axis`, drad along the other in-plane axis) through THE shape-
+    offset authority, sim_spec.shift_shape_dict (L-527). It used to shift
+    only x_mm/y_mm -- ellipse and polygon units stayed at their own
+    origin -- drop cutout children, and rebuild the electrode from five
+    fields. Only inline-shape electrodes are placeable; an STL-backed unit
+    in a coaxial flatten is refused (its offset belongs in the STL frame),
+    as is a shape kind with no shift rule."""
     if not el.shapes:
         raise ValueError(
             f"unit electrode {el.name!r} has no inline shapes; STL-backed "
             f"units are not supported in a coaxial flatten")
-    ax_p = _AXIS_PARAM[axis]
-    other_p = "y_mm" if ax_p == "x_mm" else "x_mm"
-    new_shapes = []
-    for s in el.shapes:
-        p = dict(s.params)
-        if ax_p in p:
-            p[ax_p] = p[ax_p] + dax
-        if other_p in p:
-            p[other_p] = p[other_p] + drad
-        new_shapes.append(ShapeSpec(s.type, p))
-    return ElectrodeSpec(name=el.name, dc=el.dc, rf_groups=list(el.group_names()),
-                         is_grid=el.is_grid, shapes=new_shapes)
+    dx, dy = (dax, drad) if _AXIS_INDEX[axis] == 0 else (drad, dax)
+    out = copy.deepcopy(el)
+    try:
+        out.shapes = [ShapeSpec.from_dict(shift_shape_dict(s.to_dict(),
+                                                           dx, dy))
+                      for s in el.shapes]
+    except ValueError as e:
+        raise ValueError(f"unit electrode {el.name!r}: {e}") from e
+    return out
 
 
 def flatten_to_simspec(asm: AssemblySpec) -> SimSpec:
@@ -189,11 +228,12 @@ def flatten_to_simspec(asm: AssemblySpec) -> SimSpec:
     the assembly JSON stays the readable multi-FA description (the clean
     example). Names are prefixed so the impact-plane / stats grouping and
     the electrode table stay per-unit legible."""
-    if len(asm.axis) != 1 or asm.axis not in _AXIS_PARAM:
+    if len(asm.axis) != 1 or asm.axis not in _AXIS_INDEX:
         raise ValueError(f"placement axis {asm.axis!r} must be one of "
-                         f"{sorted(_AXIS_PARAM)} for a coaxial flatten")
+                         f"{sorted(_AXIS_INDEX)} for a coaxial flatten")
     electrodes = []
     max_axial = 0.0
+    lo_i = 2 * _AXIS_INDEX[asm.axis]          # (x_lo, x_hi, y_lo, y_hi)
     for u in asm.units:
         off = u.offset_mm
         dax = float(off[0])
@@ -202,10 +242,12 @@ def flatten_to_simspec(asm: AssemblySpec) -> SimSpec:
             shifted = _shift_electrode(el, dax, drad, asm.axis)
             shifted.name = f"{u.name}_{el.name}"
             electrodes.append(shifted)
+            # the domain covers the METAL of every shape kind (it used to
+            # read x_mm + width_mm, i.e. rects only, axis x only)
             for s in shifted.shapes:
-                p = s.params
-                hi = p.get(_AXIS_PARAM[asm.axis], 0.0) + p.get("width_mm", 0.0)
-                max_axial = max(max_axial, hi)
+                b = shape_metal_bounds_mm(s.to_dict())
+                if b is not None:
+                    max_axial = max(max_axial, b[lo_i + 1])
     # A7: both extents are LATTICE quantities. max_axial is accumulated
     # from shifted stage placements and other_extent_mm is a declared
     # span -- neither is counted in cells, so the assembled spec could be
@@ -222,4 +264,5 @@ def flatten_to_simspec(asm: AssemblySpec) -> SimSpec:
     return SimSpec(geometry=geo, source=asm.source,
                    collisions=asm.collisions, integration=asm.integration,
                    view=asm.view or ViewSpec(mode="2d", planes=["xy"]),
-                   name=asm.name)
+                   bounds=asm.bounds or BoundsSpec(),
+                   name=asm.name, notes=asm.notes)

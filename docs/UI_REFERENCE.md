@@ -7,7 +7,8 @@
 - **ions per m/z** (IntInput) — Ions flown PER m/z value. Total flown = this x the number of m/z entries. E.g. 50 with 4 masses flies 200 ions (50 of each).
 - **seeded run** (Checkbox)
 - **seed** (IntInput) — Pins the whole run: births, birth times and collision draws. Ion i always draws the same numbers, so reruns are bit-identical and two tunes are compared on common random numbers. Unchecked (default): fresh entropy per run, drawn seed printed.
-- **m/z list (Da, comma-separated)** (TextInput)
+- **ion mass list (Da, comma-separated)** (TextInput)
+- **charge state (signed z)** (IntInput) — Signed integer charge state for every ion in the packet (spec source.charge). 0 refuses at fly time.
 - **birth distribution** (Select) — Spatial pattern the ions are seeded over: a single point, a filled disc, a line, a grid, or a BOX (random uniform placement inside a rectangular volume -- avoids the skew of a contrived single-point source; extents set below).
 - **start x (mm)** (FloatInput) — Birth position of the ion cloud centre, x (mm). In r-z geometry x is the axis.
 - **start y (mm)** (FloatInput) — Birth position of the ion cloud centre, y (mm). In r-z geometry y is the radius.
@@ -17,7 +18,7 @@
 - **box dz (mm)** (FloatInput) — Full extent (mm) of the birth box along this axis, centred on (start x, y, z); each ion is placed uniformly at random inside. 0 collapses that axis.
 - **KE min (eV)** (FloatInput) — Lower bound of the birth kinetic energy; each ion draws uniformly in [min, max]. Set equal for monoenergetic.
 - **KE max (eV)** (FloatInput) — Upper bound of the birth kinetic energy.
-- **temperature (K)** (FloatInput) — Thermal velocity spread SUPERPOSED on the directed beam KE (a beam AT a temperature; needs >= v329 semantics). 0 = off. This is the turn-around-time knob in a TOF source.
+- **temperature (K)** (FloatInput) — Isotropic Maxwell-Boltzmann thermal spread of the birth velocities: each lab axis gets an independent Gaussian kick with sigma = sqrt(kT/m), SUPERPOSED on the directed beam KE, the per-axis dv FWHM, and the drift terms (a beam AT a temperature). 0 = off: an idealized, perfectly cold beam with NO thermal scatter. In a TOF that deletes the turn-around term — usually the resolution-limiting aberration of an OA source — so a 0 K TOF resolution is optimistic by construction. Real beams are also rarely isotropic: for an OA-MRT use the per-axis dv FWHM (m/s) instead, which sets each axis's effective temperature independently.
 **launch direction** (KE is along this vector):**
 
 - **launch dir x** (FloatInput) — Launch direction vector (the birth KE is directed along this; it is normalized, so only the direction matters, not the magnitude). e.g. (0,0,1) fires along z.
@@ -58,6 +59,7 @@
 - **station** (Select)
 - **name** (TextInput)
 - **kind** (Select)
+- **on hit (detect)** (Select) — detect only: pass = log and continue; splat = absorbing detector (fate 6). An impact_plane ignores this (aperture passes, plate splats by definition).
 - **axis** (Select)
 - **pos (mm)** (FloatInput)
 - **window y** (Checkbox)
@@ -84,6 +86,7 @@
 - **RFA frequency (Hz)** (FloatInput) — Drive frequency for this group, in Hz. For a stepped travelling wave this is the per-group rate.
 - **RFA phase (deg)** (FloatInput) — Phase offset of this group's waveform. A travelling wave is groups stepped in phase; two confinement rails run 180 deg apart.
 - **RFA duty** (FloatInput) — Square waves only: fraction of the period HIGH (0.5 = 11110000 across 8 stepped phases; 0.25 = 11000000).
+- **RFA offset (V)** (FloatInput) — Static DC offset added to this group's waveform: V(t) = amplitude*shape(t) + offset (volts). Folds into the static field. Amplitude 0 with a non-zero offset is a pure DC electrode.
 - **RFA pulse delay τ (µs)** (FloatInput) — Step-table drives only: the waveform holds 0 until τ, then 1 (× amplitude). This is Wiley-McLaren delayed extraction when it drives the pusher/extraction plates. NOTE: τ is co-tuned with the mirror detune — changing τ alone moves the velocity focus off the detector. Non-step tables are read-only here.
 - **RFA — members** (MultiChoice) — Electrodes driven by this group. Same as the per-electrode 'drive groups' box; an electrode may be in several drive groups and a DC group.
 - **RFB waveform** (Select) — Drive waveform for this group. 'table' is the general sampled shape (arbitrary); analytic shapes are sin/square (triangle/sawtooth extensible).
@@ -91,6 +94,7 @@
 - **RFB frequency (Hz)** (FloatInput) — Drive frequency for this group, in Hz. For a stepped travelling wave this is the per-group rate.
 - **RFB phase (deg)** (FloatInput) — Phase offset of this group's waveform. A travelling wave is groups stepped in phase; two confinement rails run 180 deg apart.
 - **RFB duty** (FloatInput) — Square waves only: fraction of the period HIGH (0.5 = 11110000 across 8 stepped phases; 0.25 = 11000000).
+- **RFB offset (V)** (FloatInput) — Static DC offset added to this group's waveform: V(t) = amplitude*shape(t) + offset (volts). Folds into the static field. Amplitude 0 with a non-zero offset is a pure DC electrode.
 - **RFB pulse delay τ (µs)** (FloatInput) — Step-table drives only: the waveform holds 0 until τ, then 1 (× amplitude). This is Wiley-McLaren delayed extraction when it drives the pusher/extraction plates. NOTE: τ is co-tuned with the mirror detune — changing τ alone moves the velocity focus off the detector. Non-step tables are read-only here.
 - **RFB — members** (MultiChoice) — Electrodes driven by this group. Same as the per-electrode 'drive groups' box; an electrode may be in several drive groups and a DC group.
 - **new group name** (TextInput)
@@ -105,15 +109,19 @@
 - **waveform** (Select) — square = classic stepped SLIM TW; sin = sinusoidal TW.
 - **TW freq (kHz)** (FloatInput)
 - **amp (V)** (FloatInput)
-- **offset (V)** (FloatInput) — DC offset of the drive. Unipolar 0..V SLIM drive = amp V/2, offset V/2 (e.g. amp 25, offset 25 -> 0..50 V).
+- **offset (V)** (FloatInput) — DC offset of the drive. 0 = bipolar, +/-amp about ground. For a unipolar 0..V SLIM drive set amp V/2 and offset V/2 (e.g. amp 25, offset 25 -> 0..50 V).
 - **prefix** (TextInput)
 - **⟳ build travelling wave** (Button)
 - **⇄ retune all TW phases** (Button) — Apply the amp / freq / waveform / offset above to EVERY phase group of the existing ladder at once, keeping each group's phase. Use after 'build travelling wave' to change the drive with one edit instead of N.
+- **⇋ reverse TW direction** (Button) — Negate every phase of the ladder with this prefix, flipping the wave's travel direction. A drive-side change: cache hit, no re-solve. Press again to restore the original direction.
 **DC groups** — feed a chain at both ends; members are interpolated by their *number*:**
 
 - **funnel_ladder — DC in (V)** (FloatInput) — Applied to the member with the LOWEST number.
 - **funnel_ladder — DC out (V)** (FloatInput) — Applied to the member with the HIGHEST number. A RE-WEIGHT, not a re-solve: cache hit.
+- **funnel_ladder — mode** (Select) — set: member DC is DERIVED from the group (ladder/divider). add: the group's value is ADDED on top of each member's own DC (a float rail) — member DC stays editable. Either way a change is a re-weight, never a re-solve.
 - **funnel_ladder — members** (MultiChoice) — Electrodes in this DC group. Editing here is the same as the per-electrode 'DC group' dropdown — an electrode may also be in a drive group at the same time.
+**funnel_ladder**: ring_01 = 100 V → ring_18 = 75 V (18 taps, step -1.471 V) · _Solve field to apply gradient_**
+
 - **new group name** (TextInput)
 - **kind** (Select) — ladder = two-end interpolated divider (set DC in / DC out and a number per member). uniform = one voltage on every member (no numbering needed).
 - **+ add DC group** (Button)
@@ -122,115 +130,115 @@
 - **auto-number by z** (Button) — Number the members of each group in ascending centroid-z, straight from the SOLVE masks. Needs a solved field; refuses rather than guessing.
 **e1 — ring_01**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e2 — ring_02**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e3 — ring_03**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e4 — ring_04**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e5 — ring_05**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e6 — ring_06**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e7 — ring_07**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e8 — ring_08**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e9 — ring_09**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e10 — ring_10**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e11 — ring_11**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e12 — ring_12**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e13 — ring_13**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e14 — ring_14**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e15 — ring_15**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e16 — ring_16**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e17 — ring_17**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
 **e18 — ring_18**
 
-- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V) — from ladder** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
-**e19 — exit_plate_45V**
+**e19 — exit_plate**
 
-- **DC (V)** (FloatInput) — Static (DC) potential on this electrode. When the electrode belongs to a DC group this is DERIVED from the group's in/out and its number.
+- **DC (V)** (FloatInput) — Static (DC) potential on this electrode. In a SET-mode DC group this is DERIVED from the group's in/out and its number; in an ADD-mode (float) group it stays YOURS and the group's value is added on top at composition.
 - **drive groups** (MultiChoice) — Assign this electrode to zero or MORE drive groups (multi-select). An electrode can carry a confinement RF and a travelling-wave AC at once, plus its DC.
 - **DC group** (Select) — Ladder membership. DC and RF groups are independent — an electrode can be in both.
 - **number** (IntInput) — Position in the ladder. EXPLICIT: order is never parsed from the name (E10 would sort before E9). DC in lands on the lowest, DC out on the highest.
@@ -266,8 +274,11 @@
 
 ## Display
 
+**field overlay**
+
 - **view plane** (Select) — Which 2-D plane to project the trajectories and field onto for display.
-- **equipotential lines (0=off)** (IntSlider)
+- **field contour lines (0 = off)** (IntSlider)
+- **contours off/on** (Button)
 - **shade field / potential** (Checkbox)
 - **shading type** (Select) — What the shading shows: instantaneous field magnitude |E|, the effective RF pseudopotential (PE) as a 2-D map, or the PE as a 3-D landscape.
 - **xz/yz shading slice (mm; auto at min)** (FloatSlider)
@@ -275,6 +286,7 @@
 - **verbose build log** (Checkbox)
 - **trajectory style** (Select) — Draw each ion path as connected lines, individual recorded points, or both.
 - **line width** (FloatSlider)
+- **paths drawn (0 = auto 25%)** (IntInput) — How many ion paths to draw, evenly strided across the packet. 0 keeps the automatic policy: all up to 25, then 25% of the packet. Statistics and impact markers always use every ion.
 - **opacity** (FloatSlider)
 - **colour traces by** (Select) — Colour each trajectory by its outcome (fate), by m/z (one colour per mass, with a legend), a single colour, or a recorded channel.
 - **trace color** (ColorPicker)
@@ -312,30 +324,18 @@
 
 **idle**
 
+**workers**
+
+**diagnostics**
+
+- **ping → stdout** (Button) — Print one line to the SERVER console. If the UI feels wedged, a ping that appears means the kernel is alive and the browser tab is the problem; no line means the server is busy or stuck. Touches no state and cannot disturb a run.
+- **mem autolog** (Toggle)
 **history *(this session, newest first, last 100)**
 
 
 ## Multi FA
 
 **Multi-FA instrument**
-
-> **Every stage flies on its OWN clock.** A staged flight takes `dt_ns`,
-> `t_max_us`, `rec_every` and `max_records` from **each stage's own
-> spec** (or a per-stage override key in the instrument JSON, e.g.
-> `"t_max_us": 3000` on the stage entry). This is deliberate — a slow,
-> gas-filled funnel must not force its long clock and fine steps on a
-> fast analyzer — but it means the *total time* you edit in the UI
-> belongs to **one** spec and does **not** govern the other stages. If
-> ions "stop" partway through a downstream stage no matter how much
-> time you add, check that stage's own `t_max_us` first: a timeout
-> fate names the stage whose clock expired and its value.
->
-> **The Ion Source tab binds to the PINNED source FA** (*Set Fly
-> Parameters*), independent of which FA is displayed (*Set FA View*).
-> The header names the pinned stage. A `from_stage` beam is generated
-> from that stage's own declared source at load — edits to its source
-> parameters change the flown packet; edits to other stages' sources do
-> not.
 
 **FA View** — default: Full Assembly**
 
@@ -353,6 +353,8 @@
 
 - **name** (TextInput)
 - **notes** (TextAreaInput)
+- **worker threads** (IntInput) — Ion-flight threads for the next Fly. Default leaves two cores for the app; 1 = the sequential legacy path. Results are seed-identical at any count.
+- **max record RAM (GB)** (IntInput) — Memory the trajectory record may use. The Fly refuses above this and warns at half of it, using the quote shown in the sizing readout. 0 = derive from system RAM (48 GB detected). Storage only: rec_every changes what is kept, never what is computed.
 - **load example** (Select)
 - **Load example** (Button)
 - **solve resolution (mm/gu)** (FloatInput) — Grid pitch for the field solve. Smaller = finer = costlier (nodes scale as pitch^-3 in 3-D).
@@ -367,6 +369,8 @@
 
 - **save as (filename)** (TextInput) — Filename for the downloaded configuration. Include the .json extension (added if omitted).
 - **Download spec** (FileDownload)
+- **instrument export filename** (TextInput) — Filename for Download instrument; .json is appended if missing. Loading an instrument resets this to the document's own name.
+- **Download instrument** (FileDownload)
 **stored runs (reloadable)**
 
 - **stored runs** (Select)
@@ -427,12 +431,20 @@
 - **slice (mm, exact)** (FloatInput)
 - **electrodes on the PE scale** (Select)
 - **trust radius (cells from metal)** (IntSlider)
+- **evaluate instant drives at a lab time** (Checkbox)
+- **lab time t (µs)** (FloatInput)
+- **set view angle / perspective** (Checkbox)
+- **azimuth (°)** (FloatInput)
+- **elevation (°)** (FloatInput)
+- **distance** (FloatInput)
+- **orthographic** (Checkbox)
 - **drape current trajectories** (Checkbox)
 - **height (z aspect)** (FloatSlider)
 - **PE transform (optional)** (Select)
 - **PE transform factor / asinh knee (eV)** (FloatInput)
 - **resolution (pts/axis, ↓ = faster)** (IntSlider)
 - **Compute surface** (Button)
+- **Reset PE view** (Button)
 
 ## Field Slice (plot pane)
 
@@ -474,8 +486,7 @@
 
 ## Cache (plot pane)
 
-**Cache location:** `/tmp/manual_harvest`  
-**1 entries, 0.0 MB total on disk**
+**Cache location: ~/.ion_gym_cache by default (the ION_GYM_CACHE environment variable moves it); entries listed with their size on disk**
 
 - **↻ refresh** (Button)
 - **🗑 clear ALL field cache** (Button)
@@ -483,6 +494,3 @@
 - **✕ remove selected** (Button)
 - **export to** (TextInput)
 - **⇩ export selected (field + spec json)** (Button)
-**In-memory caches** (freed on 'clear ALL' or when the app restarts):
-- compose gradients: 0 geometry, 0.0 MB**
-

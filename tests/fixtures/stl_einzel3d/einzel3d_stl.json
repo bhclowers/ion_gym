@@ -1,0 +1,185 @@
+{
+ "schema_version": 1,
+ "name": "einzel lens \u2014 STL plates (full 3-D)",
+ "notes": "Three apertured STL plates; centre plate focuses the beam. The on-axis field varies along z, so this needs the full 3-D solve (mid-z slice is not representative).",
+ "geometry": {
+  "width_mm": 16.0,
+  "height_mm": 16.0,
+  "depth_mm": 14.600000000000001,
+  "metal_depth_mm": 0.0,
+  "axial_extent_mm": null,
+  "mm_per_gu": 0.2,
+  "symmetry": {
+   "coords": "xyz",
+   "planes": {
+    "x": "none",
+    "y": "none",
+    "z": "none"
+   }
+  },
+  "stl_manifest": {
+   "einzel3d_plate_1.stl": "3e57c35c63f2170520a9a6d0d35517e6aa157b5cb747ee6977d2b3a1bc0fe70f",
+   "einzel3d_plate_2.stl": "07657ecde67ec631b7643a72ab62e005c84f22028aa489ea974eef4c82963a5f",
+   "einzel3d_plate_3.stl": "914ffb54e1ec25c1b819c0b1e83318adc149a82365d11dacf78241cf35ff9a5d"
+  },
+  "electrodes": [
+   {
+    "name": "plate_1",
+    "shapes": [],
+    "stl": "einzel3d_plate_1.stl",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null,
+    "metal_depth_mm": null
+   },
+   {
+    "name": "plate_2",
+    "shapes": [],
+    "stl": "einzel3d_plate_2.stl",
+    "is_grid": false,
+    "dc": -800.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null,
+    "metal_depth_mm": null
+   },
+   {
+    "name": "plate_3",
+    "shapes": [],
+    "stl": "einzel3d_plate_3.stl",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null,
+    "metal_depth_mm": null
+   }
+  ],
+  "rf_groups": [],
+  "dc_groups": []
+ },
+ "source": {
+  "n_ions": 12,
+  "distribution": "disc",
+  "x0_mm": 8.0,
+  "y0_mm": 8.0,
+  "z0_mm": 0.5,
+  "r_mm": 1.0,
+  "len_mm": 0.0,
+  "box_mm": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "axis": "z",
+  "direction": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "ke_lo": 30.0,
+  "ke_hi": 30.0,
+  "temperature_k": 0.0,
+  "dv_fwhm_ms": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "fwhm_mm": null,
+  "trunc_mm": null,
+  "v_drift_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "mz_list": [
+   100.0
+  ],
+  "charge": 1,
+  "tob_span_us": 0.0,
+  "births_file": null,
+  "seed": null
+ },
+ "collisions": {
+  "enabled": false,
+  "gas": "N2",
+  "T_k": 273.0,
+  "P_torr": 1.0,
+  "sigma_m2": 2.27e-18,
+  "model": "hs",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "dt_ns": 1.0,
+  "t_max_us": 20.0,
+  "rec_every": 2,
+  "max_records": 100000,
+  "record_channels": [
+   "radius",
+   "ke_ev"
+  ]
+ },
+ "bounds": {
+  "x_min_on": false,
+  "x_max_on": false,
+  "y_min_on": false,
+  "y_max_on": false,
+  "z_min_on": false,
+  "z_max_on": false,
+  "x_min": 0.0,
+  "x_max": 100.0,
+  "y_min": -50.0,
+  "y_max": 50.0,
+  "z_min": -50.0,
+  "z_max": 50.0
+ },
+ "stations": [],
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xz"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null,
+ "optic_axis": {
+  "axis": "z",
+  "through_mm": [
+   8.0,
+   8.0
+  ]
+ }
+}

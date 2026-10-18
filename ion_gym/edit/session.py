@@ -545,10 +545,31 @@ class EditSession:
                                f"(standing ruling)")
         h = float(self.spec.geometry.mm_per_gu)
         tol = h * PITCH_TOL_FRACTION
+        # every shape type has a rule (L-553: polygon vertices were never
+        # checked against the pitch, and an unknown type got no warnings
+        # at all, which reads as "checked, nothing wrong")
         num_keys = {"rect": ("x_mm", "y_mm", "width_mm", "height_mm"),
                     "ellipse": ("cx_mm", "cy_mm", "rx_mm", "ry_mm"),
-                    "polygon": (), "cutout": ()}.get(t, ())
-        for k in num_keys:
+                    "polygon": (),      # vertices: checked below
+                    "cutout": (),       # a container: its children are
+                    "group": ()}        #   walked at the end
+        if t not in num_keys:
+            out.append(f"shape type {t!r} has no warning rule here — its "
+                       f"coordinates were NOT checked against the {h:g} mm "
+                       f"pitch or the plate floor")
+        if t == "polygon":
+            off = [(i, j, float(c))
+                   for i, pt in enumerate(shape.get("points_mm") or [])
+                   for j, c in enumerate(pt)
+                   if abs(float(c) - self.snap_to_pitch(float(c))) > tol]
+            if off:
+                shown = ", ".join(f"vertex {i}[{'uv'[j]}] = {c:g}"
+                                  for i, j, c in off[:4])
+                more = f" (+{len(off) - 4} more)" if len(off) > 4 else ""
+                out.append(f"{len(off)} polygon coordinate(s) off the "
+                           f"{h:g} mm pitch lattice: {shown}{more}; edges "
+                           f"classify by the closed-edge tolerance raster")
+        for k in num_keys.get(t, ()):
             v = float(shape.get(k, 0.0))
             snapped = self.snap_to_pitch(v)
             if abs(v - snapped) > tol:

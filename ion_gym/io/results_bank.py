@@ -71,9 +71,16 @@ def bank_run(path, *, meta, arrays, overwrite=False):
     for name, arr in arrays.items():
         payload[name] = np.asarray(arr)
     tmp = p + ".tmp"
-    with open(tmp, "wb") as fh:
-        np.savez_compressed(fh, **payload)
-    os.replace(tmp, p)
+    # write-then-rename so a reader never sees a partial bank; a failed
+    # write REMOVES its temp file and re-raises (L-558: it was left behind)
+    try:
+        with open(tmp, "wb") as fh:
+            np.savez_compressed(fh, **payload)
+        os.replace(tmp, p)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
     return p
 
 

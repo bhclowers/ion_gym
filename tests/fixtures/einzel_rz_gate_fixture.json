@@ -21,6 +21,11 @@
   "electrodes": [
    {
     "name": "entrance",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -46,6 +51,11 @@
    },
    {
     "name": "lens",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -71,6 +81,11 @@
    },
    {
     "name": "exit",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -133,7 +148,6 @@
   "gas": "N2",
   "T_k": 273.0,
   "P_torr": 1.0,
-  "P_pa": 133.32236842105263,
   "sigma_m2": 2.27e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,

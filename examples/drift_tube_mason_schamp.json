@@ -792,7 +792,6 @@
   "gas": "He",
   "T_k": 298.0,
   "P_torr": 1.0,
-  "P_pa": 133.322,
   "sigma_m2": 1.25e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,
@@ -803,6 +802,7 @@
   ]
  },
  "integration": {
+  "max_records": 100000,
   "dt_ns": 1.0,
   "t_max_us": 1600.0,
   "rec_every": 1000,

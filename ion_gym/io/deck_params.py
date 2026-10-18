@@ -16,6 +16,18 @@ Two calls:
 Both return the report lines, so a caller can log instead of print.
 Every override is applied to the SPEC OBJECT, after construction, so it
 cannot be defeated by deck defaults; None always means "inherit".
+
+DRIVE-GROUP CONVENTION (documented, PI ruling R7 2026-10-15: "the prefix
+should stay as a documented convention"): a drive group whose NAME
+begins with `tw_prefix` (default "TW") is a TRAVELLING-WAVE phase; every
+other group is a confining / RF drive. Real decks name phases TW1..TW8,
+TW1_a/TW1_b (split-float) and TWA1/TWB1 (slimgrid), so the rule is the
+prefix alone. A frequency comparison is not used: it is a guess that
+breaks the day the transport drive runs faster than the confinement one.
+An override applies to every group of its class only when that class is
+ONE uniform drive (same amplitude, frequency and waveform -- an RF pair
+differing only in phase); otherwise name the groups (rf_targets /
+tw_targets). Every group changed is reported, before and after.
 """
 from __future__ import annotations
 
@@ -27,28 +39,61 @@ class DeckParamError(ValueError):
     """An override that names something the deck does not have."""
 
 
-def _rf_groups(spec, tw_prefix="TW"):
-    """Drive groups that are NOT the transport wave. Identified by NAME:
-    a frequency comparison is a guess that breaks the day the transport
-    drive runs faster than the confinement drive."""
-    return [g for g in getattr(spec.geometry, "rf_groups", [])
-            if not str(g.name).startswith(tw_prefix)]
+def _split_drives(spec, tw_prefix="TW"):
+    """(rf, tw): the deck's drive groups split by THE naming convention
+    (module docstring). One classifier for describe_deck and
+    apply_deck_overrides."""
+    groups = list(getattr(spec.geometry, "rf_groups", []) or [])
+    tw = [g for g in groups if str(g.name).startswith(tw_prefix)]
+    rf = [g for g in groups if not str(g.name).startswith(tw_prefix)]
+    return rf, tw
+
+
+def _drive_sig(g):
+    return (float(g.amplitude_v), float(g.frequency_hz), str(g.waveform))
+
+
+def _override_targets(groups, names, tag, all_names):
+    """The groups an override applies to (L-544). Named: exactly those
+    (each must exist and be of this class). Unnamed: every group of the
+    class, but only when they are one uniform drive; a class holding
+    different drives is refused by name instead of retuning all of them."""
+    if names is not None:
+        by = {g.name: g for g in groups}
+        bad = [n for n in names if n not in by]
+        if bad:
+            raise DeckParamError(
+                f"{tag.lower()}_targets {bad} are not {tag} groups of this "
+                f"deck ({tag} groups: {sorted(by)}; all drives: {all_names})")
+        return [by[n] for n in names]
+    if len({_drive_sig(g) for g in groups}) > 1:
+        raise DeckParamError(
+            f"{tag} override requested, but this deck's {tag} groups are "
+            f"different drives: "
+            + ", ".join(f"{g.name} {g.amplitude_v:g} V @ "
+                        f"{g.frequency_hz:g} Hz ({g.waveform})"
+                        for g in groups)
+            + f" -- name the groups to change with {tag.lower()}_targets=")
+    return groups
 
 
 def describe_deck(spec, *, tw_prefix="TW", show=True):
     """Report the physics this spec inherited from its deck: drives, the
     ion, the gas, and the integration settings."""
     L = []
-    rf = _rf_groups(spec, tw_prefix)
-    tw = [g for g in getattr(spec.geometry, "rf_groups", [])
-          if str(g.name).startswith(tw_prefix)]
+    rf, tw = _split_drives(spec, tw_prefix)
     if rf:
         L.append("RF drive:   " + ", ".join(
             f"{g.name} {g.amplitude_v:g} V @ {g.frequency_hz:g} Hz"
             f" ({g.waveform})" for g in rf))
     if tw:
-        L.append(f"TW drive:   {len(tw)} phases, {tw[0].amplitude_v:g} V "
-                 f"@ {tw[0].frequency_hz:g} Hz ({tw[0].waveform})")
+        # every distinct TW drive, not just the first phase's (L-544)
+        sigs = {}
+        for g in tw:
+            sigs.setdefault(_drive_sig(g), []).append(g.name)
+        L.append(f"TW drive:   {len(tw)} phases: " + "; ".join(
+            f"{a:g} V @ {f:g} Hz ({w}) x{len(n)}"
+            for (a, f, w), n in sigs.items()))
     if not rf and not tw:
         L.append("drives:     none (static device)")
     dcs = [(e.name, e.dc) for e in getattr(spec.geometry, "electrodes", [])
@@ -83,12 +128,19 @@ def apply_deck_overrides(spec, *, rf_v=None, rf_f=None, tw_v=None, tw_f=None,
                          source_t_k=None, n_ions=None,
                          gas_on=None, gas=None, p_torr=None, gas_t_k=None,
                          dt_ns=None, t_max_us=None, rec_every=None,
-                         dc=None, tw_prefix="TW", show=True):
+                         dc=None, tw_prefix="TW", rf_targets=None,
+                         tw_targets=None, show=True):
     """Apply named overrides to a spec built from a deck. None = inherit.
 
     `dc` is a {electrode_name: volts} mapping; an unknown name RAISES
     (DeckParamError) rather than being ignored -- a silently dropped
     override is the failure mode this module exists to prevent.
+
+    rf_v/rf_f and tw_v/tw_f apply to the RF / TW groups (the naming
+    convention in the module docstring): all of them when they are one
+    uniform drive, else only the names in rf_targets / tw_targets (a
+    class of DIFFERENT drives without targets is refused). Each group
+    changed is reported with its before and after values.
 
     Returns the report lines: every parameter appears as inherited or
     OVERRIDE, so the notebook's output states its own operating point.
@@ -101,26 +153,36 @@ def apply_deck_overrides(spec, *, rf_v=None, rf_f=None, tw_v=None, tw_f=None,
         else:
             L.append(f"{label}: OVERRIDE -> {value!r}")
 
-    rf = _rf_groups(spec, tw_prefix)
-    tw = [g for g in getattr(spec.geometry, "rf_groups", [])
-          if str(g.name).startswith(tw_prefix)]
-    for grp, (v, f, tag) in ((rf, (rf_v, rf_f, "RF")),
-                             (tw, (tw_v, tw_f, "TW"))):
+    rf, tw = _split_drives(spec, tw_prefix)
+    all_names = [g.name for g in spec.geometry.rf_groups]
+    for grp, (v, f, names, tag) in ((rf, (rf_v, rf_f, rf_targets, "RF")),
+                                    (tw, (tw_v, tw_f, tw_targets, "TW"))):
+        asked = v is not None or f is not None
         if not grp:
-            if v is not None or f is not None:
+            if asked or names is not None:
                 raise DeckParamError(
                     f"{tag} override requested but this deck has no {tag} "
-                    f"group (drives: "
-                    f"{[g.name for g in spec.geometry.rf_groups]})")
+                    f"group (drives: {all_names})")
             continue
-        for g in grp:
+        if not asked:
+            if names is not None:
+                raise DeckParamError(
+                    f"{tag.lower()}_targets given without an {tag} override "
+                    f"value ({tag.lower()}_v / {tag.lower()}_f)")
+            L.append(f"{tag} drive: inherited " + ", ".join(
+                f"{g.name} {g.amplitude_v:g} V @ {g.frequency_hz:g} Hz"
+                for g in grp))
+            continue
+        # EVERY group changed is reported, before -> after (L-544: the
+        # readout used to show grp[0] while the loop retuned them all)
+        for g in _override_targets(grp, names, tag, all_names):
+            before = f"{g.amplitude_v:g} V @ {g.frequency_hz:g} Hz"
             if v is not None:
                 g.amplitude_v = float(v)
             if f is not None:
                 g.frequency_hz = float(f)
-        L.append(f"{tag} drive: {grp[0].amplitude_v:g} V @ "
-                 f"{grp[0].frequency_hz:g} Hz"
-                 + ("" if (v is None and f is None) else "   (OVERRIDDEN)"))
+            L.append(f"{tag} drive {g.name}: OVERRIDE {before} -> "
+                     f"{g.amplitude_v:g} V @ {g.frequency_hz:g} Hz")
 
     if dc is not None:
         byname = {e.name: e for e in spec.geometry.electrodes}

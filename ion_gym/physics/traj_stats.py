@@ -45,10 +45,10 @@ from typing import Callable, Optional, Sequence
 
 import numpy as np
 
-# Universal constants (CODATA), named — not magic numbers.
-KB_J = 1.380649e-23            # J/K
-KB_EV = 8.617333262e-5         # eV/K
-KG_AMU = 1.66053906660e-27     # kg per Da
+# Universal constants from the one authority (CODATA 2018).
+from ion_gym.physics.constants import (K_B as KB_J,      # J/K   # noqa: E402
+                                       K_B_EV as KB_EV,  # eV/K
+                                       KG_AMU)           # kg per Da
 MMUS_TO_MS = 1.0e3             # mm/us -> m/s
 
 
@@ -407,8 +407,20 @@ def make_confinement_objective(*, retention_min: float = 0.95,
     return objective
 
 
+# THE KE display/fit clip: energies above this percentile of the positive
+# KE are left out of the T_slope histogram (and drawn beyond the axis by
+# viz_core.temperature_estimator_figure, which reads this same constant).
+# A declared 0.5% clip -- see slope_temperature for why (L-552: was a
+# literal here and retyped, with its "0.5%" label, in the figure).
+KE_TAIL_CLIP_PCTL = 99.5
+# fewer clipped positive-KE samples than this: no T_slope (NaN)
+SLOPE_MIN_SAMPLES = 10
+
+
 def slope_temperature(ke_ev, *, fit_from_pctl: float = 20.0,
-                      n_bins: int = 80) -> float:
+                      n_bins: int = 80,
+                      clip_pctl: float = KE_TAIL_CLIP_PCTL,
+                      min_samples: int = SLOPE_MIN_SAMPLES) -> float:
     """T_slope: temperature from the SLOPE of the log-count energy tail
     of a 1-D Maxwell-Boltzmann KE distribution. Extracted verbatim from
     the trapping notebook so the notebook and GUI share ONE
@@ -417,7 +429,9 @@ def slope_temperature(ke_ev, *, fit_from_pctl: float = 20.0,
     because for a non-thermal distribution (T_var != T_slope) the fitted
     value depends on where the tail starts, so the operating point must
     be stated. Returns NaN when the tail has < 2 populated bins or the
-    fitted slope is non-negative (no thermal tail to read)."""
+    fitted slope is non-negative (no thermal tail to read).
+    clip_pctl / min_samples: the declared histogram clip and the sample
+    floor (named module defaults KE_TAIL_CLIP_PCTL, SLOPE_MIN_SAMPLES)."""
     ke = np.asarray(ke_ev, float)
     ke_pos = ke[ke > 0]
     if ke_pos.size == 0:
@@ -430,9 +444,12 @@ def slope_temperature(ke_ev, *, fit_from_pctl: float = 20.0,
     # histogram now spans [0, p99.5] of the positive energies — a
     # DECLARED 0.5% clip (stated here and annotated on the figure), not
     # a silent one; T_var/T_mean remain moment-based over ALL samples.
-    hi = float(np.percentile(ke_pos, 99.5))
+    if not (0.0 < float(clip_pctl) <= 100.0):
+        raise ValueError(f"slope_temperature: clip_pctl {clip_pctl!r} is "
+                         f"not in (0, 100]")
+    hi = float(np.percentile(ke_pos, float(clip_pctl)))
     ke_fit = ke_pos[ke_pos <= hi]
-    if ke_fit.size < 10:
+    if ke_fit.size < int(min_samples):
         return float("nan")
     counts, edges = np.histogram(ke_fit, bins=n_bins)
     centers = 0.5 * (edges[:-1] + edges[1:])

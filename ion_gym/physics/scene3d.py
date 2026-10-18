@@ -156,10 +156,14 @@ class GeomScene:
                     if isinstance(p, Box3D):
                         plo = np.array([p.x1, p.y1, p.z1], float)
                         phi = np.array([p.x2, p.y2, p.z2], float)
-                    else:                                   # Cylinder (z-axis)
+                    elif isinstance(p, Cylinder):           # z-axis
                         plo = np.array([p.cx - p.r, p.cy - p.r,
                                         p.z - p.length], float)
                         phi = np.array([p.cx + p.r, p.cy + p.r, p.z], float)
+                    else:
+                        # the else used to BE the cylinder, so any new
+                        # primitive would have been measured as one (L-554)
+                        raise _unknown_primitive(p, "extent_mm")
                     lo = np.minimum(lo, plo)
                     hi = np.maximum(hi, phi)
         if not np.all(np.isfinite(lo)):
@@ -333,18 +337,32 @@ class GeomScene:
                      notes=d.get("notes", "")).check()
 
 
+def _unknown_primitive(p, what):
+    """The refusing catch-all for the primitive kinds (L-554): each of the
+    functions below used to let its fall-through BE the last known kind,
+    so a new primitive would have been scaled or moved as a box or a
+    cylinder without a word."""
+    return TypeError(f"{what}: primitive {type(p).__name__} is not a Box3D "
+                     f"or Cylinder; no rule for it")
+
+
 def _scale_prim(p: Primitive, s: float) -> Primitive:
     if isinstance(p, Cylinder):
         return Cylinder(p.cx * s, p.cy * s, p.z * s, p.r * s, p.length * s)
-    return Box3D(p.x1 * s, p.y1 * s, p.z1 * s, p.x2 * s, p.y2 * s, p.z2 * s)
+    if isinstance(p, Box3D):
+        return Box3D(p.x1 * s, p.y1 * s, p.z1 * s,
+                     p.x2 * s, p.y2 * s, p.z2 * s)
+    raise _unknown_primitive(p, "_scale_prim")
 
 
 def _translate_prim(p: Primitive, d) -> Primitive:
     if isinstance(p, Box3D):
         return Box3D(p.x1 + d[0], p.y1 + d[1], p.z1 + d[2],
                      p.x2 + d[0], p.y2 + d[1], p.z2 + d[2])
-    return Cylinder(cx=p.cx + d[0], cy=p.cy + d[1], z=p.z + d[2],
-                    r=p.r, length=p.length)
+    if isinstance(p, Cylinder):
+        return Cylinder(cx=p.cx + d[0], cy=p.cy + d[1], z=p.z + d[2],
+                        r=p.r, length=p.length)
+    raise _unknown_primitive(p, "_translate_prim")
 
 
 def _translated(sc: GeomScene, d) -> GeomScene:

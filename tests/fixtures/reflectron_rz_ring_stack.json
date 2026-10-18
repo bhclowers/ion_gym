@@ -22,6 +22,11 @@
   "electrodes": [
    {
     "name": "entrance",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -48,6 +53,11 @@
    },
    {
     "name": "ring01",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -74,6 +84,11 @@
    },
    {
     "name": "ring02",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -100,6 +115,11 @@
    },
    {
     "name": "ring03",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -126,6 +146,11 @@
    },
    {
     "name": "ring04",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -152,6 +177,11 @@
    },
    {
     "name": "ring05",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -178,6 +208,11 @@
    },
    {
     "name": "ring06",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -204,6 +239,11 @@
    },
    {
     "name": "ring07",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -230,6 +270,11 @@
    },
    {
     "name": "ring08",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -256,6 +301,11 @@
    },
    {
     "name": "ring09",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -282,6 +332,11 @@
    },
    {
     "name": "ring10",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -308,6 +363,11 @@
    },
    {
     "name": "ring11",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -334,6 +394,11 @@
    },
    {
     "name": "ring12",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -360,6 +425,11 @@
    },
    {
     "name": "ring13",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -386,6 +456,11 @@
    },
    {
     "name": "ring14",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -412,6 +487,11 @@
    },
    {
     "name": "ring15",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -438,6 +518,11 @@
    },
    {
     "name": "ring16",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -464,6 +549,11 @@
    },
    {
     "name": "ring17",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -490,6 +580,11 @@
    },
    {
     "name": "ring18",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -516,6 +611,11 @@
    },
    {
     "name": "ring19",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -542,6 +642,11 @@
    },
    {
     "name": "ring20",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -568,6 +673,11 @@
    },
    {
     "name": "ring21",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -594,6 +704,11 @@
    },
    {
     "name": "ring22",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -620,6 +735,11 @@
    },
    {
     "name": "ring23",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -646,6 +766,11 @@
    },
    {
     "name": "ring24",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -672,6 +797,11 @@
    },
    {
     "name": "ring25",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -698,6 +828,11 @@
    },
    {
     "name": "ring26",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -724,6 +859,11 @@
    },
    {
     "name": "ring27",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -750,6 +890,11 @@
    },
    {
     "name": "ring28",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -776,6 +921,11 @@
    },
    {
     "name": "ring29",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -802,6 +952,11 @@
    },
    {
     "name": "ring30",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -828,6 +983,11 @@
    },
    {
     "name": "ring31",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -854,6 +1014,11 @@
    },
    {
     "name": "ring32",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -880,6 +1045,11 @@
    },
    {
     "name": "ring33",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -906,6 +1076,11 @@
    },
    {
     "name": "ring34",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -932,6 +1107,11 @@
    },
    {
     "name": "ring35",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -958,6 +1138,11 @@
    },
    {
     "name": "ring36",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -984,6 +1169,11 @@
    },
    {
     "name": "ring37",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1010,6 +1200,11 @@
    },
    {
     "name": "ring38",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1036,6 +1231,11 @@
    },
    {
     "name": "ring39",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1062,6 +1262,11 @@
    },
    {
     "name": "ring40",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1088,6 +1293,11 @@
    },
    {
     "name": "ring41",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1114,6 +1324,11 @@
    },
    {
     "name": "ring42",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1140,6 +1355,11 @@
    },
    {
     "name": "ring43",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1166,6 +1386,11 @@
    },
    {
     "name": "ring44",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1192,6 +1417,11 @@
    },
    {
     "name": "ring45",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1218,6 +1448,11 @@
    },
    {
     "name": "ring46",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1244,6 +1479,11 @@
    },
    {
     "name": "ring47",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1270,6 +1510,11 @@
    },
    {
     "name": "ring48",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1296,6 +1541,11 @@
    },
    {
     "name": "ring49",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1322,6 +1572,11 @@
    },
    {
     "name": "ring50",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1348,6 +1603,11 @@
    },
    {
     "name": "ring51",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1374,6 +1634,11 @@
    },
    {
     "name": "ring52",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1400,6 +1665,11 @@
    },
    {
     "name": "ring53",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1426,6 +1696,11 @@
    },
    {
     "name": "ring54",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1452,6 +1727,11 @@
    },
    {
     "name": "ring55",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1478,6 +1758,11 @@
    },
    {
     "name": "ring56",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1504,6 +1789,11 @@
    },
    {
     "name": "ring57",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1530,6 +1820,11 @@
    },
    {
     "name": "ring58",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1556,6 +1851,11 @@
    },
    {
     "name": "ring59",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1582,6 +1882,11 @@
    },
    {
     "name": "ring60",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1608,6 +1913,11 @@
    },
    {
     "name": "ring61",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1634,6 +1944,11 @@
    },
    {
     "name": "ring62",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1660,6 +1975,11 @@
    },
    {
     "name": "ring63",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1686,6 +2006,11 @@
    },
    {
     "name": "ring64",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1712,6 +2037,11 @@
    },
    {
     "name": "ring65",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1738,6 +2068,11 @@
    },
    {
     "name": "ring66",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1764,6 +2099,11 @@
    },
    {
     "name": "ring67",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1790,6 +2130,11 @@
    },
    {
     "name": "ring68",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1816,6 +2161,11 @@
    },
    {
     "name": "ring69",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1842,6 +2192,11 @@
    },
    {
     "name": "ring70",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1868,6 +2223,11 @@
    },
    {
     "name": "ring71",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1894,6 +2254,11 @@
    },
    {
     "name": "ring72",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1920,6 +2285,11 @@
    },
    {
     "name": "ring73",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1946,6 +2316,11 @@
    },
    {
     "name": "ring74",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1972,6 +2347,11 @@
    },
    {
     "name": "ring75",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -1998,6 +2378,11 @@
    },
    {
     "name": "ring76",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2024,6 +2409,11 @@
    },
    {
     "name": "ring77",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2050,6 +2440,11 @@
    },
    {
     "name": "ring78",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2076,6 +2471,11 @@
    },
    {
     "name": "ring79",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2102,6 +2502,11 @@
    },
    {
     "name": "ring80",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2128,6 +2533,11 @@
    },
    {
     "name": "ring81",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2154,6 +2564,11 @@
    },
    {
     "name": "ring82",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2180,6 +2595,11 @@
    },
    {
     "name": "ring83",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2206,6 +2626,11 @@
    },
    {
     "name": "ring84",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2232,6 +2657,11 @@
    },
    {
     "name": "ring85",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2258,6 +2688,11 @@
    },
    {
     "name": "ring86",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2284,6 +2719,11 @@
    },
    {
     "name": "ring87",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2310,6 +2750,11 @@
    },
    {
     "name": "ring88",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2336,6 +2781,11 @@
    },
    {
     "name": "ring89",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2362,6 +2812,11 @@
    },
    {
     "name": "ring90",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2388,6 +2843,11 @@
    },
    {
     "name": "ring91",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2414,6 +2874,11 @@
    },
    {
     "name": "ring92",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2440,6 +2905,11 @@
    },
    {
     "name": "ring93",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2466,6 +2936,11 @@
    },
    {
     "name": "ring94",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2492,6 +2967,11 @@
    },
    {
     "name": "ring95",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2518,6 +2998,11 @@
    },
    {
     "name": "ring96",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2544,6 +3029,11 @@
    },
    {
     "name": "ring97",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2570,6 +3060,11 @@
    },
    {
     "name": "back",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "shapes": [
      {
       "type": "rect",
@@ -2645,7 +3140,6 @@
   "gas": "N2",
   "T_k": 273.0,
   "P_torr": 1.0,
-  "P_pa": 133.32236842105263,
   "sigma_m2": 2.27e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,

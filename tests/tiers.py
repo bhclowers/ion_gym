@@ -57,6 +57,8 @@ GATE_TIER = {
     "test_lint":                 1,   # 0 s  lint policy
     "test_field_io":             1,   # 0 s  field save/load portability
     "test_cadquery_emit":        1,   # 0 s  CadQuery script emitter
+    "test_jcad_mirror":          1,   # 2 s  jcad/STEP mirror placement
+                                      #      (L-528; skips w/o CadQuery)
     # 1 s. Certifies a ROUTE CONTRACT (every route fills the declared
     # channels), which is structure, not a number. NOTE its docstring says
     # "tier 2 of the parity plan" -- that is the PARITY PLAN's numbering,
@@ -139,7 +141,6 @@ GATE_TIER = {
     # Left classified tier-3 (release-only) so the runner still names them;
     # they are simply not a checkpoint blocker this cycle.
     "validate_buncher":          3,     # REPAIRED (tracer_tdep; buncher fixture supplied)
-    "validate_collisions_c2":    3,     # REPAIRED (tracer_gas; quad_upload aliased)
     "validate_mesh_legs":        3,     # REPAIRED (quad_scene_build landed)
     "validate_native_fly":       3,     # REPAIRED
     "validate_solver3d_quad":    3,     # REPAIRED
@@ -154,9 +155,12 @@ GATE_TIER = {
     # tier-3 count and read as live coverage). Coverage for each is accounted
     # for in tests/retired/RETIRED.md, and the live successors are classified
     # above: test_multifa_native_equiv (for the retired numba-equiv test +
-    # validate_tof_multifa, GAP M-1), validate_collisions_c2 (for
-    # validate_collisions_c3). validate_octupole / test_octupole_rf have no
-    # successor and are recorded as retired with their history.
+    # validate_tof_multifa, GAP M-1). validate_collisions_c2 was itself
+    # retired (it lives in internal/tests_retired/), and its tracer_gas
+    # module was deleted 2026-10-16 (D13); its tier-3 entry that sat above
+    # was a dead classification and is gone. validate_octupole /
+    # test_octupole_rf have no successor (their tracer_rf2d was deleted
+    # the same day) and are recorded as retired with their history.
     # MOVED OUT 2026-09-08: validate_q3_2d went to internal/tests_q3/ with
     # the Q3 study itself (an internal project that was shipping publicly).
     # Its classification goes with it. It is also the gate that made

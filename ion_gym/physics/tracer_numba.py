@@ -26,8 +26,7 @@ into the same dict tracer.fly emits, so callers are unchanged.
 import numpy as np
 from numba import njit
 
-E_CHG = 1.602176634e-19
-AMU = 1.66053907e-27
+from ion_gym.physics.constants import E_CHG, KG_AMU as AMU  # noqa: E402
 
 
 def build_field(Z, U, phi, symmetry="cylindrical"):

@@ -63,7 +63,8 @@ def _region(name, pose=None, exit=None, nx=60, ny=60, nz=60, h=0.5):
                   ch_off=np.zeros(0), ch_duty=np.zeros(0), tab_t=np.zeros(0),
                   tab_v=np.zeros(0), tab_off=np.zeros(1, np.int64))
     return Region(name=name, fields=fields, pose=pose or Pose(), exit=exit,
-                  dt_ns=2.0, t_max_us=40.0)
+                  dt_ns=2.0, t_max_us=40.0,
+                  charge=1)   # stated: a hand-built Region has no stage spec
 
 
 def main():

@@ -130,7 +130,7 @@ def cover_extent_mm(extent_mm: float, mm_per_gu: float, *,
 
     WHY THIS IS ONE FUNCTION AND NOT A THREE-LINE IDIOM. The same defect
     was found independently in four generators (including
-    build_stl.einzel3d_spec), each time by tripping over it rather than
+    the since-retired STL einzel generator), each time by tripping over it rather than
     by looking: a domain computed as a sum of arbitrary floats is almost
     never an integer number of cells, so the spec is refused by the very
     loader its own package ships. Copying the idiom a fifth time would

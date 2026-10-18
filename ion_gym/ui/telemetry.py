@@ -65,30 +65,48 @@ def _macos_phys_footprint_mb():
 
     Read via libproc proc_pid_rusage(RUSAGE_INFO_V0), whose struct is
     a 16-byte uuid followed by ten uint64s; ri_phys_footprint is the
-    eighth of those. Returns None on ANY failure rather than a
+    eighth of those. Returns None when it cannot be read, never a
     substitute number — the caller labels which metric it got, so a
-    fallback is never mistaken for the real thing.
+    fallback is never mistaken for the real thing. WHY it could not be
+    read is printed once per process (L-541: it was `except Exception`,
+    silent, so a broken read and a non-mac host looked the same).
     """
     if sys.platform != "darwin":
-        return None
+        return None                 # not macOS: rss is the right metric
+    import ctypes
+    import ctypes.util
+
+    class _RUsageV0(ctypes.Structure):
+        _fields_ = [("ri_uuid", ctypes.c_uint8 * 16),
+                    ("ri_fields", ctypes.c_uint64 * 10)]
+
     try:
-        import ctypes
-        import ctypes.util
-
-        class _RUsageV0(ctypes.Structure):
-            _fields_ = [("ri_uuid", ctypes.c_uint8 * 16),
-                        ("ri_fields", ctypes.c_uint64 * 10)]
-
+        # OSError: libc not loadable; AttributeError: no proc_pid_rusage
         libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
         buf = _RUsageV0()
         rc = libc.proc_pid_rusage(ctypes.c_int(os.getpid()),
                                   ctypes.c_int(0),
                                   ctypes.byref(buf))
-        if rc != 0:
-            return None
-        return buf.ri_fields[7] / (1024.0 ** 2)
-    except Exception:
+    except (OSError, AttributeError) as e:
+        _note_footprint_unavailable(f"{type(e).__name__}: {e}")
         return None
+    if rc != 0:
+        _note_footprint_unavailable(
+            f"proc_pid_rusage returned {rc} (errno {ctypes.get_errno()})")
+        return None
+    return buf.ri_fields[7] / (1024.0 ** 2)
+
+
+_FOOTPRINT_NOTED = [False]
+
+
+def _note_footprint_unavailable(why):
+    """Print, once per process, why phys_footprint could not be read; the
+    readings that follow are labelled rss and so not mistaken for it."""
+    if not _FOOTPRINT_NOTED[0]:
+        _FOOTPRINT_NOTED[0] = True
+        print(f"[mem] macOS phys_footprint unavailable ({why}); reporting "
+              f"rss, which EXCLUDES compressed pages", flush=True)
 
 
 def mem_reading() -> tuple:
@@ -105,12 +123,15 @@ def mem_reading() -> tuple:
         return fp, "footprint"
     try:
         import psutil
-        return psutil.Process().memory_info().rss / (1024.0 ** 2), "rss"
-    except Exception:
+    except ImportError:
+        # psutil is optional: the labelled PEAK fallback below is the
+        # documented outcome (it was `except Exception`, which also hid a
+        # failing psutil read behind the high-water mark -- L-541)
         import resource
         ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         ru = ru / (1024.0 ** 2) if sys.platform == "darwin" else ru / 1024.0
         return ru, "PEAK"
+    return psutil.Process().memory_info().rss / (1024.0 ** 2), "rss"
 
 
 def rss_mb() -> float:
@@ -123,7 +144,8 @@ def rss_mb() -> float:
 
 
 def array_holders(top=8):
-    """[(holder_type, mb, n_arrays)] — WHO is holding array memory.
+    """([(holder_type, mb, n_arrays)], skipped) — WHO is holding array
+    memory, and how many objects the walk could NOT inspect.
 
     THE WALK THAT REACHES WHAT THE OTHERS CANNOT. A numeric ndarray is
     not GC-tracked, and CPython UNTRACKS a dict whose values are all
@@ -137,12 +159,19 @@ def array_holders(top=8):
     Attributed to the HOLDER'S TYPE, so the answer is a name to go fix,
     not another total. Dedup by array id; views skipped via .base so a
     slice is never charged against the buffer it borrows.
+
+    `skipped` is {exception type name: count} for objects whose attribute
+    access raised. The heap holds every kind of object -- weakref proxies
+    (ReferenceError), lazy modules, objects whose __getattr__ raises
+    anything -- so the per-object catch has to be broad, but it no longer
+    DROPS them silently (L-541: `except Exception: continue` undercounted
+    with no sign); format_line prints the count.
     """
     try:
         import numpy as np
     except ImportError:
-        return []
-    by_type, seen = {}, set()
+        return [], {}               # no numpy: no ndarray can be held
+    by_type, seen, skipped = {}, set(), {}
 
     def charge(holder, v):
         if type(v) is not np.ndarray or v.base is not None:
@@ -172,23 +201,23 @@ def array_holders(top=8):
             elif isinstance(o, (list, tuple)):
                 for v in list(o):
                     charge("<seq>", v)
-        except Exception:
-            continue
+        except Exception as e:      # arbitrary foreign objects: counted
+            skipped[type(e).__name__] = skipped.get(type(e).__name__, 0) + 1
     rows = sorted(((mb, n, k) for k, (mb, n) in by_type.items()),
                   reverse=True)
-    return [(k, mb, n) for mb, n, k in rows[:top]]
+    return [(k, mb, n) for mb, n, k in rows[:top]], skipped
 
 
 def _live_figures() -> int:
     """Count live Plotly Figure objects — the prime suspect for a per-
     render leak (a replot that leaves the previous figure referenced).
-    Zero when plotly isn't imported; never raises."""
-    try:
-        import plotly.graph_objects as go
-        return sum(1 for o in gc.get_objects()
-                   if isinstance(o, go.Figure))
-    except Exception:
-        return -1
+    Zero when plotly was never imported: then no Figure can exist, and
+    the count is exact without importing it here. (It returned -1 on any
+    failure, which reads like a count -- L-541.)"""
+    go = sys.modules.get("plotly.graph_objects")
+    if go is None:
+        return 0
+    return sum(1 for o in gc.get_objects() if isinstance(o, go.Figure))
 
 
 def referrers_of(type_name, max_objs=3, depth=2):
@@ -307,13 +336,15 @@ def snapshot(collect: bool = True, **context) -> dict:
     # a gc pass, so it runs only when one of the two asks for it
     _thr = HOLDERS_ABOVE_MB[0]
     _want_holders = VERBOSE[0] or (_thr is not None and _mem > float(_thr))
+    _holders, _skipped = array_holders() if _want_holders else (None, None)
     snap = {"t": time.strftime("%H:%M:%S"),
             "rss_mb": _mem, "rss_label": _lbl,
             "figures_pre": figs_pre,
             "figures": _live_figures() if collect else figs_pre,
             "collected": n_collected,
             "gc_objects": len(gc.get_objects()),
-            "holders": array_holders() if _want_holders else None,
+            "holders": _holders,
+            "holders_skipped": _skipped,
             "holders_reason": ("verbose" if VERBOSE[0] else
                                f"footprint over {float(_thr):.0f}MB"
                                if _want_holders else None),
@@ -330,7 +361,7 @@ def format_line(snap: dict, delta_mb: float | None = None) -> str:
                    if k not in ("t", "rss_mb", "figures", "figures_pre",
                                 "collected", "gc_objects",
                                 "rss_label", "holders", "holders_reason",
-                                "referrers"))
+                                "holders_skipped", "referrers"))
     pre, post = snap.get("figures_pre"), snap["figures"]
     figs = (f"{post}" if pre is None or pre == post
             else f"{pre}->{post}")
@@ -356,6 +387,12 @@ def format_line(snap: dict, delta_mb: float | None = None) -> str:
              + ("; ".join(f"{k} {mb:.0f}MB x{n}"
                           for k, mb, n in hold if mb >= 1.0)
                 or "none over 1 MB"))
+    skipped = snap.get("holders_skipped") or {}
+    if skipped:
+        head += ("\n       holders walk could not inspect "
+                 f"{sum(skipped.values())} object(s) ("
+                 + ", ".join(f"{k} x{n}" for k, n in sorted(skipped.items()))
+                 + ") — their arrays are not in the totals above")
     for line in (snap.get("referrers") or []):
         head += "\n       " + line
     return head

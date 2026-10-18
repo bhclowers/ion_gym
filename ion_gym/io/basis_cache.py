@@ -14,7 +14,8 @@ reproduce a certified run without re-solving.
 
 AGNOSTIC BY CONSTRUCTION: the key is a hash of the canonicalised
 GeometrySpec dict with the voltage/appearance fields (dc, rf_*, color,
-name) stripped and nothing else touched.  It knows no instrument, no plate
+name) stripped, the DC-ladder placement (dc_group/dc_index/dc_weight)
+held at None, and nothing else touched.  It knows no instrument, no plate
 count, no frame constant.  Any change that can move a boundary node --
 width/height/depth, mm_per_gu, symmetry declaration, a shape parameter,
 an STL reference, the basis ordering -- changes the key and misses the
@@ -35,6 +36,14 @@ CACHE_KIND = "planar_bases_v1"
 
 # Fields on an ElectrodeSpec that CANNOT change the solved bases.
 _VOLTAGE_FIELDS = ("dc", "rf_groups", "color", "name")
+# DC-ladder placement (L-453, PI 2026-10-16): these only place a member's
+# tap -- resolve_dc_groups writes dc = v_in + (v_out - v_in) * w, a
+# voltage -- and no builder reads them. Keying their VALUES made a ladder
+# re-weight re-solve every basis (and set_flight_conditions refuse it).
+# They are held at None in the key rather than removed: to_dict emits all
+# three on every electrode (None when unset), so removing them would have
+# re-keyed every deck; nulling them re-keys only decks that set them.
+_LADDER_FIELDS = ("dc_group", "dc_index", "dc_weight")
 
 
 # The cache key describes the GEOMETRY. It says nothing about the FORMAT of
@@ -83,7 +92,8 @@ def geometry_key_dict(spec):
                     _sans_extras(so, sh) for so, sh in
                     zip(list(_eo.shapes) + [None] * len(e["shapes"]),
                         e["shapes"])]
-        e = {k: v for k, v in e.items() if k not in _VOLTAGE_FIELDS}
+        e = {k: (None if k in _LADDER_FIELDS else v)
+             for k, v in e.items() if k not in _VOLTAGE_FIELDS}
         # basis index defaults to position; make it explicit so a reorder
         # (which DOES change the basis->electrode mapping) changes the key.
         e["_basis"] = e.get("basis") if e.get("basis") is not None else i + 1
@@ -139,7 +149,7 @@ def key(spec):
     return fa_cache.spec_key(geometry_key_dict(spec))
 
 
-def load(spec, root=fa_cache.DEFAULT_ROOT):
+def load(spec, root=None):
     """(bases dict {basis_index: (nx,ny) float64}, ele (nx,ny) int16) or
     (None, None) on a miss.  Arrays are copied out of the memmap so callers
     can hand them to numba kernels without a read-only surprise.
@@ -188,11 +198,19 @@ def describe_spec(spec):
             f"{len(g.electrodes)} electrodes")
 
 
-def store(spec, bases, ele, root=fa_cache.DEFAULT_ROOT):
+def store(spec, bases, ele, root=None):
     """Atomic publish of the solved bases + the electrode mask."""
     arrays = {f"b{int(k)}": np.ascontiguousarray(v, float)
               for k, v in bases.items()}
-    arrays["ele"] = np.ascontiguousarray(ele).astype(np.uint8)
+    # labels are stored in 8 bits (the format is kept by PI ruling
+    # 2026-10-15); a label past the limit would WRAP silently, so it is
+    # refused here at the data level too (L-538)
+    from ion_gym.io.sim_spec import electrode_limit_error
+    ele_a = np.ascontiguousarray(ele)
+    _lim = electrode_limit_error(int(ele_a.max()) if ele_a.size else 0)
+    if _lim:
+        raise ValueError(f"basis_cache.store: {_lim}")
+    arrays["ele"] = ele_a.astype(np.uint8)
     key = fa_cache.store(geometry_key_dict(spec), arrays, root=root)
     # descriptive provenance: the key dict is rightly
     # name-free, so the "which json produced this" record is written here,

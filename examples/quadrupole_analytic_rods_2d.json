@@ -22,6 +22,11 @@
   "electrodes": [
    {
     "name": "rod_px",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "dc": 0.0,
     "rf_groups": [
      "RFA"
@@ -38,6 +43,11 @@
    },
    {
     "name": "rod_mx",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "dc": 0.0,
     "rf_groups": [
      "RFA"
@@ -54,6 +64,11 @@
    },
    {
     "name": "rod_py",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "dc": 0.0,
     "rf_groups": [
      "RFB"
@@ -70,6 +85,11 @@
    },
    {
     "name": "rod_my",
+    "color": [
+     200,
+     60,
+     60
+    ],
     "dc": 0.0,
     "rf_groups": [
      "RFB"
@@ -147,7 +167,6 @@
   "gas": "N2",
   "T_k": 273.0,
   "P_torr": 1.0,
-  "P_pa": 133.32236842105263,
   "sigma_m2": 2.27e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,
@@ -158,12 +177,20 @@
   ]
  },
  "integration": {
+  "max_records": 100000,
   "dt_ns": 2.0,
   "t_max_us": 30.0,
   "rec_every": 2,
   "record_channels": [
    "speed",
    "radius"
+  ]
+ },
+ "optic_axis": {
+  "axis": "z",
+  "through_mm": [
+   13.9,
+   13.9
   ]
  },
  "bounds": {

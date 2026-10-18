@@ -130,6 +130,36 @@ def deck_extrude_axis(named_shapes) -> str:
     return next(iter(seen), "z")
 
 
+def world_domain_mm(geometry, world_axis: str) -> Tuple[float, float]:
+    """(lo, hi) mm of the declared domain along one WORLD axis, in the
+    deck frame: x and y start at origin_mm (the signed-frame anchor; None
+    is [0, 0]), z at 0 (origin_mm is [x_lo, y_lo] only)."""
+    org = list(geometry.origin_mm or (0.0, 0.0))
+    if world_axis == "x":
+        lo = float(org[0])
+        return lo, lo + float(geometry.width_mm)
+    if world_axis == "y":
+        lo = float(org[1])
+        return lo, lo + float(geometry.height_mm)
+    if world_axis == "z":
+        return 0.0, float(geometry.depth_mm)
+    raise EditRefusal(f"world_domain_mm: axis {world_axis!r} is not one "
+                      f"of 'x'|'y'|'z'")
+
+
+def inplane_domain_mm(geometry, deck_axis: str):
+    """((u_lo, u_hi), (v_lo, v_hi)): the domain over a deck's STORED
+    in-plane coordinates -- EXTRUDE_INPLANE_AXES[deck_axis], (x, y) for a
+    z / extrude-less deck. The one place the editor turns "the deck's
+    domain" into the frame its shapes are stored in (L-553: new shapes
+    and the empty-deck view assumed (x, y) from a zero origin)."""
+    if deck_axis not in _AXIS_INDEX:
+        raise EditRefusal(f"inplane_domain_mm: extrude axis {deck_axis!r} "
+                          f"is not one of 'x'|'y'|'z'")
+    a0, a1 = EXTRUDE_INPLANE_AXES[deck_axis]
+    return world_domain_mm(geometry, a0), world_domain_mm(geometry, a1)
+
+
 def viewer_frame(axis: str) -> dict:
     """Frame descriptor for the payload: which WORLD axis each viewer
     axis displays. Identity for 'z'."""

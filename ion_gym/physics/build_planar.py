@@ -33,16 +33,15 @@ from ion_gym.physics.raster2d import (
     _fold_reflect,
     anchored_grid,
     _metal_nn,
-    refuse_birth_in_metal)
+    refuse_birth_in_metal,
+    BirthInMetal)
 from ion_gym.io.sim_spec import BASE_CHANNELS
 from ion_gym.physics.sim_build import generate_births
 from ion_gym.physics.symmetry import (verify_symmetry, verify_symmetry_shapes, reduction_summary)
-from ion_gym.physics.collision3d import (E_CHG, KG_AMU, KB, gas_mass, _mfp_mm, _collide)
+from ion_gym.physics.collision3d import (E_CHG, KG_AMU, hs_collision_step)
 from ion_gym.physics import sds as _sds_mod
-from ion_gym.physics.sds import (_diff_dist_steps, ion_params as _sds_ion_params,
-                 load_diffusion_statistics as _sds_load_stats,
-                 load_massdata as _sds_load_mass,
-                 N_DIST_COLLISIONS as _SDS_NDC)
+from ion_gym.physics.sds import (_diff_dist_steps,
+                                 N_DIST_COLLISIONS as _SDS_NDC)
 
 
 
@@ -291,8 +290,8 @@ class PlanarModel:
         x, y = self.extent()
         if mz is None:
             mz = self.spec.source.mz_list[0]
-        m_kg = mz * 1.6605402e-27
-        q_c = charge * 1.602176634e-19
+        m_kg = mz * KG_AMU
+        q_c = charge * E_CHG
         pe = charge * self.A.copy()               # DC part: z*phi in eV
         h = self.mm_per_gu
 
@@ -560,12 +559,12 @@ def planar_is_cached(spec):
     # A question we cannot answer must not be answered with a guess.
     try:
         from ion_gym.io import basis_cache
-        from ion_gym.io import fa_cache
+        from ion_gym.io.paths import cache_root
         import os
     except ImportError:
         return True                         # cannot know it is cached -> solve
     return os.path.exists(os.path.join(
-        fa_cache.DEFAULT_ROOT, basis_cache.key(spec), "meta.json"))
+        cache_root(), basis_cache.key(spec), "meta.json"))
 
 
 def _assert_planar_fold_symmetry(bases, fold, h, spec, *, served_from):
@@ -1115,6 +1114,24 @@ def _wave_eval(kind, om, ph, duty, tab_t, tab_v, o0, o1, t):
     return tab_v[lo] + f * (tab_v[hi] - tab_v[lo])
 
 
+def planar_gas_flow(collisions, where):
+    """The declared gas flow for a PLANAR flight: (fx, fy, 0.0) mm/us from
+    collision3d.gas_flow. The planar route's gas acts in the plane only
+    (HS collides vx, vy; SDS damps vx, vy) and z is a field-free drift
+    with no gas coupling, so a nonzero z component is REFUSED by name
+    (L-563, PI ruling 2026-10-16) -- it used to be dropped with the rest
+    of the flow. `where` names the caller in the message."""
+    from ion_gym.physics.collision3d import gas_flow
+    fx, fy, fz = gas_flow(collisions)
+    if fz != 0.0:
+        raise ValueError(
+            f"{where}: collisions.flow_mm_us has z = {fz:g} mm/us, but the "
+            f"planar route's gas acts only in the x-y plane (z is a "
+            f"field-free drift with no gas coupling). Set the z flow to 0, "
+            f"or fly a 3-D route, which models flow in all three axes.")
+    return fx, fy, 0.0
+
+
 @njit(cache=True, nogil=True)
 def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
                 ch_kind, ch_om, ch_ph, ch_duty, tab_t, tab_v, tab_off,
@@ -1122,7 +1139,7 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
                 sigma, c_star, c_bar, sig1d, m_gas, rec, rec_every,
                 nch_flags, bnd_on, bnd_val, seed, z0, vz,
                 sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, sds_stats,
-                pl_col, pl_val, pl_sgn, pl_w, pl_kind):
+                pl_col, pl_val, pl_sgn, pl_w, pl_kind, gfx, gfy):
     """Planar Verlet + optional HS + N DRIVE CHANNELS, with a FIELD-FREE
     axial drift along z. The transverse field is
         E(x,y,t) = E_A + sum_k w_k(t) E_k
@@ -1132,7 +1149,12 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
     scripting equivalent for state-independent drive programs. z carries
     no force, so z = z0 + vz*t exactly (ideal-guide limit). Set vz=0 for
     a pure 2-D slice. Records [t,x,y,z,vx,vy,vz] + channels. Returns
-    (nrec, kind, ncol)."""
+    (nrec, kind, ncol).
+
+    (gfx, gfy): the in-plane bulk gas velocity (mm/us). The gas acts in
+    the plane only (HS collides vx, vy; SDS damps vx, vy), so both are
+    taken RELATIVE to the moving gas (L-563); the caller refuses a z
+    component, which this route has no gas coupling for."""
     np.random.seed(seed)
     nx, ny = ExA.shape
     t = 0.0
@@ -1173,22 +1195,22 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
             rec[k, c] = sp
             c += 1
         if cke:
-            rec[k, c] = 0.5 * m_ion * 1.6605402e-27 * (sp * 1e3) ** 2 \
-                / 1.602176634e-19; c += 1
+            rec[k, c] = 0.5 * m_ion * KG_AMU * (sp * 1e3) ** 2 \
+                / E_CHG; c += 1
         # per-axis KE (eV). Same 1/2 m v_i^2 / e as the total, projected
         # onto each component: vxx,vyy are the current velocities, vz is the
         # (ballistic, field-free) z-velocity in this 2-D solve. By
         # construction ke_x+ke_y+ke_z == ke_ev, which the channel test
         # asserts.
         if cke_x:
-            rec[k, c] = 0.5 * m_ion * 1.6605402e-27 * (vxx * 1e3) ** 2 \
-                / 1.602176634e-19; c += 1
+            rec[k, c] = 0.5 * m_ion * KG_AMU * (vxx * 1e3) ** 2 \
+                / E_CHG; c += 1
         if cke_y:
-            rec[k, c] = 0.5 * m_ion * 1.6605402e-27 * (vyy * 1e3) ** 2 \
-                / 1.602176634e-19; c += 1
+            rec[k, c] = 0.5 * m_ion * KG_AMU * (vyy * 1e3) ** 2 \
+                / E_CHG; c += 1
         if cke_z:
-            rec[k, c] = 0.5 * m_ion * 1.6605402e-27 * (vz * 1e3) ** 2 \
-                / 1.602176634e-19; c += 1
+            rec[k, c] = 0.5 * m_ion * KG_AMU * (vz * 1e3) ** 2 \
+                / E_CHG; c += 1
         if cef:
             rec[k, c] = math.sqrt(exv * exv + eyv * eyv)
             c += 1
@@ -1233,10 +1255,11 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
         ex *= 1e-9 * acc
         ey *= 1e-9 * acc
         if sds_on:
+            # mobility drag relative to the moving gas (L-563)
             tterm = sds_damping * dt
             factor = (1.0 - math.exp(-tterm)) / tterm
-            ex = factor * (ex - vx * sds_damping)
-            ey = factor * (ey - vy * sds_damping)
+            ex = factor * (ex - (vx - gfx) * sds_damping)
+            ey = factor * (ey - (vy - gfy) * sds_damping)
         vx += 0.5 * ex * dt
         vy += 0.5 * ey * dt
         x += vx * dt
@@ -1247,8 +1270,8 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
         if sds_on:
             tterm = sds_damping * dt
             factor = (1.0 - math.exp(-tterm)) / tterm
-            ex = factor * (ex - vx * sds_damping)
-            ey = factor * (ey - vy * sds_damping)
+            ex = factor * (ex - (vx - gfx) * sds_damping)
+            ey = factor * (ey - (vy - gfy) * sds_damping)
         vx += 0.5 * ex * dt
         vy += 0.5 * ey * dt
         z += vz * dt                       # field-free axial drift
@@ -1264,15 +1287,17 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
             rr = r * 0.816496580927726
             x += rr * math.cos(th)
             y += rr * math.sin(th)
-            ncol += 1
+            # NO ncol += 1: a diffusion jump is not a collision (it counted
+            # one per step, so n_col equalled the step count); under SDS
+            # the builder reports the count as absent
+            # (sds.SDS_NO_COLLISION_COUNT).
         elif collide_on:
-            sp = math.sqrt(vx * vx + vy * vy)
-            if sp < 1e-7:
-                sp = 1e-7
-            lam = _mfp_mm(sp, T_k, P_pa, sigma, c_star, c_bar)
-            if np.random.random() < 1.0 - math.exp(-sp * dt / lam):
-                vx, vy, _z = _collide(vx, vy, 0.0, 0.0, 0.0, 0.0,
-                                      m_ion, m_gas, sig1d, sp)
+            # the shared gas-frame HS step (collision3d); a 2-D gas, so the
+            # out-of-plane velocity and flow are 0 (as before)
+            vx, vy, _z, _hit = hs_collision_step(
+                vx, vy, 0.0, gfx, gfy, 0.0, dt, 1.0, T_k, P_pa, sigma,
+                c_star, c_bar, m_ion, m_gas, sig1d)
+            if _hit:
                 ncol += 1
         if _metal_nn(ele, x / mm, y / mm, nx, ny):
             # bisect back to the impact surface (same 40-step refinement
@@ -1460,38 +1485,37 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
         raise ValueError("source.charge = 0: an uncharged ion has no "
                          "electric acceleration; state the charge state.")
     col = spec.collisions
-    mg = gas_mass(col.gas) if col.enabled else 4.0
-    c_star = math.sqrt(2 * KB * col.T_k / (mg * KG_AMU)) / 1000.0 \
-        if col.enabled else 1.0
-    c_bar = math.sqrt(8 * KB * col.T_k / (math.pi * mg * KG_AMU)) / 1000.0 \
-        if col.enabled else 1.0
-    sig1d = math.sqrt(KB * col.T_k / (mg * KG_AMU)) / 1000.0 \
-        if col.enabled else 1.0
-    # SDS (diffusion) collision model: load statistics + per-mass parameters.
-    sds_on = bool(col.enabled and getattr(col, "model", "hs") == "sds")
-    if sds_on:
-        import os
-        _sdir = os.path.dirname(os.path.abspath(__file__))
-        _sds_stats = _sds_load_stats(os.path.join(_sdir, _sds_mod.JUMP_ICDF_FILE))
-        _sds_massdata = _sds_load_mass(os.path.join(_sdir, _sds_mod.MOBILITY_FILE))
-        _sds_mgas = 28.94515 if col.gas in ("air", "N2") else gas_mass(col.gas)
-    else:
-        _sds_stats = np.zeros((5, 1002))
-        _sds_massdata = []
-        _sds_mgas = 28.94515
+    # GAS through the one authority (A4, L-531): the same scalars every
+    # route takes. With gas on the values are identical to the old inline
+    # derivation; in vacuum they are inert (every use in _fly_planar sits
+    # under collide_on), so HS and vacuum flights are bit-identical.
+    from ion_gym.physics.collision3d import gas_kernel_scalars
+    g = gas_kernel_scalars(col)
+    # SDS (diffusion) collision model: the shared tables and per-ion
+    # parameters (sds.load_tables / sds_ion_params -- the same door r-z,
+    # 3-D and staged regions use; sds_active refuses an unknown model).
+    sds_on = _sds_mod.sds_active(col)
+    _sds_stats = (_sds_mod.load_tables()[0] if sds_on
+                  else np.zeros((5, 1002)))      # typed placeholder, unread
+    # DECLARED GAS FLOW (L-563, PI ruling 2026-10-16: modelled). HS and
+    # SDS both act in the plane, relative to the moving gas; the route's
+    # gas has no z coupling (z is the field-free drift), so a nonzero
+    # z flow is REFUSED by name rather than dropped.
+    _gfx, _gfy, _gfz = planar_gas_flow(col, "planar route")
     dt = spec.integration.dt_ns * 1e-3
     # Record buffer must hold every recorded step, or the trajectory gets
     # truncated mid-flight and the viewer draws a straight line from the
     # last recorded point to the final impact. Records = steps/rec_every,
-    # plus the birth and final rows; cap to bound memory on very long runs.
+    # plus the birth and final rows.
+    # THE DECK'S rec_every IS HONOURED AS DECLARED (PI ruling 2026-10-14,
+    # L-552). This used to raise rec_every silently whenever a flight
+    # would record more than a hidden 40,000 points, so the run recorded
+    # at a spacing nobody asked for. A recording too large to hold is
+    # refused at the build door instead, with the arithmetic and the
+    # levers: sim_spec.check_recording_capacity (against the deck's
+    # max_records) and sizing.record_volume (against memory).
     rec_every = max(1, spec.integration.rec_every)
     n_steps = int(spec.integration.t_max_us / dt) + 2
-    # keep total records under a target so the plot stays smooth AND the
-    # buffer always fits (no mid-flight truncation -> no straight-line
-    # artifact). For very long runs this thins the recording automatically.
-    _TARGET_RECORDS = 40_000
-    if n_steps // rec_every > _TARGET_RECORDS:
-        rec_every = -(-n_steps // _TARGET_RECORDS)   # ceil division
     max_records = n_steps // rec_every + 8
     nch = tuple(bool(f) for f in flags)
     bflags, bvals = spec.bounds.as_tuple()
@@ -1550,20 +1574,30 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
                                   for i2 in range(model.EyK.shape[0])]
     # planar basis arrays are V/m (_grad2d); extend_ballistic's contract
     # is V/mm — convert here (see the
-    # matching note in build_rz).
-    _edge_e = {"x_lo": 1e-3 * edge_field_max([_ex_c, _ey_c], 0, "lo"),
-               "x_hi": 1e-3 * edge_field_max([_ex_c, _ey_c], 0, "hi"),
-               "y_lo": 1e-3 * edge_field_max([_ex_c, _ey_c], 1, "lo"),
-               "y_hi": 1e-3 * edge_field_max([_ex_c, _ey_c], 1, "hi")}
+    # matching note in build_rz). _grad2d leaves the boundary row zero,
+    # so each face is read ONE ROW IN (inset=1): read at the boundary it
+    # measured 0 on every deck and the hot-edge refusal never fired
+    # (L-286).
+    _edge_e = {"x_lo": 1e-3 * edge_field_max([_ex_c, _ey_c], 0, "lo", 1),
+               "x_hi": 1e-3 * edge_field_max([_ex_c, _ey_c], 0, "hi", 1),
+               "y_lo": 1e-3 * edge_field_max([_ex_c, _ey_c], 1, "lo", 1),
+               "y_hi": 1e-3 * edge_field_max([_ex_c, _ey_c], 1, "hi", 1)}
     _AXX = 0.5 * (model.ele.shape[0] - 1) * model.mm_per_gu
     _AXY = 0.5 * (model.ele.shape[1] - 1) * model.mm_per_gu
 
     def fly_fn(i):
         b = births_k[i]
-        refuse_birth_in_metal(
-            model.ele, b[0] / model.mm_per_gu, b[1] / model.mm_per_gu,
-            model.mm_per_gu, spec, i,
-            f"({births[i, 0]:.3f}, {births[i, 1]:.3f}) mm")
+        try:
+            refuse_birth_in_metal(
+                model.ele, b[0] / model.mm_per_gu, b[1] / model.mm_per_gu,
+                model.mm_per_gu, spec, i,
+                f"({births[i, 0]:.3f}, {births[i, 1]:.3f}) mm")
+        except BirthInMetal as e:
+            # splat at birth + warning; the other ions fly (the one rule,
+            # ion_envelope.birth_splat). Recorded in the USER frame.
+            from ion_gym.physics.ion_envelope import per_ion, birth_splat
+            return birth_splat(e, col_names=col_names, birth=births[i],
+                               mz=per_ion(spec, i).mz, label=f"ion {i}")
         # per-ion mass through mz_of, THE single authority:
         # generate_births assigns m/z in CONTIGUOUS BLOCKS
         # (i // n_ions); an older i % len CYCLING here flew
@@ -1575,8 +1609,7 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
         m_i = mz_i
         acc_i = q_e * E_CHG / (m_i * KG_AMU)          # charge*e/(mass*amu)
         if sds_on:
-            _P = _sds_ion_params(mz_i, float(q_e), _sds_mgas, col.gas_diam_nm,
-                                 col.T_k, col.P_torr, _sds_massdata)
+            _P = _sds_mod.sds_ion_params(col, mz_i, q_e)
             sds_damping = _P["damping"]
             sds_mfp = _P["mfp_mm"]
             sds_V = _P["V_mm_us"]
@@ -1591,12 +1624,15 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
             model.tab_t, model.tab_v, model.tab_off,
             model.ele.astype(np.float64),
             model.mm_per_gu, acc_i, dt, spec.integration.t_max_us,
-            col.enabled, col.T_k, col.P_pa, col.sigma_m2, c_star, c_bar,
-            sig1d, mg, rec, rec_every, nch,
+            g["enabled"], g["T_k"], g["P_pa"], g["sigma_m2"], g["c_star"],
+            g["c_bar"], g["sig1d"], g["m_gas"], rec, rec_every, nch,
             bnd_on, bnd_val, env.seed, b[2], b[5],
             sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, _sds_stats,
-            pl_col, pl_val, pl_sgn, pl_w, pl_kind)
+            pl_col, pl_val, pl_sgn, pl_w, pl_kind, _gfx, _gfy)
         traj = rec[:n].copy()
+        if sds_on:
+            # the collision-count rule (sds.SDS_NO_COLLISION_COUNT)
+            _sds_mod.blank_collision_channel(traj, col_names)
         from ion_gym.io.records import TrajRecord
         rec_view = TrajRecord(traj, col_names)
         if _anx or _any:
@@ -1640,7 +1676,8 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
             z_end=float(end["z"]),
             r_end=float(math.hypot(
                 end["x"] - births[:, 0].mean(),
-                end["y"] - births[:, 1].mean())), n_col=ncol)
+                end["y"] - births[:, 1].mean())),
+            n_col=None if sds_on else ncol)
         return traj, summary
     return fly_fn, col_names
 

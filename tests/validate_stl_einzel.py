@@ -137,8 +137,16 @@ def main():
     # S-4 quadrupole: a signed two-phase RF field from STL rods forms a
     # proper Mathieu saddle, and a single run with per-ion mass shows one
     # STABLE (q<0.908) and one UNSTABLE (q>0.908) ion.
-    from ion_gym.physics.build_stl import quad_stl_spec
-    qspec = quad_stl_spec("/tmp/quad_stls")
+    # THE quad fixture (STL rods + deck, generated once from the retired
+    # examples/stl_demos generator; D6c, 2026-08-18 pattern). A fresh spec
+    # per use: S-4 and S-5 each edit their own copy.
+    _QUAD = str(Path(__file__).resolve().parent / "fixtures" / "stl_quad"
+                / "quad_stl_transport.json")
+
+    def quad_stl_spec():
+        return SimSpec.from_json(_QUAD)
+
+    qspec = quad_stl_spec()
     cc = qspec.geometry.width_mm / 2
     qspec.source.x0_mm = cc
     qspec.source.y0_mm = cc + 0.5
@@ -191,7 +199,7 @@ def main():
     # near the entrance. This exercises the field-free axial drift in the
     # planar tracer (z = z0 + vz*t) that makes the axial-transport transport
     # picture from a 2-D transverse solve.
-    tspec = quad_stl_spec("/tmp/quad_stls")     # transport defaults (KE=8)
+    tspec = quad_stl_spec()                      # transport defaults (KE=8)
     tspec.source.n_ions = 1        # one ion per m/z (see S-4 note)
     tcc = tspec.geometry.width_mm / 2
     tspec.bounds.x_min_on = tspec.bounds.x_max_on = True

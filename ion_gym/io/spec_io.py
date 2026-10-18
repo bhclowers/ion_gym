@@ -26,7 +26,8 @@ import json
 
 
 def sniff(txt_or_obj):
-    """Return 'simspec' | 'scene3d' | 'unknown' for a JSON string/dict."""
+    """Return 'assembly' | 'staged_assembly' | 'simspec' | 'scene3d' |
+    'unknown' for a JSON string/dict."""
     d = (json.loads(txt_or_obj) if isinstance(txt_or_obj, (str, bytes))
          else txt_or_obj)
     if not isinstance(d, dict):
@@ -58,12 +59,14 @@ def scene_to_simspec(scene, *, json_path=None, name=None, dc_group=None):
                               dc_group=dc_group)
 
 
-def load_any_spec(txt, *, work_dir=None, stl_dir=None):
-    """Load either schema.  Returns a SimSpec.
+def load_any_spec(txt):
+    """Load any schema sniff() knows. Returns a SimSpec (a coaxial
+    assembly flattened, a GeomScene embedded); a staged assembly and an
+    unrecognised document are refused with the way forward.
 
-    A GeomScene is solved AS AUTHORED (analytic CSG -> rasterize3d). It needs a
-    place to keep its own JSON so the spec can point at the geometry truth;
-    that is all work_dir is for. No meshes are produced.
+    A GeomScene is solved AS AUTHORED (analytic CSG -> rasterize3d),
+    embedded in the spec; no meshes or sidecar files are produced. (The
+    work_dir / stl_dir arguments were accepted and ignored -- L-556.)
     """
     from ion_gym.io.sim_spec import SimSpec
     kind = sniff(txt)
@@ -105,19 +108,28 @@ def load_any_spec(txt, *, work_dir=None, stl_dir=None):
         try:
             sc.check()
         except ValueError as e:
-            raise ValueError(f"scene3d JSON is not solvable as written: {e}")
+            raise ValueError(
+                f"scene3d JSON is not solvable as written: {e}") from e
         # No temp dir, no sidecar file: the GeomScene is embedded in the spec.
         return scene_to_simspec(sc, json_path=None)
 
+    if kind != "unknown":
+        # a kind sniff() names but this loader has no branch for: refuse
+        # it as itself, never as "unrecognised" (L-554)
+        raise ValueError(f"load_any_spec: no loader for schema {kind!r}")
+    d = json.loads(txt) if isinstance(txt, (str, bytes)) else txt
+    seen = (", ".join(sorted(map(str, d))[:8]) if isinstance(d, dict)
+            else f"a top-level {type(d).__name__}, not an object")
     raise ValueError(
-        "unrecognised JSON. ion_gym reads two geometry schemas:\n"
-        "  • SimSpec  — needs a top-level \"geometry\" key (inline 2-D "
-        "shapes; planar or r-z)\n"
-        "  • scene3d  — needs top-level \"grid\" {nx,ny,nz} and "
-        "\"electrodes\" with an \"index\" (3-D CSG)\n"
-        "The file supplied has neither. Top-level keys seen: "
-        + ", ".join(sorted(json.loads(txt).keys())[:8]
-                    if isinstance(txt, (str, bytes)) else []))
+        "unrecognised JSON. ion_gym reads four document schemas:\n"
+        "  • SimSpec  — a top-level \"geometry\" object (every route)\n"
+        "  • assembly — \"kind\": \"assembly\" with a \"units\" list "
+        "(coaxial units, flattened to one SimSpec)\n"
+        "  • staged assembly — \"schema\": \"ion_gym.assembly/1\" with a "
+        "\"stages\" list (load with staged_flight.load_assembly)\n"
+        "  • scene3d  — top-level \"grid\" {nx,ny,nz} and \"electrodes\" "
+        "(3-D CSG)\n"
+        f"The document supplied is none of these. Seen: {seen}")
 
 
 def set_geometry_build_options(txt, *, field_method, channel_dtype,
@@ -303,8 +315,8 @@ def spec_summary_rows(spec):
         w = getattr(g, "width_mm", None); h = getattr(g, "height_mm", None)
         d = getattr(g, "depth_mm", 0.0)
         if w is not None and h is not None:
-            size = f"{w:.2f} x {h:.2f}" + (f" x {d:.2f}" % () if False else
-                                           (f" x {d:.2f} mm" if d else " mm (2D)"))
+            size = f"{w:.2f} x {h:.2f}" + (f" x {d:.2f} mm" if d
+                                           else " mm (2D)")
             add("size", size)
         add("pitch (mm/gu)", getattr(g, "mm_per_gu", None))
         # symmetry

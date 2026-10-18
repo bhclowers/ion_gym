@@ -25,7 +25,6 @@ sim_app as the "STL upload" tab with an on_commit(spec) callback.
 """
 from __future__ import annotations
 import hashlib
-import io
 import json
 import time
 from dataclasses import dataclass
@@ -42,14 +41,12 @@ import numpy as np
 SOLVER_VERSION = "solver3d/nz1-v51"      # bump on any solver change
 
 
-def _require_trimesh():
-    try:
-        import trimesh
-        return trimesh
-    except ImportError as e:
-        raise ImportError(
-            "STL upload needs the 'trimesh' package "
-            "(pip install trimesh).") from e
+# mesh ingest has ONE owner (L-546): STL bytes are parsed through
+# stl_resolve.parse_stl_bytes, a deck's files with their declared placement
+# through stl_resolve.load_mesh, and trimesh's import through
+# stl_resolve._require_trimesh. This module used to call trimesh.load
+# itself in three places and carry its own _require_trimesh.
+from ion_gym.io.stl_resolve import parse_stl_bytes        # noqa: E402
 
 
 # ------------------------------------------------------------- mesh info
@@ -68,9 +65,7 @@ class MeshInfo:
 
 
 def load_mesh_bytes(filename: str, data: bytes) -> MeshInfo:
-    trimesh = _require_trimesh()
-    m = trimesh.load(io.BytesIO(data), file_type="stl", force="mesh",
-                     process=True)
+    m = parse_stl_bytes(data)
     lo, hi = np.asarray(m.bounds[0], float), np.asarray(m.bounds[1], float)
     return MeshInfo(name=Path(filename).stem, filename=filename, data=data,
                     n_faces=len(m.faces), aabb_min=lo, aabb_max=hi)
@@ -177,15 +172,17 @@ def check_mask_overlaps(spec):
     refusal into a report the UI can show. Returns [] when clean, else
     [(message,)] describing the collision. The classic cause: CAD parts
     exported to STL individually land in PART frames, not the assembly
-    frame."""
+    frame. Any OTHER failure of the check propagates: a check that did
+    not run is not a clean result (L-529). The overlap is recognised by
+    its TYPE, voxelize.ElectrodeOverlap -- this matched the word
+    'overlaps' in the message."""
     from ion_gym.physics.build_stl import stl_masks_2d
+    from ion_gym.physics.voxelize import ElectrodeOverlap
     try:
         stl_masks_2d(spec)
         return []
-    except ValueError as e:
-        if "overlaps" in str(e):
-            return [(str(e),)]
-        raise
+    except ElectrodeOverlap as e:
+        return [(str(e),)]
 
 
 def spec_from_upload(meshes: List[MeshInfo], voltages: Dict[str, float],
@@ -209,23 +206,15 @@ def spec_from_upload(meshes: List[MeshInfo], voltages: Dict[str, float],
     """
     from ion_gym.io.sim_spec import (SimSpec, ElectrodeSpec, GeometrySpec, SourceSpec,
                           RFGroupSpec)
-    trimesh = _require_trimesh()
+    from ion_gym.io.stl_resolve import load_mesh
     wd = Path(workdir)
     wd.mkdir(parents=True, exist_ok=True)
     off = -np.asarray(sizing.domain_min, float)
     rf_groups = rf_groups or {}
     electrodes = []
-    z_lo = z_hi = None
     for m in sorted(meshes, key=lambda m: m.name):
         # AS-UPLOADED BYTES ON DISK: no translation is baked into
-        # the copies; placement rides in the declaration below. The z-span
-        # for the axial extent is still stated in the BUILD frame, so the
-        # declared offset is added to the measured native bounds here.
-        mesh = trimesh.load(io.BytesIO(m.data), file_type="stl",
-                            force="mesh", process=True)
-        b = mesh.bounds
-        z_lo = (b[0, 2] + off[2]) if z_lo is None else min(z_lo, b[0, 2] + off[2])
-        z_hi = (b[1, 2] + off[2]) if z_hi is None else max(z_hi, b[1, 2] + off[2])
+        # the copies; placement rides in the declaration below.
         (wd / m.filename).write_bytes(m.data)
         grp = rf_groups.get(m.name) or None
         electrodes.append(ElectrodeSpec(
@@ -244,12 +233,7 @@ def spec_from_upload(meshes: List[MeshInfo], voltages: Dict[str, float],
     geo = GeometrySpec(
         width_mm=float(ext[0]), height_mm=float(ext[1]),
         depth_mm=float(ext[2]) if solve_3d else 0.0,
-        # measured ONCE at spec creation and DECLARED into the JSON (the
-        # draw path reads only the declaration): the uploaded
-        # bodies' translated z-span, so 2-D transport views draw finite
-        # electrodes. The user can edit it like any other config value.
-        axial_extent_mm=(None if solve_3d
-                         else [float(z_lo), float(z_hi)]),
+        # axial_extent_mm is set below from the meshes as INGESTED
         mm_per_gu=float(sizing.pitch), stl_dir=str(wd),
         # DECLARED (2a.3): the measured CAD->build translation as
         # first-class data (was notes prose only). build = uploaded +
@@ -258,6 +242,17 @@ def spec_from_upload(meshes: List[MeshInfo], voltages: Dict[str, float],
         frame_offset_mm=[float(v) for v in off],
         electrodes=electrodes, rf_groups=group_specs)
     spec = SimSpec(name=name, geometry=geo, source=SourceSpec())
+    if not solve_3d:
+        # measured ONCE at spec creation and DECLARED into the JSON (the
+        # draw path reads only the declaration): the bodies' BUILD-frame
+        # z-span, so 2-D transport views draw finite electrodes; the user
+        # can edit it like any other config value. Read through THE mesh
+        # ingest point, which applies the declared placement (L-546: the
+        # offset used to be re-added to native bounds by hand here).
+        zs = [load_mesh(spec, el, stl_dir=wd).bounds[:, 2]
+              for el in electrodes]
+        geo.axial_extent_mm = [float(min(z[0] for z in zs)),
+                               float(max(z[1] for z in zs))]
     spec.notes = (f"STL upload: build = uploaded + {off.tolist()} mm "
                   f"(domain_min -> origin), declared in geometry."
                   f"frame_offset_mm and applied at mesh ingest; files on "
@@ -279,14 +274,18 @@ class StlUploadPanel:
         self.on_commit = on_commit
         self.on_clear = on_clear
         if workdir is None:
-            from ion_gym.io.paths import repo_root
-            # no /tmp absolutes: uploads persist in
-            # the repo uploads/ sibling; an explicit workdir is honoured
-            # unchanged (every gate passes one).
-            workdir = repo_root() / "uploads" / "stl"
+            from ion_gym.io.paths import uploads_dir
+            # no /tmp absolutes: uploads persist in the registered
+            # uploads home; an explicit workdir is honoured unchanged
+            # (every gate passes one).
+            workdir = uploads_dir("stl")
         self.workdir = Path(workdir)
         self.meshes: List[MeshInfo] = []
         self.sizing: Optional[SizingProposal] = None
+        # dropped files that did not parse as STL, kept until the next
+        # drop: every resize shows them and Commit refuses while any
+        # remain, so a deck cannot commit with an electrode missing (L-529)
+        self.skipped: List[str] = []
 
         # NB: do NOT set accepted_filetypes here. FilePond's MIME detection
         # rejects .stl (no consistent MIME type) and the drop silently fails
@@ -330,22 +329,34 @@ class StlUploadPanel:
         """Clear staged STLs from memory, wipe the upload workdir, and
         purge the solved-basis cache. Then notify the app (on_clear) so it
         can drop the committed geometry."""
-        import shutil
-        from ion_gym.io.fa_cache import clear_all
+        from ion_gym.io.fa_cache import (clear_all, CachePurgeIncomplete,
+                                         remove_tree)
         self.meshes = []
+        self.skipped = []
         self.sizing = None
         self.table.value = self._df([])
         self.preview_pane.object = None
         self.commit_btn.disabled = True
-        shutil.rmtree(self.workdir, ignore_errors=True)
+        # every failure is collected and SHOWN (L-543): this was
+        # rmtree(ignore_errors=True) plus "except Exception: 0 purged",
+        # so a purge that failed said it succeeded
+        failed = [f"{p} ({why})"
+                  for p, why in remove_tree(self.workdir).items()]
         try:
             n, freed = clear_all()
-        except Exception:
-            n, freed = 0, 0
-        self.sizing_md.object = (f"**cleared** — staged STLs dropped, "
-                                 f"workdir wiped, {n} cache entbr"
-                                 f"".replace("entbr", "entries")
-                                 + f" purged ({freed/1e6:.1f} MB freed).")
+            cache_line = f"{n} cache entries purged ({freed/1e6:.1f} MB freed)"
+        except CachePurgeIncomplete as e:
+            cache_line = (f"cache purge INCOMPLETE: {e.n_removed} entries "
+                          f"removed ({e.bytes_freed/1e6:.1f} MB), "
+                          f"{len(e.failures)} NOT removed")
+            failed += [f"{p} ({why})" for p, why in e.failures.items()]
+        if failed:
+            self.sizing_md.object = (
+                f"⚠️ **clear incomplete** — staged STLs dropped; "
+                f"{cache_line}. Could not delete: " + "; ".join(failed))
+        else:
+            self.sizing_md.object = (f"**cleared** — staged STLs dropped, "
+                                     f"workdir wiped, {cache_line}.")
         if self.on_clear:
             self.on_clear()
 
@@ -359,6 +370,7 @@ class StlUploadPanel:
 
     def _on_files(self, event):
         import base64
+        import binascii
         files = event.new or {}
         loaded, skipped = [], []
         for fn, data in files.items():
@@ -366,27 +378,37 @@ class StlUploadPanel:
                 # FileDropper may hand back text (ASCII STL) or base64
                 try:
                     data = base64.b64decode(data, validate=True)
-                except Exception:
+                except (binascii.Error, ValueError):
                     data = data.encode("utf-8", "replace")
             try:
                 loaded.append(load_mesh_bytes(fn, data))
-            except Exception as e:
-                skipped.append(f"{fn} ({e})")
+            except Exception as e:   # noqa: BLE001 -- trimesh raises many
+                # types on malformed bytes; each is REPORTED by file name
+                # and blocks Commit (self.skipped), never dropped
+                skipped.append(f"{fn} ({type(e).__name__}: {e})")
         self.meshes = loaded
+        self.skipped = skipped
         self.table.value = self._df(self.meshes)
-        if skipped:
-            self.sizing_md.object = ("⚠️ could not parse as STL: "
-                                     + "; ".join(skipped))
         self._resize()
+
+    def _skipped_md(self):
+        return ("⚠️ **could not parse as STL** (Commit is disabled until "
+                "these are fixed or removed from the drop): "
+                + "; ".join(self.skipped)) if self.skipped else ""
 
     def _resize(self):
         if not self.meshes:
             self.sizing = None
             self.commit_btn.disabled = True
+            if self.skipped:
+                self.sizing_md.object = self._skipped_md()
             return
         self.sizing = propose_sizing(self.meshes, pitch=self.pitch.value)
-        self.sizing_md.object = self.sizing.markdown()
-        self.commit_btn.disabled = False
+        # the parse-failure list SURVIVES every resize (L-529: the sizing
+        # readout overwrote it as soon as one mesh had loaded)
+        self.sizing_md.object = "\n\n".join(
+            s for s in (self._skipped_md(), self.sizing.markdown()) if s)
+        self.commit_btn.disabled = bool(self.skipped)
 
     def _voltages(self):
         df = self.table.value
@@ -401,37 +423,26 @@ class StlUploadPanel:
         you should see your assembly, correctly arranged in 3-D."""
         if not self.meshes:
             return
-        import plotly.graph_objects as go
-        trimesh = _require_trimesh()
-        palette = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e",
-                   "#17becf", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22"]
-        fig = go.Figure()
-        for i, m in enumerate(self.meshes):
-            col = palette[i % len(palette)]
-            mesh = trimesh.load(io.BytesIO(m.data), file_type="stl",
-                                force="mesh", process=True)
-            v, f = mesh.vertices, mesh.faces
-            fig.add_mesh3d(
-                x=v[:, 0], y=v[:, 1], z=v[:, 2],
-                i=f[:, 0], j=f[:, 1], k=f[:, 2],
-                color=col, opacity=0.55, name=m.name, showlegend=True,
-                flatshading=True,
-                hovertemplate=f"<b>{m.name}</b><br>x %{{x:.2f}}  "
-                              f"y %{{y:.2f}}  z %{{z:.2f}} mm"
-                              "<extra></extra>")
-        fig.update_layout(
-            height=700, margin=dict(l=0, r=0, t=24, b=0),
-            legend=dict(orientation="h", y=1.05),
-            scene=dict(aspectmode="data",
-                       xaxis_title="x [mm]", yaxis_title="y [mm]",
-                       zaxis_title="z [mm]"),
-            title=dict(text="3-D preview — colour = electrode, hover for "
-                            "name; check units & placement",
-                       font=dict(size=11)))
-        self.preview_pane.object = fig
+        # the figure is drawn by THE viz_core mesh preview (L-548)
+        from ion_gym.viz.viz_core import mesh_preview_figure
+        self.preview_pane.object = mesh_preview_figure(
+            [(m.name, parse_stl_bytes(m.data), i)
+             for i, m in enumerate(self.meshes)],
+            height=700,
+            title="3-D preview — colour = electrode, hover for name; check "
+                  "units & placement")
 
     def _on_commit(self, _=None):
+        """Commit only a deck that is whole and checked (L-529): every
+        dropped file parsed, and the overlap check RAN and found nothing.
+        It used to commit after 'except Exception: overlaps = []' -- a
+        check that failed read as a clean one -- and committed even when
+        it had just reported an interpenetration."""
         if not (self.meshes and self.sizing):
+            return
+        if self.skipped:
+            self.sizing_md.object = (self._skipped_md() + "\n\n"
+                                     + self.sizing.markdown())
             return
         dc, rf = self._voltages()
         spec = spec_from_upload(self.meshes, dc, self.sizing,
@@ -439,16 +450,23 @@ class StlUploadPanel:
                                 solve_3d=self.w_3d.value)
         try:
             overlaps = check_mask_overlaps(spec)
-        except Exception:
-            overlaps = []
+        except (ValueError, OSError, ImportError) as e:
+            self.sizing_md.object = (
+                self.sizing.markdown()
+                + f"\n\n⚠️ **not committed** — the electrode-overlap check "
+                  f"could not run ({type(e).__name__}: {e}), so the "
+                  f"geometry is unchecked.")
+            return
         if overlaps:
             msg = "; ".join(o[0] for o in overlaps)
             self.sizing_md.object = (
                 self.sizing.markdown()
-                + f"\n\n⚠️ **electrodes interpenetrate** — the voxelizer "
-                  f"refuses to build this ({msg}). This usually means the "
-                  "STLs were exported in PART frames (assembly placement "
-                  "lost). Fix placement in CAD and re-export.")
+                + f"\n\n⚠️ **not committed: electrodes interpenetrate** — "
+                  f"the voxelizer refuses to build this ({msg}). This "
+                  "usually means the STLs were exported in PART frames "
+                  "(assembly placement lost). Fix placement in CAD and "
+                  "re-export.")
+            return
         self.on_commit(spec)
 
     def panel(self):

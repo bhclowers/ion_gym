@@ -247,7 +247,7 @@ def validate_field(meta, spec):
     return key
 
 
-def load_field(path, spec, root=fa_cache.DEFAULT_ROOT):
+def load_field(path, spec, root=None):
     """Validate `path` against the CURRENT spec (hard-refuse), verify array
     integrity against the embedded manifest, reinstate the bases into the
     local disk cache under the key, and return (bases, ele) exactly as
@@ -305,7 +305,7 @@ def read_spec_from_field(path):
     return spec, meta
 
 
-def load_field_bootstrap(path, root=fa_cache.DEFAULT_ROOT):
+def load_field_bootstrap(path, root=None):
     """One-file session open: reconstruct the spec from the file itself,
     then run the UNCHANGED hard-refuse load against it.  Every integrity
     check load_field performs (manifest shapes/dtypes/content hashes,
@@ -680,17 +680,22 @@ def scan_fields(directory=None, spec=None):
 
 def _entry_spec_json(key, root=None):
     """The stored spec_json of a cache entry (latest provenance record
-    carrying one), or None."""
+    carrying one), or None when the entry has no provenance record (a
+    legacy, pre-descriptor entry). A provenance file that EXISTS but
+    cannot be read is REFUSED by name (L-537): it used to return None and
+    be counted as legacy, so a corrupt record looked like an old one."""
     import json as _json
     from pathlib import Path as _P
-    from ion_gym.io import fa_cache as _pc
-    pp = _P(root or _pc.DEFAULT_ROOT).expanduser() / key / "provenance.json"
+    pp = _P(root or paths.cache_root()).expanduser() / key / "provenance.json"
     if not pp.exists():
         return None
     try:
         recs = _json.loads(pp.read_text())
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as e:
+        raise ValueError(
+            f"cache entry {key}: provenance record {pp} is unreadable "
+            f"({type(e).__name__}: {e}) -- the entry's producing spec is "
+            f"unknown; remove the entry (Cache tab) and re-solve") from e
     for r in reversed(recs if isinstance(recs, list) else []):
         if isinstance(r, dict) and r.get("spec_json"):
             return r["spec_json"]
@@ -705,7 +710,7 @@ def resolve_cache_entry(spec, root=None):
     from ion_gym.io import fa_cache as _pc
     want = spec.to_dict()["geometry"]
     hits, legacy = [], 0
-    for e in _pc.entries(root=root or _pc.DEFAULT_ROOT):
+    for e in _pc.entries(root=root):
         sj = _entry_spec_json(e["key"], root=root)
         if sj is None:
             legacy += 1
@@ -734,12 +739,11 @@ def export_field_bundle(spec_or_key, out_dir, root=None):
     import json as _json
     import numpy as _np
     from pathlib import Path as _P
-    from ion_gym.io import fa_cache as _pc
     if isinstance(spec_or_key, str):
         key = spec_or_key
     else:
         key = resolve_cache_entry(spec_or_key, root=root)
-    src = _P(root or _pc.DEFAULT_ROOT).expanduser() / key
+    src = _P(root or paths.cache_root()).expanduser() / key
     if not src.is_dir():
         raise FileNotFoundError(
             f"export_field_bundle: cache entry {key} does not exist.")
@@ -770,15 +774,22 @@ def export_field_bundle(spec_or_key, out_dir, root=None):
     return str(npz), (str(spec_path) if spec_path else None)
 
 
-def import_field_bundle(path, spec=None):
-    """Reinstate an exported field bundle into the disk cache. If `spec`
-    is given, HARD-REFUSES unless its geometry EQUALS the bundle's
-    stored producing-spec geometry, naming every differing field — a
-    field is never reinstated for geometry it was not solved for. On
-    success the next build_run of the matching spec is a cache HIT."""
+def import_field_bundle(path, spec=None, root=None):
+    """Reinstate an exported field bundle into the disk cache under `root`
+    (default the cache root). If `spec` is given, HARD-REFUSES unless its
+    geometry EQUALS the bundle's stored producing-spec geometry, naming
+    every differing field — a field is never reinstated for geometry it
+    was not solved for. On success the next build_run of the matching
+    spec is a cache HIT.
+
+    ATOMIC (L-537): the entry is staged in a temporary directory under
+    the root, meta.json written LAST, then published by one rename -- as
+    fa_cache.store does. It used to write in place (meta.json could land
+    before the arrays) under the default root whatever `root` said, and a
+    crash left a partial entry the cache then served as complete. A
+    complete existing entry is kept; a partial leftover is replaced."""
     import numpy as _np
     from pathlib import Path as _P
-    from ion_gym.io import fa_cache as _pc
     z = _np.load(path, allow_pickle=False)
     if "__bundle_version" not in z:
         raise ValueError(
@@ -808,14 +819,44 @@ def import_field_bundle(path, spec=None):
                 f"solved for different geometry. Differing fields: "
                 f"{diff}. Refusing; load the spec JSON exported beside "
                 f"the bundle, or re-solve.")
-    dest = _P(_pc.DEFAULT_ROOT).expanduser() / key
-    dest.mkdir(parents=True, exist_ok=True)
-    n = 0
-    for k in z.files:
-        if k.startswith("arr__"):
-            _np.save(dest / f"{k[5:]}.npy", z[k]); n += 1
-        elif k.startswith("json__"):
-            (dest / f"{k[6:]}.json").write_bytes(bytes(z[k]))
-    print(f"[field import] entry {key[:8]} reinstated ({n} arrays) — "
-          f"next build of this geometry is a cache HIT")
+    import os as _os
+    import tempfile as _tf
+    from ion_gym.io.fa_cache import remove_tree, CachePurgeIncomplete
+    if "json__meta" not in z.files:
+        raise ValueError(
+            f"import_field_bundle: {path} carries no meta.json -- the "
+            f"entry's completeness marker; refusing a partial bundle")
+    base = _P(root or paths.cache_root()).expanduser()
+    dest = base / key
+    if (dest / "meta.json").exists():
+        print(f"[field import] entry {key[:8]} is already in the cache at "
+              f"{base}; kept as is")
+        return key
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = _P(_tf.mkdtemp(prefix=f".{key}.import.", dir=base))
+    try:
+        n = 0
+        for k in z.files:
+            if k.startswith("arr__"):
+                _np.save(tmp / f"{k[5:]}.npy", z[k]); n += 1
+        for k in z.files:
+            if k.startswith("json__") and k != "json__meta":
+                (tmp / f"{k[6:]}.json").write_bytes(bytes(z[k]))
+        with open(tmp / "meta.json", "wb") as fh:    # LAST: completeness
+            fh.write(bytes(z["json__meta"]))
+            fh.flush()
+            _os.fsync(fh.fileno())
+        if dest.exists():
+            # a directory without meta.json is a crash-partial leftover
+            fail = remove_tree(dest)
+            if fail:
+                raise CachePurgeIncomplete(0, 0, fail)
+            print(f"[field import] replaced a PARTIAL entry {key[:8]} "
+                  f"(no meta.json)")
+        _os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            remove_tree(tmp)
+    print(f"[field import] entry {key[:8]} reinstated ({n} arrays) under "
+          f"{base} — next build of this geometry is a cache HIT")
     return key

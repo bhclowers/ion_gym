@@ -45,7 +45,7 @@ observables to BIT-IDENTICAL, not merely tolerant.
 """
 import numpy as np
 
-ACC = 96.485          # mm/us^2 per (V/mm / Da): a = ACC * q * E / m
+from ion_gym.physics.constants import ACC  # noqa: E402  a = ACC * q * E / m
 DT = 1e-3             # us  (must match the frozen Gate-C flyer)
 
 EXIT, HIT, LOST, STUCK, PLANE = 0, 1, 2, 3, 4

@@ -39,6 +39,16 @@ from typing import Callable, Sequence, Union
 import numpy as np
 
 
+class InfeasibleCandidate(ValueError):
+    """A spec factory's refusal of a candidate that violates a DECLARED
+    constraint (a feature below the fab floor, a mirror ions punch
+    through, an empty cell). The optimizer records it at the declared
+    penalty. Every other exception from a factory is a defect and RAISES:
+    a broad ValueError catch once turned bugs in spec construction into
+    "infeasible" points that steered the search (L-536).
+    cell_board.CellBoardInfeasible subclasses this."""
+
+
 # ------------------------------------------------------------ param paths
 _TOKEN = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)(?:\[(\d+)\])?")
 
@@ -258,12 +268,13 @@ def _evaluate(base_spec, ospec, values, seed_base=None, n_repeats=None):
     for r in range(reps):
         if ospec.spec_factory is not None:
             # GEOMETRY MODE: the factory owns vector -> spec. It may
-            # REFUSE (ValueError subclass, e.g. CellBoardInfeasible);
-            # a refusal is a recorded infeasible evaluation with the
-            # declared penalty — never a crash, never a silent skip.
+            # REFUSE with InfeasibleCandidate (e.g. CellBoardInfeasible);
+            # that refusal is a recorded infeasible evaluation with the
+            # declared penalty — never a crash, never a silent skip. Any
+            # other error is a defect in the factory and propagates.
             try:
                 sp = ospec.spec_factory(values)
-            except ValueError as e:
+            except InfeasibleCandidate as e:
                 if ospec.verbose:
                     print("[optimize] infeasible candidate: "
                           + str(e)[:70])

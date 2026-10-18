@@ -1,10 +1,11 @@
 """test_ke_axis_channels.py — ke_x/ke_y/ke_z are first-class channels and
-correct in BOTH the planar (2-D) and stl3d/scene3d (3-D) recorders.
+correct in ALL THREE recorders: planar (2-D; also stl2d), r-z (tracer_rz)
+and stl3d/scene3d (3-D; also shapes3d).
 
 Per-axis KE was added as recordable optional channels. Because
-the two routes fill columns in structurally different ways (the planar
-recorder is a numba-unrolled if-chain; the 3-D recorder is a name-keyed
-dict), the same channel is written in two places — exactly the split that
+the routes fill columns in structurally different ways (the planar and
+r-z recorders are numba-unrolled if-chains; the 3-D recorder is a
+name-keyed dict), the same channel is written in three places — exactly the split that
 once shipped field components under speed's name. These gates are the
 desync guard: they check not just that the columns EXIST but that each
 carries the physically-correct value, and that the per-axis parts sum to
@@ -13,9 +14,14 @@ the recorded total.
 Gates (per route):
   G-1 NAMES: build_run's col_names == spec.column_names(), and the
       recorded array width equals the column count.
-  G-2 VALUES: ke_x == 1/2 m (vx*1e3)^2 / e (and y, z), to float tol.
+  G-2 VALUES: ke_x == 1/2 m (vx*1e3)^2 / e (and y, z), rtol KE_RTOL.
   G-3 CLOSURE: ke_x + ke_y + ke_z == ke_ev at every recorded step.
   G-4 TOTAL: ke_ev == 1/2 m (speed*1e3)^2 / e (speed self-consistent).
+
+KE_RTOL = 1e-9 (PI, 2026-10-14) with m and e from physics/constants.py:
+tight enough that a recorder on any other mass/charge constant fails
+(a 9-digit-rounded amu is off 2.05e-9; the old ported 1.6605402e-27,
+6.8e-7), loose enough that float/compiler noise (~1e-15) never does.
 """
 import _bootstrap  # noqa: F401
 
@@ -28,9 +34,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ion_gym.io.sim_spec import SimSpec
 from ion_gym.physics.sim_build import build_run, build_route
 
-KG_AMU = 1.66053906660e-27
-E_CHG = 1.602176634e-19
+from ion_gym.physics.constants import E_CHG, KG_AMU  # THE authority
 MS = 1.0e3   # mm/us -> m/s
+
+KE_RTOL = 1.0e-9     # see docstring: catches a wrong constant, not noise
 
 KE_CHANNELS = ["speed", "ke_ev", "ke_x", "ke_y", "ke_z"]
 
@@ -60,9 +67,9 @@ def _check_route(name, spec, mz_da):
     # G-2 VALUES: each per-axis KE equals 1/2 m v_i^2 / e
     def ke_of(v):
         return 0.5 * m_kg * (v * MS) ** 2 / E_CHG
-    g2 = (np.allclose(tr[:, ic["ke_x"]], ke_of(vx), rtol=1e-6, atol=1e-12)
-          and np.allclose(tr[:, ic["ke_y"]], ke_of(vy), rtol=1e-6, atol=1e-12)
-          and np.allclose(tr[:, ic["ke_z"]], ke_of(vz), rtol=1e-6, atol=1e-12))
+    g2 = (np.allclose(tr[:, ic["ke_x"]], ke_of(vx), rtol=KE_RTOL, atol=1e-12)
+          and np.allclose(tr[:, ic["ke_y"]], ke_of(vy), rtol=KE_RTOL, atol=1e-12)
+          and np.allclose(tr[:, ic["ke_z"]], ke_of(vz), rtol=KE_RTOL, atol=1e-12))
     print(f"  [{name}] G-2 ke_x/y/z == 1/2 m v_i^2/e  -> "
           f"{'PASS' if g2 else 'FAIL'}")
     ok &= g2
@@ -77,7 +84,7 @@ def _check_route(name, spec, mz_da):
 
     # G-4 TOTAL: ke_ev consistent with speed
     speed = tr[:, ic["speed"]]
-    g4 = np.allclose(tr[:, ic["ke_ev"]], ke_of(speed), rtol=1e-6, atol=1e-12)
+    g4 = np.allclose(tr[:, ic["ke_ev"]], ke_of(speed), rtol=KE_RTOL, atol=1e-12)
     # and speed == |v|
     g4 = g4 and np.allclose(speed, np.sqrt(vx**2 + vy**2 + vz**2),
                             rtol=1e-6, atol=1e-9)
@@ -94,6 +101,14 @@ def _planar_spec():
     s.source.n_ions = 3
     s.integration.record_channels = KE_CHANNELS[:]      # all five
     s.integration.t_max_us = min(getattr(s.integration, "t_max_us", 20.0), 20.0)
+    return s, s.source.mz_list[0]
+
+
+def _rz_spec():
+    s = SimSpec.from_json("examples/einzel_round_r-z.json")
+    s.source.n_ions = 2
+    s.integration.record_channels = KE_CHANNELS[:]
+    s.integration.t_max_us = min(getattr(s.integration, "t_max_us", 5.0), 5.0)
     return s, s.source.mz_list[0]
 
 
@@ -126,6 +141,11 @@ def main():
     sp, mz = _planar_spec()
     assert build_route(sp).builder == "planar", build_route(sp).builder
     ok &= _check_route("planar", sp, mz)
+
+    print("R-Z route:")
+    sr, mzr = _rz_spec()
+    assert build_route(sr).builder == "rz", build_route(sr).builder
+    ok &= _check_route("r-z", sr, mzr)
 
     print("3-D route:")
     s3, mz3 = _three_d_spec()

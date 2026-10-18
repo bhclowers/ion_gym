@@ -3,7 +3,7 @@ ion_gym.build_rz
 ----------------
 The cylindrical (r-z) native builder: a SimSpec with coords='rz' ->
 rasterized electrode masks in the z-r half-plane -> bases solved by the
-validated direct solver (solver2d.solve_laplace, exact sparse solve with
+validated direct solver (solver2d.laplace_factor, exact sparse solve with
 the correct (1/r) phi_r term and on-axis handling) -> field model +
 fly_fn. No external solver anywhere in the run path.
 
@@ -24,12 +24,12 @@ import numpy as np
 
 from ion_gym.io.sim_spec import SimSpec, OPTIONAL_CHANNELS, BASE_CHANNELS
 from ion_gym.physics.sim_build import generate_births
-from ion_gym.physics.solver2d import solve_laplace
+from ion_gym.physics.solver2d import laplace_factor
 from ion_gym.physics.ionbench import build_field_aware
 from ion_gym.physics.build_planar import (electrode_mask,        # shape rasterizer (shared)
                                           K_SIN, K_SQUARE)       # channel kinds (shared)
 from ion_gym.physics.symmetry import (verify_symmetry, verify_symmetry_shapes, reduction_summary)
-from ion_gym.physics.collision3d import (E_CHG, KG_AMU, KB, gas_mass)
+from ion_gym.physics.collision3d import (E_CHG, KG_AMU)
 from ion_gym.physics.tracer_rz import _fly_rec_full   # THE r-z tracer
 
 
@@ -53,12 +53,11 @@ def rz_is_cached(spec):
     probe is the same cheap meta.json existence check build_planar uses:
     no arrays are touched."""
     import os
-    from ion_gym.io import fa_cache
+    from ion_gym.io.paths import cache_root
     ckey = _geometry_key(spec)
     if ckey in _RZ_BASIS_CACHE:
         return True
-    return os.path.exists(os.path.join(
-        os.path.expanduser(fa_cache.DEFAULT_ROOT), ckey, "meta.json"))
+    return os.path.exists(os.path.join(cache_root(), ckey, "meta.json"))
 
 
 def _geometry_key(spec):
@@ -188,8 +187,8 @@ class RZModel:
         r_full = np.concatenate([-r[::-1], r[1:]])
         img = charge * np.concatenate([self.A[:, ::-1], self.A[:, 1:]],
                                       axis=1)
-        m_kg = mz * 1.6605402e-27
-        q_c = charge * 1.602176634e-19
+        m_kg = mz * KG_AMU
+        q_c = charge * E_CHG
         # sin channels sharing a frequency compose in QUADRATURE:
         # E(t) = sin(wt) Es + cos(wt) Ec with Es = sum cos(ph) E_k,
         # Ec = sum sin(ph) E_k, so the Dehmelt |E0|^2 = |Es|^2 + |Ec|^2
@@ -344,13 +343,18 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
         # solve one basis per electrode: that electrode at 1e4 V, all
         # other metal at 0 — the fast-adjust bases. Direct sparse solve
         # (exact; no omega/convergence concerns).
+        # FACTOR ONCE (L-439): every basis shares one matrix (same stencil,
+        # same metal union; only the boundary VALUES differ), so the LU is
+        # built once and each basis is a back-solve, as build_planar does.
+        # This re-factored per basis. Measured on a toy 4-ring deck: A,
+        # EzA and EuA bit-identical, build 4.4x faster.
+        solve = laplace_factor(metal, h, symmetry="cylindrical",
+                               edge_ghost="ghost_linear")
         bases = {}
         for idx, m in masks.items():
-            fixed = metal
             val = np.zeros((nz, nr))
             val[m] = 1e4
-            phi = solve_laplace(fixed, val, h, symmetry="cylindrical",
-                                edge_ghost="ghost_linear")
+            phi = solve(val)
             bases[idx] = phi
             if verbose:
                 print(f"basis {idx} ({g.electrodes[idx-1].name}): solved")
@@ -489,10 +493,11 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
     _, _, EzG, EuG = build_field_aware(Z_mm, U_mm, G, ele,
                                        symmetry="cylindrical")
     col = spec.collisions
+    from ion_gym.physics.collision3d import gas_kernel_scalars
     return RZModel(A, ele, EzA, EuA, EzK, EuK, ch_kind, ch_om, ch_ph,
                    ch_duty, drives, Ue[0], h,
                    col.T_k, col.P_pa, col.sigma_m2,
-                   gas_mass(col.gas) if col.enabled else 4.0, spec,
+                   gas_kernel_scalars(col)["m_gas"], spec,
                    EzG=EzG, EuG=EuG, tau_gate=tau_gate)
 
 
@@ -549,16 +554,29 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
     chans = [c for c in OPTIONAL_CHANNELS
              if c in spec.integration.record_channels]
     col_names = BASE_CHANNELS + chans
-    # default mass (mz_list[0]); the actual per-ion mass/accel are chosen
-    # inside fly_fn so a single run can mix species.
-    spec.source.mz_list[0]
+    # the per-ion mass/accel are chosen inside fly_fn so a single run can
+    # mix species (an empty mz_list is refused by SimSpec.validate)
+    # GAS through the one authority (A4, L-531): the same scalars every
+    # route takes; vacuum gives P = 0 (collisionless) and inert thermal
+    # placeholders. Values are identical to the old inline derivation,
+    # so hard-sphere flights are bit-identical.
+    from ion_gym.physics.collision3d import gas_kernel_scalars
+    from ion_gym.physics.sds import (sds_active, sds_ion_params,
+                                     load_tables, blank_collision_channel)
     col = spec.collisions
-    mg = model.m_gas
-    T = col.T_k if col.enabled else 298.0
-    c_star = math.sqrt(2 * KB * T / (mg * KG_AMU)) / 1000.0
-    c_bar = math.sqrt(8 * KB * T / (math.pi * mg * KG_AMU)) / 1000.0
-    sig1d = math.sqrt(KB * T / (mg * KG_AMU)) / 1000.0
-    P = col.P_pa if col.enabled else 0.0     # P=0 -> collisionless
+    g = gas_kernel_scalars(col)
+    mg, T, P = g["m_gas"], g["T_k"], g["P_pa"]
+    c_star, c_bar, sig1d = g["c_star"], g["c_bar"], g["sig1d"]
+    # SDS on r-z (L-519; PI 2026-10-14: implemented, not refused).
+    # sds_active refuses an unknown model name.
+    sds_on = sds_active(col)
+    sds_stats = (load_tables()[0] if sds_on
+                 else np.zeros((5, 1002)))   # typed placeholder, unread
+    # the declared gas flow (mm/us, x axial on this route) for HS AND SDS:
+    # it reached the kernel only under SDS, so hard-sphere r-z flew a
+    # declared flow as still gas (L-563, PI ruling 2026-10-16: modelled)
+    from ion_gym.physics.collision3d import gas_flow
+    vg = list(gas_flow(col))
     ee = np.concatenate([model.ele[:, :0:-1], model.ele],
                         axis=1).astype(np.float64)
     # r-z tracer flag order == rz_channels order (13 flags; the tuple is
@@ -618,12 +636,20 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
 
     def fly_fn(i):
         b = births[i]
-        from ion_gym.physics.raster2d import (refuse_birth_in_metal)
+        from ion_gym.physics.raster2d import (refuse_birth_in_metal,
+                                              BirthInMetal)
         _r = math.hypot(b[1], b[2])
-        refuse_birth_in_metal(
-            model.ele, b[0] / model.mm_per_gu, _r / model.mm_per_gu,
-            model.mm_per_gu, spec, i,
-            f"(x={b[0]:.3f}, r={_r:.3f}) mm")
+        try:
+            refuse_birth_in_metal(
+                model.ele, b[0] / model.mm_per_gu, _r / model.mm_per_gu,
+                model.mm_per_gu, spec, i,
+                f"(x={b[0]:.3f}, r={_r:.3f}) mm")
+        except BirthInMetal as e:
+            # splat at birth + warning; the other ions fly (the one rule,
+            # ion_envelope.birth_splat). r-z flies the authored frame.
+            from ion_gym.physics.ion_envelope import per_ion, birth_splat
+            return birth_splat(e, col_names=col_names, birth=b,
+                               mz=per_ion(spec, i).mz, label=f"ion {i}")
         # per-ion mass + seed from THE envelope:
         # one derivation for every route — mz via mz_of (contiguous
         # blocks, matching births) and
@@ -633,6 +659,14 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
         env = per_ion(spec, i)
         m_i = env.mz
         acc_i = q_e * E_CHG / (m_i * KG_AMU)
+        # SDS per ion: this ion's mass and real charge (ion_params damps
+        # with abs(z); the force above carries the sign)
+        if sds_on:
+            _sp = sds_ion_params(col, m_i, q_e)
+            _sds = (_sp["damping"], _sp["mfp_mm"], _sp["V_mm_us"],
+                    _sp["log_mr_ratio"])
+        else:
+            _sds = (0.0, 0.0, 0.0, 0.0)
         # Size the record buffer to the ACTUAL number of records the run
         # will produce (t_max / dt / rec_every) + margin, capped for memory.
         # A fixed buffer truncated the trajectory when it filled, and the
@@ -651,11 +685,16 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
             _TAB_T0, _TAB_V0, _tab_off0(model),
             model.EzG, model.EuG, model.tau_gate, ee, model.u0,
             model.mm_per_gu, acc_i, dt,
-            spec.integration.t_max_us, T, P, model.sigma_m2, c_star,
-            c_bar, sig1d, mg, rec, spec.integration.rec_every,
+            spec.integration.t_max_us, T, P, g["sigma_m2"], c_star,
+            c_bar, sig1d, mg,
+            sds_on, *_sds, sds_stats, vg[0], vg[1], vg[2],
+            rec, spec.integration.rec_every,
             env.seed, *f13, bnd_on, bnd_val,
             pl_col, pl_val, pl_sgn, pl_w, pl_kind)
         traj = rec[:n].copy()
+        if sds_on:
+            # the collision-count rule (sds.SDS_NO_COLLISION_COUNT)
+            blank_collision_channel(traj, col_names)
         # Honor declared downstream bounds/stations by exact
         # ballistic algebra when the flight left the solved domain.
         # Escape-face classification mirrors the kernel's own
@@ -687,7 +726,8 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
             kind=kind, tof=float(end["t"]), mz=env.mz,
             x_end=float(end["x"]), y_end=float(end["y"]),
             z_end=float(end["z"]),
-            r_end=float(math.hypot(end["y"], end["z"])), n_col=ncol)
+            r_end=float(math.hypot(end["y"], end["z"])),
+            n_col=None if sds_on else ncol)
         return traj, summary
     return fly_fn, col_names
 
@@ -714,6 +754,11 @@ def rz_fly_fields(model: "RZModel", spec: SimSpec):
     authority that drifts from the first, and the drift would be silent:
     a stage flown at the wrong pressure still completes and still
     reports a plausible number.
+
+    CHARGE IS NOT IN THIS PACK either, for the same reason: it is the
+    ion's, and `Region.charge` carries it on every route (this pack once
+    held it, read with a silent default of 1, while the planar and 3-D
+    packs had none).
     """
     return dict(
         route="rz",
@@ -725,7 +770,6 @@ def rz_fly_fields(model: "RZModel", spec: SimSpec):
         ele=np.concatenate([model.ele[:, :0:-1], model.ele],
                            axis=1).astype(np.float64),
         u0=model.u0, h_mm=model.mm_per_gu,
-        charge=int(spec.source.charge),
     )
 
 

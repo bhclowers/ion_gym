@@ -129,8 +129,13 @@ def _xdeck() -> dict:
                          "extrude": dict(ex)}]},
                 ]},
             ]},
+        # R2 (2026-10-15): physics keys stated, at the values this
+        # fixture flew with as defaults before missing ones refused
         "source": {"x0_mm": 0.5, "y0_mm": 0.5, "z0_mm": 0.5,
-                   "mz_list": [100.0], "n_ions": 1},
+                   "mz_list": [100.0], "n_ions": 1, "distribution": "disc",
+                   "r_mm": 4.0, "ke_lo": 0.1, "ke_hi": 1.9,
+                   "tob_span_us": 2.0},
+        "integration": {"dt_ns": 1.0, "t_max_us": 400.0},
     }
 
 

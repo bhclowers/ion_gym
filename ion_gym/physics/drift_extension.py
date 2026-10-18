@@ -36,7 +36,12 @@ WHAT IT DELIBERATELY DOES NOT DO: extend to t_max for its own sake.
 The extension honors DECLARATIONS. With a reachable enabled bound the
 drift ends exactly ON the bound plane (kind becomes 3 -- and note this
 endpoint is exact, where the kernel's own bound crossing overshoots by
-up to one step). With only stations declared, the drift ends at the
+up to one step). A TERMINATING station on the ray -- an impact_plane
+crossed outside its window, a detect+splat patch crossed inside it --
+ends the drift ON that plane with its fate (5 / 6), nearest first and
+ahead of any bound, exactly as the kernels treat it inside the domain
+(stations.station_terminates holds the window rule). With only
+pass stations declared, the drift ends at the
 furthest reachable station crossing and the fate stays kind = 1: the
 ion did leave the solved domain; the appended record exists so the
 declared observations are honored, not to simulate empty space. A deck
@@ -77,7 +82,7 @@ _CHANNEL_RULES = {
 }
 
 
-def edge_field_max(components, axis, side):
+def edge_field_max(components, axis, side, inset=0):
     """Conservative max |E| (V/mm) over one boundary face of a solved
     field pack.
 
@@ -85,7 +90,12 @@ def edge_field_max(components, axis, side):
     of (array, weight) pairs whose worst-case magnitude is
     sum(|weight * array|) -- the drive-channel bound. `axis` 0/1(/2)
     selects the array axis of the face, `side` "lo"/"hi" the face.
-    Returns the max over face nodes of the component-wise norm.
+    `inset` reads that many node rows inside the face: the planar
+    gradient (build_planar._grad2d) computes interior nodes only and
+    leaves the boundary row exactly zero, so a planar face read at
+    inset 0 always measured 0 and the hot-edge guard could never fire
+    (L-286, measured: an RF quad reads 0 on row 0 and up to 29 V/mm on
+    row 1). Returns the max over face nodes of the component-wise norm.
     """
     acc = None
     for comp in components:
@@ -93,7 +103,7 @@ def edge_field_max(components, axis, side):
         for arr, w in comp:
             a = np.asarray(arr, float)
             sl = [slice(None)] * a.ndim
-            sl[axis] = 0 if side == "lo" else -1
+            sl[axis] = int(inset) if side == "lo" else -1 - int(inset)
             face = np.abs(float(w) * a[tuple(sl)])
             mag = face if mag is None else mag + face
         if mag is None:
@@ -188,6 +198,13 @@ def extend_ballistic(traj, col_names, kind, spec, *,
         if crosses and dt < tb:
             tb, bface = dt, k
     st_dts = []
+    # TERMINATING stations on the ray (L-286 + the L-435 contract): an
+    # impact_plane crossed outside its window, or a detect+splat patch
+    # crossed inside it, ENDS the drift on that plane with its fate, as
+    # the kernels do inside the domain -- a wall downstream of the solved
+    # domain used to be drifted straight through.
+    from ion_gym.physics.stations import station_terminates
+    ts, ts_kind = math.inf, None
     _ax = {"x": 0, "y": 1, "z": 2}
     for st in (spec.stations or []):
         a = _ax.get(st.axis)
@@ -196,8 +213,12 @@ def extend_ballistic(traj, col_names, kind, spec, *,
         dt = (float(st.pos_mm) - pos[a]) / vel[a]
         if dt > 1e-12:
             st_dts.append(dt)
+            fate = station_terminates(st, pos + vel * dt)
+            if fate is not None and dt < ts:
+                ts, ts_kind = dt, fate
 
     bound_reachable = tb <= budget
+    term_reachable = ts <= min(tb, budget)
     st_reachable = [d for d in st_dts if d <= min(tb, budget)]
     if not bound_reachable and not st_reachable:
         return traj, kind, None            # nothing declared is reachable
@@ -222,7 +243,9 @@ def extend_ballistic(traj, col_names, kind, spec, *,
             f"edge means the deck's fringe has not decayed there. Pad "
             f"the domain until it does.")
 
-    if bound_reachable:
+    if term_reachable:
+        dt_end, kind_out, bface = ts, ts_kind, None
+    elif bound_reachable:
         dt_end, kind_out = tb, 3
     else:
         dt_end, kind_out = max(st_reachable), kind
@@ -262,3 +285,105 @@ def extend_ballistic(traj, col_names, kind, spec, *,
     return np.vstack([traj, row[None, :]]), kind_out, {
         "dt_us": float(dt_end), "bnd_face": bface,
         "end_mm": tuple(float(v) for v in end)}
+
+
+# ---------------------------------------------------------------------
+# Route-tagged FIELD PACKS (the staged-assembly packs, and the 3-D
+# single-stage pack, which is the same dict): the escape face and the
+# residual edge field, so the 3-D route and a staged final region can
+# use extend_ballistic (L-286). The weighting rules are the ones the
+# single-stage planar and r-z hooks apply to their models; the 3-D rule
+# follows tracer3d._wave_eval, w = amp*base + off.
+
+def _w3d_max(fields, k):
+    """Worst-case |w| of 3-D drive channel k: |amp| * max|base| + |off|,
+    max|base| = 1 for sin/cos/square, the slice's max |value| for a table
+    (tracer3d._wave_eval)."""
+    kind = int(fields["ch_kind"][k])
+    if kind in (3, 4):
+        o0, o1 = int(fields["tab_off"][k]), int(fields["tab_off"][k + 1])
+        tv = np.asarray(fields["tab_v"], float)[o0:o1]
+        base = float(np.max(np.abs(tv))) if tv.size else 0.0
+    else:
+        base = 1.0
+    return (abs(float(fields["ch_amp"][k])) * base
+            + abs(float(fields["ch_off"][k])))
+
+
+def pack_edge_fields(fields):
+    """{face_key: worst-case residual |E| on that face, V/mm} for a
+    route-tagged pack. Faces are those the route can escape through:
+    3d x/y/z lo+hi; planar x/y lo+hi (z is the drift axis); rz the axial
+    ends and the radial edge."""
+    route = fields.get("route")
+    if route == "3d":
+        comps = []
+        for a, ka in (("EAx", "ExK"), ("EAy", "EyK"), ("EAz", "EzK")):
+            K = fields[ka]
+            comps.append([(fields[a], 1.0)]
+                         + [(K[k], _w3d_max(fields, k))
+                            for k in range(K.shape[0])])
+        return {f"{ax}_{s}": edge_field_max(comps, i, s)
+                for i, ax in enumerate("xyz") for s in ("lo", "hi")}
+    if route == "planar":
+        tv = np.asarray(fields["tab_v"], float)
+        tmax = float(np.max(np.abs(tv))) if tv.size else 1.0
+        w = [(tmax if int(k) in (3, 4) else 1.0) for k in fields["ch_kind"]]
+        cx = [(fields["ExA"], 1.0)] + [(fields["ExK"][k], w[k])
+                                       for k in range(fields["ExK"].shape[0])]
+        cy = [(fields["EyA"], 1.0)] + [(fields["EyK"][k], w[k])
+                                       for k in range(fields["EyK"].shape[0])]
+        # planar basis arrays are V/m (build_planar's own hook converts
+        # the same way), and their boundary row is zero by construction,
+        # so the face is read one row in (edge_field_max's `inset`)
+        return {f"{ax}_{s}": 1e-3 * edge_field_max([cx, cy], i, s, inset=1)
+                for i, ax in enumerate("xy") for s in ("lo", "hi")}
+    if route == "rz":
+        cz = ([(fields["EzA"], 1.0)]
+              + [(fields["EzK"][k], 1.0) for k in range(fields["EzK"].shape[0])]
+              + [(fields["EzG"], 1.0)])
+        cu = ([(fields["EuA"], 1.0)]
+              + [(fields["EuK"][k], 1.0) for k in range(fields["EuK"].shape[0])]
+              + [(fields["EuG"], 1.0)])
+        # V/m, as build_rz's own hook converts
+        return {"x_lo": 1e-3 * edge_field_max([cz, cu], 0, "lo"),
+                "x_hi": 1e-3 * edge_field_max([cz, cu], 0, "hi"),
+                "r_hi": 1e-3 * edge_field_max([cz, cu], 1, "hi")}
+    raise ValueError(f"pack_edge_fields: pack route {route!r} is not "
+                     f"'3d', 'planar' or 'rz'")
+
+
+def pack_escape_face(fields, p_kernel):
+    """(face_key, face_axis, face_side, words) for an ion that LEFT the
+    pack's solved domain at kernel-frame point p_kernel (x, y, z mm). The
+    face is the one it is furthest outside, which is the one it crossed
+    on its last step."""
+    route = fields.get("route")
+    h = float(fields["h_mm"])
+    p = [float(v) for v in p_kernel]
+    if route == "rz":
+        nx = int(np.asarray(fields["EzA"]).shape[0])
+        if p[0] < 0.0:
+            return "x_lo", 0, "lo", "x low (axial entrance)"
+        if p[0] > (nx - 1) * h:
+            return "x_hi", 0, "hi", "x high (axial exit)"
+        return "r_hi", 1, "hi", "radial edge"
+    if route == "3d":
+        shape, axes = np.asarray(fields["EAx"]).shape, "xyz"
+    elif route == "planar":
+        shape, axes = np.asarray(fields["ExA"]).shape, "xy"
+    else:
+        raise ValueError(f"pack_escape_face: pack route {route!r} is not "
+                         f"'3d', 'planar' or 'rz'")
+    best, out = 0.0, None
+    for i, ax in enumerate(axes):
+        hi = (shape[i] - 1) * h
+        for side, d in (("lo", -p[i]), ("hi", p[i] - hi)):
+            if d > best:
+                best, out = d, (f"{ax}_{side}", i, side, f"{ax} {side}")
+    if out is None:
+        raise ValueError(
+            f"pack_escape_face: point {p} is inside the {route} pack's "
+            f"domain; an escape face cannot be named for an ion that did "
+            f"not leave it")
+    return out

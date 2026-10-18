@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 
-KB = 1.380649e-23          # J/K (CODATA, same constant collision3d uses)
-AMU_KG = 1.66053906660e-27
+from ion_gym.physics.constants import K_B as KB, KG_AMU as AMU_KG  # J/K, kg/Da
+
 MM_US_TO_M_S = 1e3         # recorded velocities are mm/us
 
 

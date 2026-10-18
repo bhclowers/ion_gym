@@ -37,7 +37,7 @@ schema has no heavy dependencies and can be edited/inspected anywhere.
 
 import json
 import math
-from dataclasses import dataclass, field, asdict, fields
+from dataclasses import dataclass, field, asdict, fields, MISSING
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -92,12 +92,92 @@ BASE_CHANNELS = ["t", "x", "y", "z", "vx", "vy", "vz"]
 
 
 # --------------------------------------------------------------- geometry
-def _take_known(cls, d):
+class MissingPhysicsKey(ValueError):
+    """A deck leaves out a key that sets the physics and whose default is
+    one deck's operating point (R2, PI ruling 2026-10-15)."""
+
+
+# ELECTRODE LIMIT (L-538, PI ruling 2026-10-15: "keep it as is right now
+# for 255 ... if someone tries to load more than 255 electrodes, then
+# refuse with a message to contact the developer"). The solved-field
+# cache stores electrode labels in 8 bits (basis_cache, uint8), so label
+# 256 would wrap to 0 silently; the largest deck in the tree has 140.
+MAX_ELECTRODES = 255
+
+# THE source distributions (validate and sim_build.generate_births both read
+# this; a distribution added in one place and not the other is refused, not
+# silently born as a point source -- L-554).
+SOURCE_DISTRIBUTIONS = ("point", "disc", "line", "grid", "box", "gaussian",
+                        "file")
+
+
+def electrode_limit_error(n):
+    """The refusal text for a deck with n electrodes, or None when n fits.
+    ONE message, used at load, in validate and by the cache store."""
+    if n <= MAX_ELECTRODES:
+        return None
+    return (f"this deck has {n} electrodes; ion_gym supports at most "
+            f"{MAX_ELECTRODES} (the solved-field cache stores electrode "
+            f"labels in 8 bits, so more would be mislabelled). Please "
+            f"contact the ion_gym developer to raise the limit.")
+
+
+_NO_DEFAULT = object()
+
+
+def _field_default(cls, name):
+    for f in fields(cls):
+        if f.name == name:
+            if f.default is not MISSING:
+                return f.default
+            if f.default_factory is not MISSING:
+                return f.default_factory()
+    return _NO_DEFAULT
+
+
+def _check_missing(cls, d):
+    """MISSING-KEY ACCOUNTING (R2, PI ruling 2026-10-15: "split between
+    physics and cosmetic"). Each spec class declares two tiers; one rule
+    enforces them for every block:
+      cls._load_required(d) -- keys that SET THE PHYSICS and whose
+          dataclass default is one deck's operating point (m/z 556, KE
+          0.1-1.9 eV, 500 kHz / 50 V ...). Missing -> REFUSED by name.
+      cls._LOAD_ANNOUNCE -- COSMETIC keys (display, recording density).
+          Missing -> loaded at the default and ANNOUNCED by name.
+    Every other key has a NEUTRAL default (zero, off, unlimited, the
+    convention) and loads silently: a feature left out is a feature off,
+    the same reading as "no collisions block = vacuum" (R3 Q1)."""
+    req = [k for k in cls._load_required(d) if k not in d]
+    if req:
+        def _one(k):
+            v = _field_default(cls, k)
+            return k if v is _NO_DEFAULT else f"{k} (default {v!r})"
+        shown = ", ".join(_one(k) for k in req)
+        raise MissingPhysicsKey(
+            f"{cls.__name__}: the deck does not state {shown}. These set "
+            f"the physics, and the defaults are one deck's operating "
+            f"point, not a neutral value -- state them in the deck.")
+    ann = [k for k in cls._LOAD_ANNOUNCE if k not in d]
+    if ann:
+        import warnings
+        warnings.warn(
+            f"{cls.__name__}: cosmetic key(s) not in the deck, loaded at "
+            f"their defaults: "
+            + ", ".join(f"{k}={_field_default(cls, k)!r}" for k in ann),
+            stacklevel=4)
+
+
+def _take_known(cls, d, checked=False):
     """LOUD LOAD: unknown keys in a spec dict are WARNED about, never
     silently dropped — the silent filter is exactly how a legacy
     'dt_us' key ran an example at the 1.0 ns default while its author
     believed 2.0 was in force. Loading still succeeds (foreign metadata
-    is tolerated), but loudly and by name."""
+    is tolerated), but loudly and by name. MISSING keys are accounted
+    for by _check_missing (refused or announced per the class's tiers);
+    checked=True when the caller already ran it on the AUTHORED dict,
+    before filling in keys of its own."""
+    if not checked:
+        _check_missing(cls, d)
     known = {f.name for f in fields(cls)}
     unknown = sorted(k for k in d if k not in known)
     if unknown:
@@ -156,6 +236,13 @@ class _StrictAttrs:
     SourceSpec._drawn_seed (the seed actually drawn in random mode)."""
 
     _RUNTIME_ATTRS: frozenset = frozenset({"_extras"})
+    # Missing-key tiers (R2; see _check_missing). Default: nothing is
+    # refused and nothing announced -- a class opts keys in.
+    _LOAD_ANNOUNCE: tuple = ()
+
+    @classmethod
+    def _load_required(cls, d):
+        return ()
 
     def __init_subclass__(cls, **kw):
         # SAVE-SIDE PASSTHROUGH (collision
@@ -214,6 +301,73 @@ class _StrictAttrs:
 #   consumers: viz_core._CYCLIC (aliased), ion_gym.edit (viewer frame).
 EXTRUDE_INPLANE_AXES = {"x": ("y", "z"), "y": ("z", "x"),
                         "z": ("x", "y")}
+
+
+# ONE SHAPE-OFFSET AUTHORITY (L-527), for every shape kind the
+# rasterizer draws (raster2d._shape_mask: rect, ellipse, polygon; a
+# cutout subtracts its child). It lived in the editor (edit.outline.
+# shift_shape, which now delegates here); the assembly flatten shifted
+# only x_mm/y_mm, so an ellipse or polygon unit stayed at its own origin.
+def shift_shape_dict(shape: dict, dx: float = 0.0, dy: float = 0.0,
+                     dz: float = 0.0) -> dict:
+    """A COPY of a shape dict (ShapeSpec.to_dict form) translated by
+    (dx, dy) in its own plane and dz along its extrude axis. A kind with
+    no shift rule is refused by name -- never passed through unmoved."""
+    import copy as _copy
+    out = _copy.deepcopy(shape)
+    t = out.get("type")
+    if t == "rect":
+        out["x_mm"] = float(out["x_mm"]) + dx
+        out["y_mm"] = float(out["y_mm"]) + dy
+    elif t == "ellipse":
+        out["cx_mm"] = float(out["cx_mm"]) + dx
+        out["cy_mm"] = float(out["cy_mm"]) + dy
+    elif t == "polygon":
+        out["points_mm"] = [[float(a) + dx, float(b) + dy]
+                            for a, b in out["points_mm"]]
+    elif t == "cutout":
+        out["children"] = [shift_shape_dict(k, dx, dy, dz)
+                           for k in (out.get("children") or [])]
+        return out
+    else:
+        raise ValueError(f"no shift rule for shape type {t!r} (known: "
+                         f"rect, ellipse, polygon, cutout)")
+    ex = out.get("extrude")
+    if isinstance(ex, dict) and dz:
+        ex["lo_mm"] = float(ex["lo_mm"]) + dz
+        ex["hi_mm"] = float(ex["hi_mm"]) + dz
+    return out
+
+
+def shape_metal_bounds_mm(shape: dict):
+    """In-plane (x_lo, x_hi, y_lo, y_hi) of the METAL a shape adds, or None
+    for a cutout (it only removes metal). Rects rotate about their centre
+    exactly as raster2d._rect_mask does. A kind with no rule is refused."""
+    t = shape.get("type")
+    if t == "rect":
+        x0, y0 = float(shape["x_mm"]), float(shape["y_mm"])
+        w, h = float(shape["width_mm"]), float(shape["height_mm"])
+        rot = math.radians(float(shape.get("rotation_deg", 0.0) or 0.0))
+        cx, cy = x0 + w / 2.0, y0 + h / 2.0
+        ca, sa = math.cos(rot), math.sin(rot)
+        xs, ys = [], []
+        for px, py in ((x0, y0), (x0 + w, y0), (x0, y0 + h),
+                       (x0 + w, y0 + h)):
+            xs.append(cx + (px - cx) * ca - (py - cy) * sa)
+            ys.append(cy + (px - cx) * sa + (py - cy) * ca)
+        return min(xs), max(xs), min(ys), max(ys)
+    if t == "ellipse":
+        cx, cy = float(shape["cx_mm"]), float(shape["cy_mm"])
+        rx, ry = float(shape["rx_mm"]), float(shape["ry_mm"])
+        return cx - rx, cx + rx, cy - ry, cy + ry
+    if t == "polygon":
+        pts = [(float(a), float(b)) for a, b in shape["points_mm"]]
+        return (min(p[0] for p in pts), max(p[0] for p in pts),
+                min(p[1] for p in pts), max(p[1] for p in pts))
+    if t == "cutout":
+        return None
+    raise ValueError(f"no bounds rule for shape type {t!r} (known: rect, "
+                     f"ellipse, polygon, cutout)")
 
 
 @dataclass
@@ -383,6 +537,15 @@ class RFGroupSpec(_StrictAttrs):
     interp: str = "hold"           # tables: 'hold' | 'linear'
     pe_mode: str = None            # None | 'pseudo' | 'instant'
 
+    @classmethod
+    def _load_required(cls, d):
+        # R2: the drive's size and rate are one deck's operating point
+        # (50 V / 500 kHz). A table waveform takes its timing from its
+        # breakpoints, so it has no frequency to state.
+        if d.get("waveform", "sin") == "table":
+            return ("amplitude_v",)
+        return ("amplitude_v", "frequency_hz")
+
     def resolved_pe_mode(self):
         if self.pe_mode in ("pseudo", "instant"):
             return self.pe_mode
@@ -491,13 +654,18 @@ def retune_travelling_wave(spec, *, amplitude_v=None, frequency_hz=None,
             "the ladder first with build_travelling_wave".format(prefix))
     # creation order = trailing integer (TW0, TW1, ...): the phase index,
     # so re-stepping matches travelling_wave_groups' k*step convention.
+    # A suffix that is not an integer has no phase index: refused by name
+    # (it used to sort as 0, silently re-phasing that group -- L-556).
     def _k(gr):
         tail = gr.name[len(prefix):]
-        return int(tail) if tail.isdigit() else 0
+        if not tail.isdigit():
+            raise ValueError(
+                f"retune_travelling_wave: group {gr.name!r} matches prefix "
+                f"{prefix!r} but its suffix {tail!r} is not an integer "
+                f"phase index (TW0, TW1, ...)")
+        return int(tail)
     tw_sorted = sorted(tw, key=_k)
-    len(tw_sorted)
-    step = (phase_step_deg if phase_step_deg is not None
-            else None)
+    step = phase_step_deg
     for k, gr in enumerate(tw_sorted):
         if amplitude_v is not None:
             gr.amplitude_v = float(amplitude_v)
@@ -674,8 +842,10 @@ class DCGroupSpec(_StrictAttrs):
 
     @classmethod
     def from_dict(cls, d):
-        return cls(**{k: v for k, v in (d or {}).items()
-                      if k in cls.__dataclass_fields__})
+        # Through the one key-accounting door (L-525): this filtered on
+        # __dataclass_fields__, so a misspelled 'v_inn' loaded as v_in =
+        # 0.0 with no warning.
+        return _take_known(cls, dict(d or {}))
 
 
 def dc_group_member_values(grp, mem):
@@ -812,6 +982,8 @@ class ElectrodeSpec(_StrictAttrs):
     def is_rf(self):
         return bool(self.group_names())
 
+    _LOAD_ANNOUNCE = ("color",)          # R2: display only
+
     def to_dict(self):
         d = asdict(self)
         d["shapes"] = [s.to_dict() for s in self.shapes]
@@ -819,6 +991,7 @@ class ElectrodeSpec(_StrictAttrs):
 
     @classmethod
     def from_dict(cls, d):
+        _check_missing(cls, d)
         d = dict(d)
         d["shapes"] = [ShapeSpec.from_dict(s) for s in d.get("shapes", [])]
         # LEGACY FOLD (clean drive model): singular rf_group ->
@@ -836,7 +1009,7 @@ class ElectrodeSpec(_StrictAttrs):
         # so they must not trip the loud unknown-key warning
         d.pop("rf_group", None)
         d.pop("rf_phase_deg", None)
-        return _take_known(cls, d)
+        return _take_known(cls, d, checked=True)
 
 
 # RESOLUTION ADVISORY THRESHOLD, in CELLS.
@@ -1041,31 +1214,11 @@ class GeometrySpec(_StrictAttrs):
     def coords(self):
         return self.symmetry.coords
 
-    def _group_map(self):
-        return {g.name: g for g in self.rf_groups}
-
-    def electrode_rf(self, el):
-        """Effective (amplitude_v, frequency_hz, phase_deg) for an
-        electrode: from its named rf_group if set, else its legacy
-        per-electrode RF fields, else zeros (DC-only)."""
-        names = el.group_names()
-        if names:
-            g = self._group_map().get(names[0])
-            if g is not None:
-                return g.amplitude_v, g.frequency_hz, g.phase_deg
-        return 0.0, 0.0, 0.0
-
-    def electrode_drive(self, el):
-        """Full drive-group resolution: the electrode's RFGroupSpec (from
-        its named rf_group), or a synthesized sin group for legacy
-        per-electrode RF fields, or None (DC-only). Unlike electrode_rf
-        this carries the waveform/table/pe_mode — the general drive."""
-        names = el.group_names()
-        if names:
-            g = self._group_map().get(names[0])
-            if g is not None:
-                return g
-        return None
+    # (electrode_rf / electrode_drive and their _group_map helper removed
+    # 2026-10-15, L-556: no
+    # callers, a docstring describing retired per-electrode RF fields, and
+    # both read only an electrode's FIRST group -- wrong for multi-group
+    # electrodes. Drives are composed from every group by the builders.)
 
     def to_dict(self):
         d = asdict(self)
@@ -1087,7 +1240,17 @@ class GeometrySpec(_StrictAttrs):
         return d
 
     @classmethod
+    def _load_required(cls, d):
+        # R2: the pitch sets the solved grid; 0.1 mm/gu is one deck's
+        # resolution, not a neutral value.
+        return ("mm_per_gu",)
+
+    @classmethod
     def from_dict(cls, d):
+        _check_missing(cls, d)
+        _lim = electrode_limit_error(len(d.get("electrodes", []) or []))
+        if _lim:
+            raise ValueError(_lim)          # refused at LOAD (L-538)
         d = dict(d)
         d["electrodes"] = [ElectrodeSpec.from_dict(e)
                            for e in d.get("electrodes", [])]
@@ -1102,7 +1265,7 @@ class GeometrySpec(_StrictAttrs):
             d["symmetry"] = SymmetrySpec(coords=coords)
         else:
             d["symmetry"] = SymmetrySpec.from_dict(sym)
-        return _take_known(cls, d)
+        return _take_known(cls, d, checked=True)
 
 
 # ----------------------------------------------------------------- source
@@ -1249,6 +1412,28 @@ class SourceSpec(_StrictAttrs):
                     f"spread that does not exist; set it to 0.")
         return sig, t
 
+    # R2 (PI ruling 2026-10-15): the size of the distribution IN USE is
+    # physics; the others are never read.
+    _SIZE_KEY = {"disc": "r_mm", "grid": "r_mm", "line": "len_mm",
+                 "box": "box_mm"}
+
+    @classmethod
+    def _load_required(cls, d):
+        """Keys whose defaults are one deck's operating point (the funnel
+        ion m/z 556, KE 0.1-1.9 eV, a 2 us birth span, x0 = 1 mm, a
+        4 mm disc): the deck must state the ones its distribution
+        reads. A births file carries positions and velocities itself."""
+        req = ["distribution", "n_ions", "mz_list"]
+        dist = d.get("distribution")
+        if dist == "file":
+            return req
+        req += ["x0_mm", "y0_mm", "z0_mm", "tob_span_us"]
+        if not float(d.get("temperature_k") or 0.0) > 0.0:
+            req += ["ke_lo", "ke_hi"]     # thermal births ignore ke_*
+        if dist in cls._SIZE_KEY:
+            req.append(cls._SIZE_KEY[dist])
+        return req
+
     def to_dict(self):
         return asdict(self)
 
@@ -1258,21 +1443,55 @@ class SourceSpec(_StrictAttrs):
 
 
 # ------------------------------------------------------------- collisions
-TORR_PA = 133.32236842105263          # 1 Torr in Pa (exact-ish, 101325/760)
+from ion_gym.physics.constants import TORR_PA  # noqa: E402  (101325/760, exact)
+
+# R2b (PI ruling 2026-10-15). One fixed text, so Python's warning filter
+# shows it once per call site rather than once per deck in a sweep.
+_P_PA_DEPRECATED = (
+    "collisions.P_pa is deprecated: pressure is authored in Torr "
+    "(P_torr). P_pa is derived from P_torr and is no longer saved; "
+    "re-save the deck to drop it.")
+
+
+# Two authored pressures closer than this (relative) are the SAME number
+# to float rounding (a Torr <-> Pa round trip), not a disagreement.
+_PA_SAME_NUMBER_REL = 1e-12
+
+
+def _warn_pa_disagrees(p_torr, p_pa):
+    """Both pressures authored: Torr wins. A Pa value that disagrees is
+    named and ignored, never silently."""
+    derived = float(p_torr) * TORR_PA
+    if abs(derived - float(p_pa)) > _PA_SAME_NUMBER_REL * abs(derived):
+        import warnings
+        warnings.warn(
+            f"collisions: P_torr = {float(p_torr):.12g} Torr "
+            f"({derived:.12g} Pa) and P_pa = {float(p_pa):.12g} Pa disagree. "
+            f"Torr is canonical: flying {float(p_torr):g} Torr, P_pa "
+            f"ignored.", stacklevel=4)
 
 
 @dataclass
 class CollisionSpec(_StrictAttrs):
     """HS buffer gas. enabled=false -> vacuum (reflectron/TOF).
 
-    Pressure is authored in TORR (P_torr) — the working unit for this lab and
-    for the SDS diffusion model. P_pa is derived from it for the kernel; if a legacy spec
-    supplies only P_pa, it is honored and P_torr back-filled. Set exactly one."""
+    PRESSURE IS TORR (PI ruling R2b, 2026-10-15: "Make torr canonical.
+    Warn that P_pa is deprecated."). P_torr is the one stored value;
+    P_pa is DERIVED from it (the kernels take Pa) and is never written
+    to a saved deck. Authoring P_pa is deprecated and warns:
+      * P_pa alone        -> converted to P_torr (legacy decks keep
+                             flying at their pressure)
+      * P_torr and P_pa   -> P_torr wins; a P_pa that disagrees is named
+                             and ignored
+      * assigning .P_pa   -> sets P_torr (None re-derives from P_torr)
+    so the two can never disagree. The old rule was the reverse: a
+    present P_pa overwrote P_torr, so a hand-edited P_torr was silently
+    ignored (L-523)."""
     enabled: bool = True
     gas: str = "N2"
     T_k: float = 273.0
-    P_torr: float = 1.0
-    P_pa: float = None
+    P_torr: Optional[float] = None     # None = not authored -> 1.0 Torr
+    P_pa: Optional[float] = None       # DERIVED; authoring it is deprecated
     sigma_m2: float = 2.27e-18
     model: str = "hs"                  # "hs" (hard-sphere) or "sds";
                                        # legacy "hs1" is accepted and
@@ -1282,13 +1501,55 @@ class CollisionSpec(_StrictAttrs):
     flow_mm_us: List[float] = field(
         default_factory=lambda: [0.0, 0.0, 0.0])
 
+    _RUNTIME_ATTRS = frozenset({"_extras", "_ready"})
+    P_TORR_DEFAULT = 1.0               # the dataclass default (R3 ruling)
+
     def __post_init__(self):
-        # single source of truth: Torr. P_pa is derived unless only P_pa given.
-        if self.P_pa is None:
-            self.P_pa = self.P_torr * TORR_PA
+        import warnings
+        pa = self.P_pa
+        if pa is not None and self.P_torr is None:
+            # legacy Pa-only: converted to Torr, and the kernel keeps the
+            # AUTHORED Pa exactly (a Torr round trip can move it by an
+            # ulp, which would break bit-identity with every old run)
+            warnings.warn(_P_PA_DEPRECATED, FutureWarning, stacklevel=3)
+            self.P_torr = float(pa) / TORR_PA
+            self.P_pa = float(pa)
         else:
-            # legacy path: P_pa authored directly -> back-fill P_torr
-            self.P_torr = self.P_pa / TORR_PA
+            if self.P_torr is None:
+                self.P_torr = self.P_TORR_DEFAULT
+            derived = float(self.P_torr) * TORR_PA
+            if pa is not None and abs(float(pa) - derived) <= (
+                    _PA_SAME_NUMBER_REL * abs(derived)):
+                # the SAME pressure to rounding: every deck saved before
+                # R2b stores P_torr back-filled from P_pa, so re-deriving
+                # Pa would move the kernel input by an ulp. Keep it.
+                self.P_pa = float(pa)
+            else:
+                if pa is not None:
+                    _warn_pa_disagrees(self.P_torr, pa)
+                self.P_pa = derived
+        # legacy model spelling normalized at INGEST (was rewritten inside
+        # validate(), which must not mutate what it checks -- L-554)
+        if str(self.model or "").lower() == "hs1":
+            self.model = "hs"
+        self._ready = True
+
+    def __setattr__(self, name, value):
+        if not getattr(self, "_ready", False):
+            super().__setattr__(name, value)
+            return
+        if name == "P_pa":
+            if value is None:          # "null P_pa" = re-derive from Torr
+                super().__setattr__("P_pa", float(self.P_torr) * TORR_PA)
+                return
+            import warnings
+            warnings.warn(_P_PA_DEPRECATED, FutureWarning, stacklevel=2)
+            self.P_torr = float(value) / TORR_PA
+            super().__setattr__("P_pa", float(value))   # authored Pa, exact
+            return
+        super().__setattr__(name, value)
+        if name == "P_torr" and value is not None:
+            super().__setattr__("P_pa", float(value) * TORR_PA)
 
     def set_pressure_torr(self, torr):
         """Set BOTH pressure fields from Torr, atomically.
@@ -1297,21 +1558,26 @@ class CollisionSpec(_StrictAttrs):
         lives in __post_init__), so the two fields drift apart and the kernel
         -- which reads P_torr -- silently disagrees with anything reading
         P_pa. Two fields for one quantity is a standing hazard; this is the
-        one door through it."""
+        one door through it. (Since R2b P_pa is derived on every P_torr
+        write, so this is equivalent to assigning P_torr.)"""
         self.P_torr = float(torr)
-        self.P_pa = float(torr) * TORR_PA
         return self
 
     def set_pressure_pa(self, pa):
-        self.P_pa = float(pa)
-        self.P_torr = float(pa) / TORR_PA
+        """DEPRECATED (R2b): pressure is Torr. Converts and warns."""
+        self.P_pa = float(pa)          # warns, sets P_torr (see __setattr__)
         return self
 
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        d.pop("P_pa", None)            # derived: Torr is the stored value
+        return d
 
     @classmethod
     def from_dict(cls, d):
+        if "P_pa" in d and "P_torr" in d:
+            import warnings
+            warnings.warn(_P_PA_DEPRECATED, FutureWarning, stacklevel=3)
         return _take_known(cls, d)
 
 
@@ -1331,6 +1597,17 @@ class IntegrationSpec(_StrictAttrs):
     max_records: int = 100000
     record_channels: List[str] = field(
         default_factory=lambda: ["speed", "ke_ev", "e_field"])
+
+    # R2: the step and the flight time are physics; recording density
+    # and the record cap are storage (sizing.record_volume: rec_every is
+    # STORAGE ONLY), so they are announced, not refused. dt_ns: null is
+    # an AUTHORED value (derive from the drives), so only an absent key
+    # is refused.
+    _LOAD_ANNOUNCE = ("rec_every", "max_records")
+
+    @classmethod
+    def _load_required(cls, d):
+        return ("dt_ns", "t_max_us")
 
     def to_dict(self):
         return asdict(self)
@@ -1498,6 +1775,10 @@ class ViewSpec(_StrictAttrs):
     color_by: str = "fate"
     decimate: int = 4
 
+    # R2: every view key is display only
+    _LOAD_ANNOUNCE = ("mode", "planes", "equipotential_lines",
+                      "show_field", "color_by", "decimate")
+
     def to_dict(self):
         return asdict(self)
 
@@ -1506,24 +1787,142 @@ class ViewSpec(_StrictAttrs):
         return _take_known(cls, d)
 
 
+# ------------------------------------------------------------ optic axis
+# The channels measured RELATIVE TO THE INSTRUMENT AXIS. They are DERIVED
+# AFTER FLIGHT from the recorded positions and field components about
+# SimSpec.radial_frame() (PI ruling 2026-10-15, L-539: "derived from the
+# route's axis. r-z it is r. 3D -- declared"; then "go with the
+# alternative": derive after flight, no kernel computes them).
+RADIAL_CHANNELS = ("radius", "e_axial", "e_radial")
+
+
+@dataclass
+class OpticAxisSpec(_StrictAttrs):
+    """The straight line the radial channels are measured about: parallel
+    to `axis`, through `through_mm` = the two OTHER coordinates in cyclic
+    order (axis z -> (x, y); x -> (y, z); y -> (z, x), as
+    EXTRUDE_INPLANE_AXES), deck frame, mm.
+
+      radius   = distance of the ion from this line
+      e_axial  = field component along +axis (signed; reversing the
+                 travel direction does not flip it)
+      e_radial = field magnitude perpendicular to the line (>= 0)
+
+    Analysis only: it never touches the solve or a cache key, so a deck
+    can change it and re-derive without re-solving or re-flying. An
+    oblique axis is not representable here (refused by type), and a
+    curved transport path has no single radius -- such decks should not
+    record the radial channels."""
+    axis: str
+    through_mm: List[float]
+
+    def validate(self):
+        errs = []
+        if self.axis not in ("x", "y", "z"):
+            errs.append(f"optic_axis.axis {self.axis!r} must be 'x', 'y' "
+                        f"or 'z' (an oblique axis is not supported)")
+        t = self.through_mm
+        if (not hasattr(t, "__len__") or len(t) != 2
+                or not all(isinstance(v, (int, float))
+                           and not isinstance(v, bool)
+                           and math.isfinite(v) for v in t)):
+            errs.append(f"optic_axis.through_mm must be two finite numbers "
+                        f"(the coordinates of the line in the other two "
+                        f"axes, cyclic order), got {t!r}")
+        return errs
+
+    def to_dict(self):
+        return {"axis": self.axis,
+                "through_mm": [float(v) for v in self.through_mm]}
+
+    @classmethod
+    def from_dict(cls, d):
+        return _take_known(cls, dict(d))
+
+
+# r-z: the axis is built into the route -- the record frame's x is the
+# symmetry axis and (y, z) are Cartesian transverse, r = hypot(y, z)
+RZ_OPTIC_AXIS = OpticAxisSpec(axis="x", through_mm=[0.0, 0.0])
+
+
+# ------------------------------------------------------------ transporter
+TRANSPORTER_UNLIMITED_PASSES = 10 ** 9   # "no pass limit" (the kernel's own
+                                         # sentinel, tracer3d.fly3d)
+
+
+@dataclass
+class TransporterSpec(_StrictAttrs):
+    """The periodic transporter plane pair (CHARTER_transporter): an ion
+    crossing the ACCEPT plane along `axis` in `direction` is moved to the
+    EMIT plane, so a short periodic section stands in for a long device.
+    Only the 3-D shapes route implements it; every other route REFUSES a
+    spec that carries one. Planes are in the spec frame (mm).
+
+    A TYPED block (PI ruling R2c, 2026-10-15) loaded through the same key
+    accounting as every other block: it was a bare dict that to_dict and
+    from_dict both dropped, silently (L-524). Code that assigns a dict
+    (spec.transporter = dict(...), the internal ATD studies) is converted
+    through from_dict, so the same refusals apply."""
+    axis: str
+    accept_mm: float
+    emit_mm: float
+    direction: int
+    max_passes: int = TRANSPORTER_UNLIMITED_PASSES   # neutral: no limit
+
+    @classmethod
+    def _load_required(cls, d):
+        # the planes and the crossing sense ARE the transporter
+        return ("axis", "accept_mm", "emit_mm", "direction")
+
+    def validate(self):
+        errs = []
+        if self.axis not in ("x", "y", "z"):
+            errs.append(f"transporter.axis {self.axis!r} not x/y/z")
+        for k in ("accept_mm", "emit_mm"):
+            if isinstance(getattr(self, k), bool) or not isinstance(
+                    getattr(self, k), (int, float)):
+                errs.append(f"transporter.{k} non-numeric: "
+                            f"{getattr(self, k)!r}")
+        if not errs and float(self.accept_mm) == float(self.emit_mm):
+            errs.append("transporter accept_mm == emit_mm (zero-length)")
+        if self.direction not in (1, -1):
+            errs.append(f"transporter.direction must be +1 or -1, got "
+                        f"{self.direction!r}")
+        if int(self.max_passes) < 1:
+            errs.append("transporter.max_passes must be >= 1")
+        return errs
+
+    def to_dict(self):
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d):
+        return _take_known(cls, dict(d))
+
+
 # =================================================================== SimSpec
 @dataclass
 class SimSpec(_StrictAttrs):
     _RUNTIME_ATTRS = frozenset({"_loaded_from", "_extras"})
     geometry: GeometrySpec
     source: SourceSpec = field(default_factory=SourceSpec)
-    collisions: CollisionSpec = field(default_factory=CollisionSpec)
+    # Collisions left out = VACUUM (PI ruling 2026-10-14, R3 Q1). An
+    # explicit CollisionSpec(...) still means gas on.
+    collisions: CollisionSpec = field(
+        default_factory=lambda: CollisionSpec(enabled=False))
     integration: IntegrationSpec = field(default_factory=IntegrationSpec)
     bounds: "BoundsSpec" = field(default_factory=BoundsSpec)
     # Declared planes (detectors, slits, diagnostic planes) the deck
     # carries as first-class objects; see StationSpec.
     stations: List[StationSpec] = field(default_factory=list)
-    # optional device-agnostic periodic
-    # transporter plane pair: dict with axis ('x'|'y'|'z'), accept_mm,
-    # emit_mm (spec frame), direction (+1/-1), max_passes. None ->
-    # disabled. Only the 3-D shapes route implements it; every other
-    # route REFUSES a spec that carries it.
-    transporter: dict | None = None
+    # optional periodic transporter plane pair (TransporterSpec). None ->
+    # disabled. A dict assigned here is converted through
+    # TransporterSpec.from_dict (see __setattr__).
+    transporter: Optional[TransporterSpec] = None
+    # the axis the radial channels are measured about (OpticAxisSpec).
+    # Top level, NOT geometry: it is analysis, and geometry feeds the
+    # field-cache keys -- declaring it must never force a re-solve.
+    optic_axis: Optional[OpticAxisSpec] = None
     view: ViewSpec = field(default_factory=ViewSpec)
     name: str = "simulation"
     notes: str = ""
@@ -1534,6 +1933,25 @@ class SimSpec(_StrictAttrs):
     # machine that made it is a dangling reference everywhere else, and the
     # JSON tab promises a SELF-DESCRIBING spec. The geometry travels with it.
     scene: Optional[dict] = None
+
+    def __setattr__(self, name, value):
+        # ONE typed transporter: a dict (constructor or assignment) is
+        # loaded through TransporterSpec.from_dict, so its keys are
+        # accounted for exactly as in a deck file (R2c).
+        if name == "transporter" and isinstance(value, dict):
+            value = TransporterSpec.from_dict(value)
+        if name == "optic_axis" and isinstance(value, dict):
+            value = OpticAxisSpec.from_dict(value)
+        super().__setattr__(name, value)
+
+    def radial_frame(self):
+        """THE axis the radial channels (RADIAL_CHANNELS) are measured
+        about, for every route: r-z -> its built-in axis (RZ_OPTIC_AXIS);
+        any other route -> the declared optic_axis, or None when none is
+        declared (validate() then refuses a requested radial channel)."""
+        if self.geometry.symmetry.coords == "rz":
+            return RZ_OPTIC_AXIS
+        return self.optic_axis
 
     # ------------------------------------------------------------ channels
     def describe(self) -> str:
@@ -1659,7 +2077,13 @@ class SimSpec(_StrictAttrs):
             L.append(f"  stations ({len(self.stations)}): "
                      + ", ".join(st.name for st in self.stations))
         if self.transporter is not None:
-            L.append(f"  periodic transporter: {self.transporter}")
+            L.append(f"  periodic transporter: {self.transporter.to_dict()}")
+        _fr = self.radial_frame()
+        if _fr is not None:
+            L.append(f"  optic axis (radial channels): {_fr.axis} through "
+                     f"{list(_fr.through_mm)} mm"
+                     + (" (built into r-z)" if _fr is RZ_OPTIC_AXIS
+                        else " (declared)"))
         return "\n".join(L)
 
     def column_names(self):
@@ -1809,12 +2233,9 @@ class SimSpec(_StrictAttrs):
         # model="none" validated clean and then flew HS -- the author's
         # intent (no collisions) silently inverted into the default physics.
         # Refuse by name, and name the field that actually controls it.
-        # "hs1" is the legacy spelling of "hs";
-        # it is normalized here — the ONE ingest point — so every deck
-        # written before the rename keeps loading, and everything
-        # downstream sees only the canonical name.
-        if str(getattr(self.collisions, "model", "") or "").lower() == "hs1":
-            self.collisions.model = "hs"
+        # "hs1" (the legacy spelling of "hs") is normalized at INGEST, in
+        # CollisionSpec.__post_init__; validate() checks and never
+        # mutates (L-554).
         _KNOWN_MODELS = ("hs", "sds")
         _model = str(getattr(self.collisions, "model", "hs") or "").lower()
         if _model not in _KNOWN_MODELS:
@@ -1828,27 +2249,37 @@ class SimSpec(_StrictAttrs):
                 f"is not a known model; known models are "
                 f"{list(_KNOWN_MODELS)}.{_hint}")
         if getattr(self.collisions, "enabled", False):
-            for _f in ("P_torr", "P_pa", "T_k", "sigma_m2"):
+            for _f in ("P_torr", "T_k", "sigma_m2"):
                 if getattr(self.collisions, _f, None) is None:
                     errs.append(
-                        f"collisions enabled but {_f} is None -- set it (use "
-                        f"collisions.set_pressure_torr()/set_pressure_pa() "
-                        f"for pressure, which sets both fields atomically)")
+                        f"collisions enabled but {_f} is None -- set it "
+                        f"(pressure is collisions.P_torr; P_pa is derived)")
         if self.transporter is not None:
-            tp = self.transporter
-            if tp.get("axis") not in ("x", "y", "z"):
-                errs.append(f"transporter.axis {tp.get('axis')!r} not x/y/z")
-            for k in ("accept_mm", "emit_mm"):
-                if not isinstance(tp.get(k), (int, float)):
-                    errs.append(f"transporter.{k} missing or non-numeric")
-            if isinstance(tp.get("accept_mm"), (int, float)) and \
-                    tp.get("accept_mm") == tp.get("emit_mm"):
-                errs.append("transporter accept_mm == emit_mm (zero-length)")
-            if tp.get("direction", -1) not in (1, -1):
-                errs.append("transporter.direction must be +1 or -1")
-            if int(tp.get("max_passes", 1)) < 1:
-                errs.append("transporter.max_passes must be >= 1")
+            errs.extend(self.transporter.validate())
+        # RADIAL CHANNELS need an axis (L-539): built in on r-z, declared
+        # everywhere else. One rule, every route.
+        if self.optic_axis is not None:
+            errs.extend(self.optic_axis.validate())
+            if (self.geometry.symmetry.coords == "rz"
+                    and self.optic_axis.to_dict()
+                    != RZ_OPTIC_AXIS.to_dict()):
+                errs.append(
+                    f"optic_axis {self.optic_axis.to_dict()} on an r-z "
+                    f"deck: the r-z axis is built into the route "
+                    f"({RZ_OPTIC_AXIS.to_dict()}); remove the declaration")
+        _radial = [c for c in (self.integration.record_channels or [])
+                   if c in RADIAL_CHANNELS]
+        if _radial and self.radial_frame() is None:
+            errs.append(
+                f"record_channels {_radial} are measured about the "
+                f"instrument axis, which this deck does not declare -- add "
+                f'"optic_axis": {{"axis": "z", "through_mm": [x, y]}} (the '
+                f"axis direction and the line's position in the other two "
+                f"coordinates), or drop those channels")
         g = self.geometry
+        _lim = electrode_limit_error(len(g.electrodes))
+        if _lim:
+            errs.append(_lim)               # programmatic specs (L-538)
         errs.extend(g.symmetry.validate())
         # SIGNED FRAME (origin_mm) guards: (1) shape must be
         # [x_lo, y_lo]; (2) each origin must sit ON the pitch lattice, or
@@ -2073,19 +2504,17 @@ class SimSpec(_StrictAttrs):
                             f"distribute v_in..v_out, has {len(mem)} "
                             f"(use a uniform group for a single-voltage set)")
 
-        c = self.collisions
-        if c.enabled and c.P_torr is not None and c.P_pa is not None:
-            derived = float(c.P_torr) * 133.322368421
-            if abs(derived - float(c.P_pa)) > 1e-3 * max(derived, 1e-12):
-                errs.append(
-                    f"collisions: P_torr ({c.P_torr:g} Torr = {derived:.4g} Pa) "
-                    f"and P_pa ({c.P_pa:.4g} Pa) DISAGREE. The kernel reads "
-                    f"P_torr and would silently use {derived:.4g} Pa, ignoring "
-                    f"P_pa. Set one and let the other derive.")
-        if self.source.distribution not in (
-                "point", "disc", "line", "grid", "box", "gaussian",
-                "file"):
-            errs.append(f"bad distribution {self.source.distribution!r}")
+        # An empty m/z list flies no ion: refused here, for every route (on
+        # r-z it was only caught by a stray `mz_list[0]` expression in
+        # make_rz_fly_fn, as a bare IndexError -- L-556).
+        if not list(self.source.mz_list or []):
+            errs.append("source.mz_list is empty -- state at least one m/z")
+        # (The P_torr/P_pa disagreement check that sat here is gone: P_pa
+        # is derived from P_torr on every write, so they cannot disagree
+        # -- R2b. It also carried a retyped Torr constant, L-532.)
+        if self.source.distribution not in SOURCE_DISTRIBUTIONS:
+            errs.append(f"bad distribution {self.source.distribution!r}; "
+                        f"known: {list(SOURCE_DISTRIBUTIONS)}")
         if self.source.distribution == "gaussian":
             try:
                 self.source.gaussian_layout()
@@ -2129,8 +2558,11 @@ class SimSpec(_StrictAttrs):
                 "(the time-lag example uses 1.0).")
         _rf_f = [gr.frequency_hz for gr in g.rf_groups
                  if gr.frequency_hz and gr.amplitude_v]
-        if _it.dt_ns is None:
-            _it.dt_ns = self.derive_dt_ns()
+        # the step the run WILL use; read, never written back -- an
+        # advisory reports and must not change the spec (L-554; the
+        # resolution itself lives in from_dict and sim_build.build_run)
+        _dt = (_it.dt_ns if _it.dt_ns is not None
+               else self.derive_dt_ns())
         # GAS-TRANSPORT TIMING BIAS (validation spec
         # V10, scope extended by V11): gas-phase transport TIMING is
         # fast-biased O(dt). Measured, operating points inline: funnel
@@ -2198,9 +2630,19 @@ class SimSpec(_StrictAttrs):
                 and len(_s.fwhm_mm) == 3) else [0.0, 0.0, 0.0]
             for _a, _v in zip("xyz", _fw):
                 _ext[_a] = float(_v)
+        elif _s.distribution != "file":
+            # NOT a known kind: say so. An empty extent here used to fall
+            # through to the POINT-source note below (L-554);
+            # validate() refuses the kind itself.
+            _ext = None
         # 'file' births are not declared here: their extent is in the CSV,
         # so this reports a named skip rather than a silent pass.
-        if _s.distribution == "file":
+        if _ext is None:
+            out.append(
+                f"source: distribution {_s.distribution!r} is not a known "
+                f"kind, so the sub-cell resolution check could not be "
+                f"applied (validate() refuses the distribution).")
+        elif _s.distribution == "file":
             out.append(
                 f"source: births come from a file, so the packet extent "
                 f"is not declared in the spec and the sub-cell resolution "
@@ -2234,21 +2676,21 @@ class SimSpec(_StrictAttrs):
                     f"{_h:g} mm lattice from the spec alone. Measure the "
                     f"flown spread in cells before trusting a derivative "
                     f"across the packet (ledger L-216).")
-        if self.collisions.enabled and _it.dt_ns >= 0.5:
+        if self.collisions.enabled and _dt >= 0.5:
             out.append(
                 f"collisions: gas-phase transport at dt_ns="
-                f"{_it.dt_ns:g} carries an O(dt) FAST bias on TIMING "
+                f"{_dt:g} carries an O(dt) FAST bias on TIMING "
                 f"observables (~1.5-3%/ns measured; fates/positions "
                 f"are dt-robust). For certified timing, demonstrate a "
                 f"dt plateau (adopted convention 2026-08-13) or quote "
                 f"the bias inline; dt_ns <= 0.25 reached the plateau "
                 f"on both measured devices.")
-        if _rf_f and _it.dt_ns > 0:
+        if _rf_f and _dt > 0:
             _per_ns = 1e9 / max(_rf_f)
-            _steps = _per_ns / _it.dt_ns
+            _steps = _per_ns / _dt
             if _steps < RF_MIN_STEPS_PER_PERIOD:
                 out.append(
-                    f"integration: dt_ns={_it.dt_ns:g} resolves the "
+                    f"integration: dt_ns={_dt:g} resolves the "
                     f"{max(_rf_f):g} Hz RF drive with only {_steps:.0f} "
                     f"steps/period (< {RF_MIN_STEPS_PER_PERIOD}) — this "
                     f"produces numerical micro-heating (phantom eV-scale "
@@ -2256,7 +2698,7 @@ class SimSpec(_StrictAttrs):
                     f"{_per_ns/RF_RECOMMENDED_STEPS_PER_PERIOD:.3g} "
                     f"({RF_RECOMMENDED_STEPS_PER_PERIOD} steps/period, "
                     f"the stock-example convention).")
-            _samp = _it.dt_ns * max(1, int(_it.rec_every))
+            _samp = _dt * max(1, int(_it.rec_every))
             if _samp >= 0.5 * _per_ns:
                 _m = _samp % _per_ns
                 _off = min(_m, _per_ns - _m) / _per_ns
@@ -2269,12 +2711,26 @@ class SimSpec(_StrictAttrs):
                         f"and biases velocity statistics. Change "
                         f"rec_every so the sampling interval is not an "
                         f"integer multiple of the period.")
+        # SDS OUTSIDE ITS RF REGIME (L-452; PI ruling: warn, not refuse).
+        # Carried as an advisory so it reaches every place advisories go:
+        # build_run's console print AND the app's status line -- it used to
+        # be printed by build_run only, so a UI user never saw it.
+        from ion_gym.physics.sds import (rf_regime_note, sds_active,
+                                         SDS_NO_COLLISION_COUNT)
+        _sds_note = rf_regime_note(self)
+        if _sds_note:
+            out.append(_sds_note)
+        # n_col UNDER SDS: the one rule every route applies (NaN column,
+        # empty per-ion count); stated whenever the channel is recorded.
+        if (sds_active(self.collisions)
+                and "n_col" in (_it.record_channels or [])):
+            out.append(SDS_NO_COLLISION_COUNT)
         return out
 
 
     # ------------------------------------------------------------ JSON IO
     def to_dict(self):
-        return {
+        d = {
             "schema_version": SCHEMA_VERSION, "name": self.name,
             "notes": self.notes, "geometry": self.geometry.to_dict(),
             "source": self.source.to_dict(),
@@ -2285,6 +2741,13 @@ class SimSpec(_StrictAttrs):
             "view": self.view.to_dict(), "builder": self.builder,
             "import_path": self.import_path,
             "scene": self.scene}
+        # Written only when present, so a deck without one saves
+        # byte-identically to before (L-524: it was never written).
+        if self.transporter is not None:
+            d["transporter"] = self.transporter.to_dict()
+        if self.optic_axis is not None:            # only when declared
+            d["optic_axis"] = self.optic_axis.to_dict()
+        return d
 
     def drive_summary(self) -> str:
         """One-line operating point DERIVED from the live drives and DC
@@ -2336,15 +2799,35 @@ class SimSpec(_StrictAttrs):
                 f"SimSpec: unknown top-level key(s) {_extra} retained in "
                 f"the saved file but NOT interpreted — misspelled or "
                 f"foreign parameter?", stacklevel=3)
+        # R2 (PI ruling 2026-10-15): the ion source and the integration
+        # contract set the physics, and their defaults are one deck's
+        # operating point -- a deck without them is refused, not flown
+        # as the funnel. (No collisions block = vacuum, R3 Q1.)
+        for _blk in ("source", "integration"):
+            if _blk not in d:
+                raise MissingPhysicsKey(
+                    f"SimSpec: the deck has no {_blk!r} block. It sets the "
+                    f"physics, and its defaults are one deck's operating "
+                    f"point -- state it in the deck.")
+        if "name" not in d:
+            import warnings
+            warnings.warn("SimSpec: cosmetic key(s) not in the deck, "
+                          "loaded at their defaults: name='simulation'",
+                          stacklevel=3)
         spec = cls(
             geometry=GeometrySpec.from_dict(d["geometry"]),
-            source=SourceSpec.from_dict(d.get("source", {})),
-            collisions=CollisionSpec.from_dict(d.get("collisions", {})),
-            integration=IntegrationSpec.from_dict(
-                d.get("integration", {})),
+            source=SourceSpec.from_dict(d["source"]),
+            collisions=(CollisionSpec.from_dict(d["collisions"])
+                        if "collisions" in d
+                        else CollisionSpec(enabled=False)),   # R3 Q1: vacuum
+            integration=IntegrationSpec.from_dict(d["integration"]),
             bounds=BoundsSpec.from_dict(d.get("bounds", {})),
             stations=[StationSpec.from_dict(x)
                       for x in d.get("stations", [])],
+            transporter=(TransporterSpec.from_dict(d["transporter"])
+                         if d.get("transporter") is not None else None),
+            optic_axis=(OpticAxisSpec.from_dict(d["optic_axis"])
+                        if d.get("optic_axis") is not None else None),
             view=ViewSpec.from_dict(d.get("view", {})),
             name=d.get("name", "simulation"), notes=d.get("notes", ""),
             builder=d.get("builder", ""),
@@ -2435,6 +2918,47 @@ class PitchChange(_StrictAttrs):
         return t
 
 
+def min_rec_every(integ):
+    """Smallest rec_every whose records cover the WHOLE declared flight
+    within max_records -- the value check_recording_capacity's refusal
+    names. THE one place that arithmetic lives: the refusal and any
+    caller choosing a record interval (e.g. a decimation study) read it
+    here instead of retyping a number that breaks when the deck changes.
+
+    Returns 1 when the integration declares nothing to check against
+    (dt_ns, t_max_us or max_records unset -- the same condition under
+    which check_recording_capacity checks nothing). Refuses when
+    max_records <= 2: the buffer holds only the two end rows, so no
+    rec_every can cover the flight.
+    """
+    dt_ns = float(getattr(integ, "dt_ns", 0.0) or 0.0)
+    t_max_us = float(getattr(integ, "t_max_us", 0.0) or 0.0)
+    cap = int(getattr(integ, "max_records", 0) or 0)
+    if dt_ns <= 0 or t_max_us <= 0 or cap <= 0:
+        return 1
+    if cap <= 2:
+        raise ValueError(
+            f"max_records={cap} holds only the two end rows; no rec_every "
+            f"can cover a {t_max_us:g} us flight. Raise max_records.")
+    steps = t_max_us * 1e3 / dt_ns
+    # the exact solution of _records_needed(steps, r) <= cap, then nudged
+    # through THE SAME predicate so float rounding can never disagree
+    # with the check
+    r = max(int(steps // (cap - 1)) + 1, 1)
+    while r > 1 and _records_needed(steps, r - 1) <= cap:
+        r -= 1
+    while _records_needed(steps, r) > cap:
+        r += 1
+    return r
+
+
+def _records_needed(steps, every):
+    """Records a flight of `steps` integrator steps needs at `every` --
+    the count check_recording_capacity has used since L-448, kept in one
+    place so min_rec_every solves the same inequality the check tests."""
+    return int(steps / every) + 2
+
+
 def check_recording_capacity(integ):
     """Refuse a recording that cannot cover the declared flight.
 
@@ -2465,10 +2989,10 @@ def check_recording_capacity(integ):
     if dt_ns <= 0 or t_max_us <= 0 or cap <= 0:
         return None                      # nothing to check against
     steps = t_max_us * 1e3 / dt_ns
-    need = int(steps / every) + 2
+    need = _records_needed(steps, every)
     if need <= cap:
         return None
-    every_fit = int(-(-steps // (cap - 2))) if cap > 2 else None
+    every_fit = min_rec_every(integ) if cap > 2 else None
     covered_us = cap * every * dt_ns * 1e-3
     return (
         f"recording cannot cover the flight: {steps:,.0f} steps at "

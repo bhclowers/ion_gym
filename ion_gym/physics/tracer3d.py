@@ -37,14 +37,13 @@ import math
 import numpy as np
 from numba import njit
 
-from ion_gym.physics.collision3d import (KB, KG_AMU, gas_mass, _mfp_mm, _collide)
+from ion_gym.physics.collision3d import (hs_collision_step, gas_flow,
+                                         gas_kernel_scalars, resolve_collisions)
 import ion_gym.physics.sds as _sds  # module ref without the package-root edge
-from ion_gym.physics.sds import (_diff_dist_steps, _sphere_rand, ion_params,
-                 load_diffusion_statistics, load_massdata,
-                 N_DIST_COLLISIONS as _NDC)
+from ion_gym.physics.sds import (_diff_dist_steps, _sphere_rand,
+                                 N_DIST_COLLISIONS as _NDC)
 
-E_CHG = 1.602176634e-19
-AMU = 1.66053906660e-27
+from ion_gym.physics.constants import E_CHG, KG_AMU as AMU  # noqa: E402
 
 # waveform-kind codes (shared with build_planar semantics)
 K_SIN, K_COS, K_SQUARE, K_TAB_HOLD, K_TAB_LIN = 0, 1, 2, 3, 4
@@ -197,7 +196,8 @@ def refuse_birth_in_metal_3d(ele, h_mm, x_mm, y_mm, z_mm, ion_label="",
         wx, wy, wz = x_mm + ox, y_mm + oy, z_mm + oz
         stored = ("" if not (ox or oy or oz) else
                   f" [stored frame ({x_mm:.3f}, {y_mm:.3f}, {z_mm:.3f})]")
-        raise ValueError(
+        from ion_gym.physics.raster2d import BirthInMetal
+        raise BirthInMetal(
             f"{who}birth at (x={wx:.3f}, y={wy:.3f}, z={wz:.3f}) mm "
             f"(deck frame){stored} lies inside the effective metal "
             f"(all-eight-corner voxel rule, node pitch {h_mm} mm): move "
@@ -259,7 +259,8 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
           record_every,
           collide_on, T_k, P_pa, sigma_m2, c_star, c_bar, sig1d, m_gas, seed,
           pl_col, pl_val, pl_sgn, pl_w, pl_kind,
-          tp_col, tp_accept, tp_emit, tp_sgn, tp_maxp, wrs):
+          tp_col, tp_accept, tp_emit, tp_sgn, tp_maxp, wrs,
+          gfx, gfy, gfz):
     """RK4 in LOCAL mm; field E(x,t) = E_A + sum_k w_k(t)*E_k (V/mm), each
     w_k on the absolute clock in us. Returns (nrec, x,y,z, vx,vy,vz, t_s, kind)
     with kind: 0 = impact on metal, 1 = left array box, 2 = time out,
@@ -315,6 +316,7 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
     nrec = 1
     step = 0
     kind = 2
+    hit_ip = -1      # index of the terminating plane, -1 if none (L-165)
     tp_d = tp_emit - tp_accept
     tp_pass = 0
     wrs[0] = 0
@@ -388,17 +390,17 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
         t += dt_s
         step += 1
 
-        # HS buffer-gas collision (full 3-D; same model as the 2-D kernel,
-        # velocities carried in m/s here, converted to mm/us for collision3d).
+        # HS buffer-gas collision (full 3-D; the shared gas-frame step,
+        # collision3d.hs_collision_step, against the declared flow
+        # (gfx, gfy, gfz) mm/us -- L-563). Velocities are carried in m/s
+        # here, converted to mm/us for collision3d; the step is dt_s with
+        # 1e6 to us, in the (sp * dt_s) * 1e6 order this kernel used.
         if collide_on:
             spx = vx * 1e-3; spy = vy * 1e-3; spz = vz * 1e-3   # mm/us
-            sp = math.sqrt(spx * spx + spy * spy + spz * spz)
-            if sp < 1e-7:
-                sp = 1e-7
-            lam = _mfp_mm(sp, T_k, P_pa, sigma_m2, c_star, c_bar)
-            if np.random.random() < 1.0 - math.exp(-sp * dt_s * 1e6 / lam):
-                nvx, nvy, nvz = _collide(spx, spy, spz, 0.0, 0.0, 0.0,
-                                         m_ion_amu, m_gas, sig1d, sp)
+            nvx, nvy, nvz, _hit = hs_collision_step(
+                spx, spy, spz, gfx, gfy, gfz, dt_s, 1e6, T_k, P_pa,
+                sigma_m2, c_star, c_bar, m_ion_amu, m_gas, sig1d)
+            if _hit:
                 vx = nvx * 1e3; vy = nvy * 1e3; vz = nvz * 1e3
                 ncol += 1
 
@@ -509,6 +511,7 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
                     vz = vzo + f * (vz - vzo)
                     t = to + f * dt_s
                     kind = pl_kind[ip]
+                    hit_ip = ip
                     hit_pl = True
                     break
             if hit_pl:
@@ -543,7 +546,7 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
             exs[nrec], eys[nrec], ezs[nrec] = _efield(x, y, z, _rec_us)
             ts[nrec] = _rec_us; nrec += 1
 
-    return nrec, x, y, z, vx, vy, vz, t, kind, ncol
+    return nrec, x, y, z, vx, vy, vz, t, kind, ncol, hit_ip
 
 
 # ------------------------------------------------------------- channel packer
@@ -606,9 +609,13 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
     (K,nx,ny,nz); ch_kind,ch_om,ch_ph,ch_amp,ch_off; tab_t,tab_v,tab_off) OR
     the legacy single-sin scalars (EBx,EBy,EBz,rf_V,dc_V,om_rad_us).
 
-    `collisions`: None/vacuum, or a dict/namespace with .gas (name or amu),
-    .T_k, .P_pa, .sigma_m2 -> HS buffer-gas scattering (same model as the
-    2-D kernel), reproducible per-ion via `seed`.
+    `collisions`: None/vacuum, or a CollisionSpec or dict, resolved by
+    collision3d.resolve_collisions (missing fields take the spec's
+    values) -> HS buffer-gas scattering (same model as the 2-D kernel),
+    reproducible per-ion via `seed`. A declared flow_mm_us is MODELLED:
+    each collision is drawn in the moving gas's frame
+    (collision3d.hs_collision_step; L-563, PI ruling 2026-10-16 -- it was
+    refused here, and ignored on the other HS routes).
 
     `ion_label` (e.g. "ion 7"): names the ion in the birth-in-metal
     refusal; empty -> position-only diagnostic."""
@@ -633,29 +640,15 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
 
     def _get(o, k, d=None):
         return getattr(o, k, d) if not isinstance(o, dict) else o.get(k, d)
-    on = collisions is not None and _get(collisions, "enabled", True)
-    if on:
-        gas = _get(collisions, "gas", "N2")
-        T_k = float(_get(collisions, "T_k", 273.0))
-        # pressure authored in Torr (preferred); fall back to Pa if given
-        _TORR_PA = 133.32236842105263
-        p_torr = _get(collisions, "P_torr", None)
-        p_pa = _get(collisions, "P_pa", None)
-        if p_torr is not None:
-            P_pa = float(p_torr) * _TORR_PA
-        elif p_pa is not None:
-            P_pa = float(p_pa)
-        else:
-            P_pa = 1.0 * _TORR_PA
-        sigma_m2 = float(_get(collisions, "sigma_m2", 2.27e-18))
-        mg = gas_mass(gas)
-        c_star = math.sqrt(2 * KB * T_k / (mg * KG_AMU)) / 1000.0
-        c_bar = math.sqrt(8 * KB * T_k / (math.pi * mg * KG_AMU)) / 1000.0
-        sig1d = math.sqrt(KB * T_k / (mg * KG_AMU)) / 1000.0
-    else:
-        T_k = P_pa = sigma_m2 = 0.0
-        c_star = c_bar = sig1d = 1.0
-        mg = 4.0
+    # The one gas authority (L-531, R3): missing fields take the spec's
+    # values; vacuum resolves nothing (the scalars are then inert --
+    # every use in the kernel sits under `collide_on`).
+    _col = resolve_collisions(collisions)
+    gfx, gfy, gfz = gas_flow(_col)      # mm/us; (0, 0, 0) in vacuum
+    g = gas_kernel_scalars(_col)
+    on = g["enabled"]
+    T_k, P_pa, sigma_m2 = g["T_k"], g["P_pa"], g["sigma_m2"]
+    c_star, c_bar, sig1d, mg = g["c_star"], g["c_bar"], g["sig1d"], g["m_gas"]
 
     xs = np.empty(max_records); ys = np.empty(max_records)
     zs = np.empty(max_records); ts = np.empty(max_records)
@@ -696,7 +689,7 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
         tp_col, tp_accept, tp_emit, tp_sgn, tp_maxp = -1, 0.0, 0.0, -1.0, 1
     wrs = np.zeros(max_records, np.int64)
 
-    nrec, x, y, z, vx, vy, vz, t, kind, ncol = _fly3d(
+    nrec, x, y, z, vx, vy, vz, t, kind, ncol, hit_ip = _fly3d(
         qm, float(mz_Da), float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         v0_mm_us[0] * 1e3, v0_mm_us[1] * 1e3, v0_mm_us[2] * 1e3,
         float(tob_us), dt_ns * 1e-9, t_max_us * 1e-6,
@@ -710,7 +703,8 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
         xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs, record_every,
         on, T_k, P_pa, sigma_m2, c_star, c_bar, sig1d, mg, int(seed),
         pl_col, pl_val, pl_sgn, pl_w, pl_kind,
-        tp_col, tp_accept, tp_emit, tp_sgn, tp_maxp, wrs)
+        tp_col, tp_accept, tp_emit, tp_sgn, tp_maxp, wrs,
+        gfx, gfy, gfz)
     KE = 0.5 * m * (vx * vx + vy * vy + vz * vz) / E_CHG
     # No silent truncation: a full record buffer once
     # silently truncated the trace while the flight CONTINUED to its fate,
@@ -735,6 +729,10 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
                 wrap_passes=wrs[:nrec].copy(),
                 t_us=ts[:nrec].copy(), tof_us=t_end_us, KE_eV=KE,
                 v_mm_us=np.array([vx, vy, vz]) * 1e-3, kind=kind, ncol=ncol,
+                # index into `planes` of the plane that terminated the
+                # flight, -1 if none: FACE IDENTITY, so a caller can tell a
+                # seam from a bound without a position test (L-165)
+                plane_hit=int(hit_ip),
                 truncated=truncated,
                 final_xyz_mm=(float(x), float(y), float(z)),
                 t_end_us=float(t_end_us))
@@ -830,6 +828,7 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
         ch_off, ch_duty, tab_t, tab_v, tab_off,
         x * inv_h, y * inv_h, z * inv_h, tob_us, nx, ny, nz, K)
     nrec = 1; step = 0; kind = 2
+    hit_ip = -1      # index of the terminating plane, -1 if none (L-165)
 
     while t < t_max_us:
         tt = tob_us + t
@@ -952,6 +951,7 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
                     vz = vzo + f * (vz - vzo)
                     t = to + f * (t - to)
                     kind = pl_kind[ip]
+                    hit_ip = ip
                     hit_pl = True
                     break
             if hit_pl:
@@ -975,61 +975,63 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
                 nx, ny, nz, K)
             ts[nrec] = tob_us + t; nrec += 1
 
-    return nrec, x, y, z, vx, vy, vz, t, kind
+    return nrec, x, y, z, vx, vy, vz, t, kind, hit_ip
 
-
-# module-level SDS data (loaded once)
-_SDS_STATS = None
-_SDS_MASSDATA = None
-
-
-def _sds_data():
-    global _SDS_STATS, _SDS_MASSDATA
-    if _SDS_STATS is None:
-        import os
-        here = os.path.dirname(os.path.abspath(__file__))
-        _SDS_STATS = load_diffusion_statistics(os.path.join(here, _sds.JUMP_ICDF_FILE))
-        _SDS_MASSDATA = load_massdata(os.path.join(here, _sds.MOBILITY_FILE))
-    return _SDS_STATS, _SDS_MASSDATA
 
 
 def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
               dt_ns=5.0, t_max_us=50.0, record_every=50, max_records=200000,
               seed=1, diffusion=True, ion_label="", planes=None):
-    """Fly one ion under the SDS collision model. `collisions` carries gas,
-    gas_diam_nm, T_k, P_torr; per-ion mobility/MFP/diffusion come from the
-    the reference mass table + estimators. Returns the same dict shape as fly3d
-    (velocities in mm/us). `ion_label`: see fly3d."""
+    """Fly one ion under the SDS collision model. `collisions` (CollisionSpec
+    or dict, resolved by collision3d.resolve_collisions) carries gas,
+    gas_diam_nm, T_k, P_torr and flow_mm_us; per-ion mobility/MFP/diffusion
+    come from the reference mass table + estimators. Returns the same dict
+    shape as fly3d (velocities in mm/us). `ion_label`: see fly3d.
+
+    `charge` is the signed integer charge state and enters the FORCE,
+    q/m = charge*e/(mass*amu), exactly as on the planar SDS route: with
+    the Stokes damping q/(m*K) the drift is then sign(z)*K*E. This
+    wrapper once used q/m = e/m (L-427), so a z = 2 ion drifted at half
+    its mobility and a negative ion drifted the wrong way."""
     refuse_birth_in_metal_3d(
         fields["ele"], fields["h_mm"],
         float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         ion_label=ion_label,
         world_off_mm=fields.get("world_off_mm", (0.0, 0.0, 0.0)))
-    def _get(o, k, d):
-        return getattr(o, k, d) if not isinstance(o, dict) else o.get(k, d)
-    gas = _get(collisions, "gas", "N2")
-    mgas = _get(collisions, "gas_mass_amu", None)
-    if mgas is None:
-        mgas = 28.94515 if gas in ("air", "N2") else gas_mass(gas)
-    gdiam = float(_get(collisions, "gas_diam_nm", 0.366))
-    T_k = float(_get(collisions, "T_k", 298.15))
-    p_torr = _get(collisions, "P_torr", None)
-    if p_torr is None:
-        p_torr = float(_get(collisions, "P_pa", 133.322)) / 133.322
-    stats, massdata = _sds_data()
-    P = ion_params(mz_Da, charge, mgas, gdiam, T_k, float(p_torr), massdata)
+    if int(charge) == 0:
+        raise ValueError(
+            "charge = 0: an uncharged ion has no electric acceleration. "
+            "State the charge state (source.charge) rather than flying a "
+            "neutral through an electrostatic field.")
+    col = resolve_collisions(collisions)
+    if col is None:
+        raise ValueError(
+            "fly3d_sds: SDS is a buffer-gas model but collisions is None or "
+            "disabled. Enable collisions, or fly vacuum with fly3d.")
+    flow = [float(v) for v in col.flow_mm_us]
+    if len(flow) != 3:
+        raise ValueError(
+            f"fly3d_sds: collisions.flow_mm_us must be 3 values (mm/us), "
+            f"got {list(col.flow_mm_us)}")
+    # the shared SDS door (every route): the deck's gas by name (N2 is
+    # N2, PI 2026-10-14), its diameter, T, P, this ion's mass and charge
+    stats = _sds.load_tables()[0]
+    P = _sds.sds_ion_params(col, mz_Da, charge)
 
     ch = _resolve_channels(fields)
     m = mz_Da * AMU
-    qm = E_CHG / m
+    qm = int(charge) * E_CHG / m
     xs = np.empty(max_records); ys = np.empty(max_records)
     zs = np.empty(max_records); ts = np.empty(max_records)
     vxs = np.empty(max_records); vys = np.empty(max_records)
     vzs = np.empty(max_records)
     exs = np.empty(max_records); eys = np.empty(max_records)
     ezs = np.empty(max_records)
-    vg = [v * 1e-3 for v in _get(collisions, "flow_m_s", (0.0, 0.0, 0.0))]
-    nrec, x, y, z, vx, vy, vz, t, kind = _fly3d_sds(
+    # Gas flow, from the spec's field (L-517: this read 'flow_m_s', a key
+    # that exists nowhere, so every declared flow was flown as still gas).
+    # flow_mm_us is already in the kernel's mm/us.
+    vg = flow
+    nrec, x, y, z, vx, vy, vz, t, kind, hit_ip = _fly3d_sds(
         qm, float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         float(v0_mm_us[0]), float(v0_mm_us[1]), float(v0_mm_us[2]),
         float(tob_us), dt_ns * 1e-3, float(t_max_us),
@@ -1060,5 +1062,6 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
                 ex=exs[:nrec].copy(), ey=eys[:nrec].copy(),
                 ez=ezs[:nrec].copy(),
                 v_mm_us=np.array([vx, vy, vz]), kind=kind, sds=P,
+                plane_hit=int(hit_ip),    # as fly3d (L-165)
                 final_xyz_mm=(float(x), float(y), float(z)),
                 t_end_us=_t_end, truncated=bool(nrec >= len(xs)))

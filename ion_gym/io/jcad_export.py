@@ -300,9 +300,36 @@ def _electrode_objects(e, color):
     return out
 
 
+def _rotate(axis, angle_deg, v):
+    """Rodrigues rotation of v by angle_deg about the unit `axis` through
+    the origin -- the jcad/FreeCAD Placement rotation."""
+    n = math.sqrt(sum(c * c for c in axis))
+    k = [c / n for c in axis]
+    t = math.radians(angle_deg)
+    c, s = math.cos(t), math.sin(t)
+    kv = sum(ki * vi for ki, vi in zip(k, v))
+    kxv = [k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2],
+           k[0] * v[1] - k[1] * v[0]]
+    return [v[i] * c + kxv[i] * s + k[i] * kv * (1.0 - c) for i in range(3)]
+
+
 def _mirror_object(obj, axis):
     """Mirrored COPY of a jcad object about plane axis=0. Supported for
-    the objects this module emits; anything else refuses."""
+    the objects this module emits; anything else refuses.
+
+    PER-PRIMITIVE ALGEBRA (L-528), each from the primitive's own world
+    geometry, never from its rotation axis:
+      Box (unrotated): the span along the mirrored axis flips about 0.
+      Box rotated by theta about +z (the only rotation emitted): the
+        mirror maps it to a box rotated by -theta; a z mirror moves the
+        corner to -(z + Height) ONCE (it was applied twice, cancelling),
+        an x or y mirror moves the corner by the flipped local edge.
+      Cylinder: its DIRECTION d = R(Axis, Angle) * (0, 0, 1). Along the
+        mirrored axis the base moves to -(base + Height * d); across it
+        only the base coordinate flips. The old test read the ROTATION
+        axis, which for an x-cylinder is y -- so x- and y-cylinders were
+        each mirrored as the other.
+    """
     a = _AXIS_I[axis]
     sfx = mirror_suffix(axis)
     m = json.loads(json.dumps(obj))
@@ -310,22 +337,43 @@ def _mirror_object(obj, axis):
     prm = m["parameters"]
     plc = prm["Placement"]
     if m["shape"] == "Part::Box":
-        if plc["Angle"] not in (0, 0.0) and a != 2:
-            raise ValueError(f"{obj['name']}: mirrored rotated box on "
-                             f"axis {axis!r} is not supported")
-        span = {0: "Length", 1: "Width", 2: "Height"}[a]
-        plc["Position"][a] = -(plc["Position"][a] + prm[span])
-        if plc["Angle"] and a == 2:
-            plc["Position"][2] = -(plc["Position"][2] + prm["Height"])
-    elif m["shape"] == "Part::Cylinder":
-        av = plc["Axis"]
-        along = abs(av[a]) > 0.5 and plc["Angle"] in (0.0, 90.0, -90.0)
-        if a == 2 and plc["Angle"] == 0.0:
-            plc["Position"][2] = -(plc["Position"][2] + prm["Height"])
-        elif along:
-            plc["Position"][a] = -(plc["Position"][a] + prm["Height"])
+        th = float(plc["Angle"])
+        if th == 0.0:
+            span = {0: "Length", 1: "Width", 2: "Height"}[a]
+            plc["Position"][a] = -(plc["Position"][a] + prm[span])
         else:
-            plc["Position"][a] = -plc["Position"][a]
+            ax = [float(v) for v in plc["Axis"]]
+            if not (abs(ax[0]) < 1e-12 and abs(ax[1]) < 1e-12
+                    and ax[2] > 0.0):
+                raise ValueError(f"{obj['name']}: mirrored box rotated "
+                                 f"about {ax} is not supported (only +z "
+                                 f"rotations are emitted)")
+            p = [float(v) for v in plc["Position"]]
+            t = math.radians(th)
+            L, W = float(prm["Length"]), float(prm["Width"])
+            if a == 2:
+                p[2] = -(p[2] + float(prm["Height"]))
+            elif a == 0:
+                # M R(t) = R(-t) M; M flips local x: corner moves by
+                # R(-t) * (-L, 0, 0)
+                p = [-p[0] - L * math.cos(t), p[1] + L * math.sin(t), p[2]]
+                plc["Angle"] = -th
+            else:
+                # M flips local y: corner moves by R(-t) * (0, -W, 0)
+                p = [p[0] - W * math.sin(t), -p[1] - W * math.cos(t), p[2]]
+                plc["Angle"] = -th
+            plc["Position"] = p
+    elif m["shape"] == "Part::Cylinder":
+        d = _rotate(plc["Axis"], float(plc["Angle"]), [0.0, 0.0, 1.0])
+        if abs(abs(d[a]) - 1.0) < 1e-9:          # along the mirrored axis
+            plc["Position"][a] = -(float(plc["Position"][a])
+                                   + float(prm["Height"]) * d[a])
+        elif abs(d[a]) < 1e-9:                   # across it
+            plc["Position"][a] = -float(plc["Position"][a])
+        else:
+            raise ValueError(f"{obj['name']}: cylinder direction {d} is "
+                             f"oblique to the {axis} mirror plane; no "
+                             f"mirror rule")
     elif m["shape"] == "Part::Cut":
         m["parameters"]["Base"] = prm["Base"] + sfx
         m["parameters"]["Tool"] = prm["Tool"] + sfx
