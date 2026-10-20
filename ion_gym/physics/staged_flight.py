@@ -47,7 +47,9 @@ import numpy as np
 
 from ion_gym.physics.tracer3d import fly3d
 from ion_gym.physics.collision3d import (E_CHG, KG_AMU,
-                                        gas_kernel_scalars)
+                                        gas_kernel_scalars,
+                                        resolve_collisions)
+from ion_gym.physics.ccs import ion_sigma_m2   # per-ion HS cross section
 # Imported, not redefined. Three definitions of this constant already
 # exist in the tree (stats, sim_build, and the oa_mrt study); a fourth
 # would be a fourth place for it to drift, and a resolution computed with
@@ -609,7 +611,8 @@ def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
         f["tab_t"], f["tab_v"], f["tab_off"],
         f["ele"].astype(_np.float64), float(f["h_mm"]), acc,
         float(reg.dt_ns) * 1e-3, float(reg.t_max_us),
-        g["enabled"], g["T_k"], g["P_pa"], g["sigma_m2"],
+        g["enabled"], g["T_k"], g["P_pa"],
+        ion_sigma_m2(resolve_collisions(reg.gas), mz_Da, q_e),
         g["c_star"], g["c_bar"], g["sig1d"], g["m_gas"],
         rec, int(reg.rec_every), nch, bnd_on, bnd_val, int(seed),
         float(r0_mm[2]), float(v0_mm_us[2]),
@@ -844,7 +847,9 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
         f["EzG"], f["EuG"],
         f["tau_gate"], f["ele"], f["u0"], f["h_mm"], acc,
         dt, float(reg.t_max_us),
-        g["T_k"], g["P_pa"], g["sigma_m2"], g["c_star"], g["c_bar"],
+        g["T_k"], g["P_pa"],
+        ion_sigma_m2(resolve_collisions(reg.gas), mz_Da, q_e),
+        g["c_star"], g["c_bar"],
         g["sig1d"], g["m_gas"],
         sds_on, sds_damp, sds_mfp, sds_V, sds_logmr, sds_stats,
         gas_flow_v[0], gas_flow_v[1], gas_flow_v[2],

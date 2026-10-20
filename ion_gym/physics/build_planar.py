@@ -1489,7 +1489,9 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
     # route takes. With gas on the values are identical to the old inline
     # derivation; in vacuum they are inert (every use in _fly_planar sits
     # under collide_on), so HS and vacuum flights are bit-identical.
-    from ion_gym.physics.collision3d import gas_kernel_scalars
+    from ion_gym.physics.collision3d import (gas_kernel_scalars,
+                                             resolve_collisions)
+    from ion_gym.physics.ccs import ion_sigma_m2   # per-ion sigma
     g = gas_kernel_scalars(col)
     # SDS (diffusion) collision model: the shared tables and per-ion
     # parameters (sds.load_tables / sds_ion_params -- the same door r-z,
@@ -1624,7 +1626,8 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
             model.tab_t, model.tab_v, model.tab_off,
             model.ele.astype(np.float64),
             model.mm_per_gu, acc_i, dt, spec.integration.t_max_us,
-            g["enabled"], g["T_k"], g["P_pa"], g["sigma_m2"], g["c_star"],
+            g["enabled"], g["T_k"], g["P_pa"],
+            ion_sigma_m2(resolve_collisions(col), mz_i, q_e), g["c_star"],
             g["c_bar"], g["sig1d"], g["m_gas"], rec, rec_every, nch,
             bnd_on, bnd_val, env.seed, b[2], b[5],
             sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, _sds_stats,

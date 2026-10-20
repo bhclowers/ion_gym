@@ -66,7 +66,7 @@ namespaces = false
 # SDS diffusion tables live beside the code that loads them
 # (build_planar / tracer3d read them from their own module dir). They MUST
 # ship inside the package, or the collision path raises FileNotFoundError.
-"ion_gym.physics" = ["*.dat"]
+"ion_gym.physics" = ["*.dat", "ccs_fit_n2_z1.json"]
 
 [project.scripts]
 ion-gym = "ion_gym.cli:main"

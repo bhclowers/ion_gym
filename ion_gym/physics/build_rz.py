@@ -560,7 +560,9 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
     # route takes; vacuum gives P = 0 (collisionless) and inert thermal
     # placeholders. Values are identical to the old inline derivation,
     # so hard-sphere flights are bit-identical.
-    from ion_gym.physics.collision3d import gas_kernel_scalars
+    from ion_gym.physics.collision3d import (gas_kernel_scalars,
+                                             resolve_collisions)
+    from ion_gym.physics.ccs import ion_sigma_m2   # per-ion sigma
     from ion_gym.physics.sds import (sds_active, sds_ion_params,
                                      load_tables, blank_collision_channel)
     col = spec.collisions
@@ -685,7 +687,8 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
             _TAB_T0, _TAB_V0, _tab_off0(model),
             model.EzG, model.EuG, model.tau_gate, ee, model.u0,
             model.mm_per_gu, acc_i, dt,
-            spec.integration.t_max_us, T, P, g["sigma_m2"], c_star,
+            spec.integration.t_max_us, T, P,
+            ion_sigma_m2(resolve_collisions(col), m_i, q_e), c_star,
             c_bar, sig1d, mg,
             sds_on, *_sds, sds_stats, vg[0], vg[1], vg[2],
             rec, spec.integration.rec_every,

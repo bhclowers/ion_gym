@@ -1079,9 +1079,14 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
     _opt_3d = [c for c in OPTIONAL_CHANNELS if c in spec.integration.record_channels]
     _ncol_3d = len(BASE_CHANNELS) + len(_opt_3d)
     if coll is not None and verbose:
+        # the sigma shown is the one the kernel flies: per ion under
+        # sigma_model='ccs_fit' (listed in the build advisory), else fixed
+        if str(getattr(coll, "sigma_model", "fixed")) == "ccs_fit":
+            _sig_txt = f"sigma per ion (CCS fit, {coll.ccs_fit_class})"
+        else:
+            _sig_txt = f"sigma={coll.sigma_m2:.3g} m^2"
         print(f"[3d] collisions ON: {coll.model} {coll.gas} "
-              f"P={coll.P_pa:.4g} Pa  T={coll.T_k:g} K  "
-              f"sigma={coll.sigma_m2:.3g} m^2")
+              f"P={coll.P_pa:.4g} Pa  T={coll.T_k:g} K  {_sig_txt}")
     elif verbose:
         print("[3d] collisions OFF (vacuum)")
 

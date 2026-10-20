@@ -1,0 +1,157 @@
+{
+ "gas": "N2",
+ "quantity": "drift-tube CCS, A^2, per ion",
+ "model": "CCS = A_A2 * (m/z) ** B",
+ "charge_abs": 1,
+ "source": "Picache et al., Chem. Sci. 2019, 10, 983-993, Unified CCS Compendium full data set",
+ "source_file": "compendium.csv",
+ "fits": [
+  {
+   "label": "all",
+   "n": 3357,
+   "A_A2": 14.173603543961331,
+   "B": 0.4385870835453894,
+   "resid_sd_frac": 0.09894598713462217,
+   "mz_min": 89.02389999999997,
+   "mz_max": 2833.872600000001
+  },
+  {
+   "label": "positive",
+   "n": 2154,
+   "A_A2": 14.357825311903703,
+   "B": 0.4389287993043271,
+   "resid_sd_frac": 0.09519473800899843,
+   "mz_min": 96.04380000000003,
+   "mz_max": 2759.8513000000007
+  },
+  {
+   "label": "negative",
+   "n": 1203,
+   "A_A2": 15.211283251962325,
+   "B": 0.42198044436706994,
+   "resid_sd_frac": 0.09937369404302285,
+   "mz_min": 89.02389999999997,
+   "mz_max": 2833.872600000001
+  },
+  {
+   "label": "Benzenoids",
+   "n": 367,
+   "A_A2": 19.98306685508519,
+   "B": 0.3730867755590063,
+   "resid_sd_frac": 0.07411941675718722,
+   "mz_min": 108.04610000000004,
+   "mz_max": 915.6688999999997
+  },
+  {
+   "label": "Lipids and lipid-like molecules",
+   "n": 1057,
+   "A_A2": 11.594694600032996,
+   "B": 0.4795932431822418,
+   "resid_sd_frac": 0.055371253763392705,
+   "mz_min": 129.0188,
+   "mz_max": 1626.8889
+  },
+  {
+   "label": "Mixed metal/non-metal compounds",
+   "n": 51,
+   "A_A2": 17.691896242632613,
+   "B": 0.3516524696225014,
+   "resid_sd_frac": 0.07524193863833276,
+   "mz_min": 172.884,
+   "mz_max": 2731.004499999999
+  },
+  {
+   "label": "Nucleosides, nucleotides, and analogues",
+   "n": 261,
+   "A_A2": 18.788378045288727,
+   "B": 0.37965018378780346,
+   "resid_sd_frac": 0.03740236903241552,
+   "mz_min": 226.08470000000008,
+   "mz_max": 808.1426999999999
+  },
+  {
+   "label": "Organic acids and derivatives",
+   "n": 716,
+   "A_A2": 14.523310319092813,
+   "B": 0.4363961567690835,
+   "resid_sd_frac": 0.08616660019472429,
+   "mz_min": 89.02389999999997,
+   "mz_max": 2110.1016000000004
+  },
+  {
+   "label": "Organic oxygen compounds",
+   "n": 288,
+   "A_A2": 11.470194937229593,
+   "B": 0.47020097726543164,
+   "resid_sd_frac": 0.06461761442782109,
+   "mz_min": 105.02250000000002,
+   "mz_max": 1505.8861000000002
+  },
+  {
+   "label": "Organic polymers",
+   "n": 71,
+   "A_A2": 7.03888625997002,
+   "B": 0.5436387877099341,
+   "resid_sd_frac": 0.02923890350471467,
+   "mz_min": 301.1511999999999,
+   "mz_max": 1652.8720000000005
+  },
+  {
+   "label": "Organohalogen compounds",
+   "n": 126,
+   "A_A2": 6.953833655875613,
+   "B": 0.5197224799751774,
+   "resid_sd_frac": 0.05048748703318701,
+   "mz_min": 168.98939999999993,
+   "mz_max": 2833.872600000001
+  },
+  {
+   "label": "Organoheterocyclic compounds",
+   "n": 269,
+   "A_A2": 15.784353230925449,
+   "B": 0.4182586664888626,
+   "resid_sd_frac": 0.049065361746168226,
+   "mz_min": 96.04380000000003,
+   "mz_max": 1377.5571000000004
+  },
+  {
+   "label": "Phenylpropanoids and polyketides",
+   "n": 99,
+   "A_A2": 12.572348402009132,
+   "B": 0.4607669043260655,
+   "resid_sd_frac": 0.04290560800597425,
+   "mz_min": 133.0653,
+   "mz_max": 1683.7738999999992
+  }
+ ],
+ "skipped_classes_below_min_n": [
+  [
+   "Alkaloids and derivatives",
+   4
+  ],
+  [
+   "Homogeneous metal compounds",
+   1
+  ],
+  [
+   "Homogeneous non-metal compounds",
+   1
+  ],
+  [
+   "Organic nitrogen compounds",
+   42
+  ],
+  [
+   "Organometallic compounds",
+   2
+  ],
+  [
+   "Organosulfur compounds",
+   2
+  ]
+ ],
+ "min_n": 50,
+ "measurement_temperature_note": "Compendium values are drift-tube CCS measured near room temperature (about 300 K). A deck flown at another T_k uses them unchanged: the fit is a reasonable estimate, not a temperature-corrected cross section (PI ruling 2026-10-17).",
+ "generated_by": "internal/studies/funnel_opt/fit_ccs_compendium.py",
+ "generated": "2026-10-17"
+}

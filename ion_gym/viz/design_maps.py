@@ -60,11 +60,19 @@ class ProfileCurve:
 
     x, y   : same length; units carried by the axis labels of the call.
     style  : optional matplotlib kwargs (color, ls, lw); empty -> cycle.
+    yerr   : optional per-point uncertainty in y units, drawn as error
+             bars: shape (N,) for symmetric bars, or (2, N) for
+             asymmetric (lower distances, upper distances), matplotlib's
+             convention, which an interval such as Wilson's needs. None (default) draws the plain line, so
+             every existing caller renders exactly as before. A statistic
+             with a counting error (a transmission fraction, say) should
+             carry it: a value without its error is not a result.
     """
     label: str
     x: np.ndarray
     y: np.ndarray
     style: dict = dfield(default_factory=dict)
+    yerr: object = None
 
     def __post_init__(self):
         self.x = np.asarray(self.x, float)
@@ -72,6 +80,15 @@ class ProfileCurve:
         if self.x.shape != self.y.shape or self.x.ndim != 1:
             raise VizError(f"profile {self.label!r}: x{self.x.shape} and "
                            f"y{self.y.shape} must be equal-length 1-D")
+        if self.yerr is not None:
+            self.yerr = np.asarray(self.yerr, float)
+            if self.yerr.shape not in (self.y.shape, (2,) + self.y.shape):
+                raise VizError(f"profile {self.label!r}: yerr"
+                               f"{self.yerr.shape} must be {self.y.shape} "
+                               f"or {(2,) + self.y.shape}")
+            if (self.yerr < 0).any():
+                raise VizError(f"profile {self.label!r}: yerr holds "
+                               f"distances and must be non-negative")
 
 
 def render_profiles(curves, *, xlabel, ylabel, title, subtitle,
@@ -95,7 +112,11 @@ def render_profiles(curves, *, xlabel, ylabel, title, subtitle,
 
     fig, ax = plt.subplots(figsize=figsize)
     for c in curves:
-        ax.plot(c.x, c.y, label=c.label, **c.style)
+        if c.yerr is None:
+            ax.plot(c.x, c.y, label=c.label, **c.style)
+        else:
+            ax.errorbar(c.x, c.y, yerr=c.yerr, label=c.label, capsize=3,
+                        **c.style)
     for xv, lbl in vmarks:
         ax.axvline(float(xv), color="#555555", ls="--", lw=0.9)
         ax.annotate(f" {lbl}", (float(xv), ax.get_ylim()[1]),

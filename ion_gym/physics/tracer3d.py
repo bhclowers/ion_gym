@@ -647,7 +647,10 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
     gfx, gfy, gfz = gas_flow(_col)      # mm/us; (0, 0, 0) in vacuum
     g = gas_kernel_scalars(_col)
     on = g["enabled"]
-    T_k, P_pa, sigma_m2 = g["T_k"], g["P_pa"], g["sigma_m2"]
+    T_k, P_pa = g["T_k"], g["P_pa"]
+    # per-ion cross section from THE authority (physics.ccs)
+    from ion_gym.physics.ccs import ion_sigma_m2
+    sigma_m2 = ion_sigma_m2(_col, mz_Da, charge)
     c_star, c_bar, sig1d, mg = g["c_star"], g["c_bar"], g["sig1d"], g["m_gas"]
 
     xs = np.empty(max_records); ys = np.empty(max_records)

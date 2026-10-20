@@ -344,7 +344,11 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
             "model='hs' here, or fly the deck through build_run on the "
             "planar route, which implements SDS.")
     g = gas_kernel_scalars(collisions)
-    on, T_k, P_pa, sigma = g["enabled"], g["T_k"], g["P_pa"], g["sigma_m2"]
+    on, T_k, P_pa = g["enabled"], g["T_k"], g["P_pa"]
+    # per-ion cross section from THE authority (physics.ccs)
+    from ion_gym.physics.ccs import ion_sigma_m2
+    from ion_gym.physics.collision3d import resolve_collisions
+    sigma = ion_sigma_m2(resolve_collisions(collisions), mz_Da, charge)
     c_star, c_bar, sig1d, mg = g["c_star"], g["c_bar"], g["sig1d"], g["m_gas"]
     # declared gas flow, modelled in the HS step (L-563; it was dropped)
     from ion_gym.physics.collision3d import gas_flow

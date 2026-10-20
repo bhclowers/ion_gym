@@ -4035,14 +4035,31 @@ class SimApp:
                         f"SDS damping time **{t_damp_ns:.1f} ns** at m/z "
                         f"{mz:g} (resolve: dt &le; {_sds_dt:.2f} ns)")
                 else:
+                    # Per-species cross section from THE authority
+                    # (physics.ccs.ion_sigma_m2), so this pane shows the
+                    # sigma each kernel will actually fly: the widget value
+                    # under sigma_model='fixed', the CCS fit under
+                    # 'ccs_fit'. Gas and fixed sigma come from the widgets
+                    # (the values being edited); the model and fit class
+                    # from the spec, which has no widget for them.
+                    import copy as _copy
+                    from ion_gym.physics.ccs import (ion_sigma_m2,
+                                                     validate_sigma_model)
+                    _col_now = _copy.copy(s.collisions)
+                    _col_now.gas = self.w_gas.value
+                    _col_now.sigma_m2 = float(self.w_sigma.value)
+                    _sig_errs = validate_sigma_model(_col_now, charge)
+                    if _sig_errs:
+                        raise ValueError("; ".join(_sig_errs))
                     # the shortest collision time over every species
                     tau_ns, lam, v_ch, mz = min(
                         (1e3 * _l / _v, _l, _v, m)
                         for m in masses
                         for _v in (_v_ch(m),)
-                        for _l in (_mfp_mm(_v, T, P_pa,
-                                           float(self.w_sigma.value),
-                                           c_star, c_bar),))
+                        for _l in (_mfp_mm(
+                            _v, T, P_pa,
+                            ion_sigma_m2(_col_now, m, charge),
+                            c_star, c_bar),))
                     _hs_dt = tau_ns / HS_DT_PER_COLLISION_TIME
                     recs.append(_hs_dt)
                     lines.append(

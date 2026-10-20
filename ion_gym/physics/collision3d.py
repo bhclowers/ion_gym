@@ -66,12 +66,92 @@ GASES = {"He": 4.002602, "H2": 2.01588, "N2": 28.0134, "air": 28.9647,
 _VACUUM_REF_T_K = 298.0
 _VACUUM_REF_M_GAS = 4.0
 
-# dt guidance for HS: collision occurrence is one Poisson draw per step,
-# P = 1 - exp(-v dt / lambda). Keeping P <~ 0.1, i.e. dt <= tau /
-# HS_DT_PER_COLLISION_TIME with tau = lambda / v, preserves the
-# exponential free-path statistics; larger steps undercount multiple
-# collisions per step.
-HS_DT_PER_COLLISION_TIME = 10.0
+# dt guidance for HS: collision occurrence is one draw per step,
+# P = 1 - exp(-x) with x = v dt / lambda = dt / tau, and at most ONE
+# collision is applied per step. The kept fraction of the true collision
+# rate is therefore (1 - exp(-x)) / x: 0.975 at x = 1/20, 0.952 at 1/10,
+# 0.87 at 0.29. Lost collisions make the ion too mobile.
+# 2026-10-17: raised from 10 to 20 to match SIMION collision_hs1.lua,
+# whose tstep_adjust caps every step at MFP / speed / _steps_per_MFP with
+# _steps_per_MFP = 20 by default (about a 2.5 % rate undercount). ion_gym
+# flies a FIXED dt, so the rule is checked at build time by hs_step_note
+# and reported as a loud advisory, never a refusal (PI ruling 2026-10-17).
+HS_DT_PER_COLLISION_TIME = 20.0
+
+
+def hs_step_table(spec, dt_ns):
+    """Per-m/z hard-sphere step check, the numbers behind hs_step_note.
+
+    Returns None when the check does not apply (vacuum, SDS, no dt, or a
+    cross-section model validate() refuses), else a list of dicts, one per
+    declared m/z: mz, sigma_m2 (from ccs.ion_sigma_m2, so a per-ion CCS
+    model is honoured), tau_ns (mean collision time of an ion AT REST,
+    1 / (n sigma c_bar_gas)), x = dt / tau, and kept = (1 - exp(-x)) / x,
+    the fraction of the true collision rate a one-collision-per-step
+    kernel applies. A moving ion collides more often, so tau here is an
+    UPPER bound and x a lower bound on the real coarseness."""
+    from ion_gym.physics.ccs import ion_sigma_m2, validate_sigma_model
+    col = resolve_collisions(getattr(spec, "collisions", None))
+    if col is None:
+        return None
+    if str(col.model).lower() != "hs":
+        # SDS has no discrete collisions, so a per-step collision
+        # probability does not exist to check; nothing is the outcome
+        return None
+    if dt_ns is None:
+        # no step resolved yet: the dt advisories already report an
+        # unpinned dt, and there is nothing to compare against
+        return None
+    if validate_sigma_model(col, spec.source.charge):
+        # validate() refuses this deck by name; there is no valid cross
+        # section to evaluate, so the check has nothing to add
+        return None
+    T = float(col.T_k)
+    n_gas = float(col.P_pa) / (KB * T)
+    m_gas = gas_mass(col.gas) * KG_AMU
+    c_bar_mps = math.sqrt(8.0 * KB * T / (math.pi * m_gas))
+    dt_s = float(dt_ns) * 1.0e-9
+    rows = []
+    for mz in spec.source.mz_list:
+        sigma = ion_sigma_m2(col, mz, spec.source.charge)
+        rate = n_gas * sigma * c_bar_mps
+        x = dt_s * rate
+        rows.append(dict(mz=float(mz), sigma_m2=sigma,
+                         tau_ns=1.0e9 / rate, x=x,
+                         kept=(1.0 - math.exp(-x)) / x))
+    return rows
+
+
+def hs_step_note(spec, dt_ns):
+    """Loud advisory when a hard-sphere step is coarse against the mean
+    collision time (any declared m/z above dt/tau = 1/HS_DT_PER_COLLISION_
+    TIME), or None when it is not. Numbers from hs_step_table, evaluated
+    for an ion at rest: a LOWER bound on the problem, so the note's
+    absence does not certify a field-driven ion. Warns, never refuses
+    (PI ruling 2026-10-17)."""
+    rows = hs_step_table(spec, dt_ns)
+    if rows is None:
+        # the check does not apply; hs_step_table states why per case
+        return None
+    limit = 1.0 / HS_DT_PER_COLLISION_TIME
+    worst = max(r["x"] for r in rows)
+    if worst <= limit:
+        return None
+    col = resolve_collisions(spec.collisions)
+    dt_ok = float(dt_ns) * limit / worst
+    parts = [f"m/z {r['mz']:g}: tau {r['tau_ns']:.2f} ns, dt/tau "
+             f"{r['x']:.3f}, rate kept {r['kept']:.3f}" for r in rows]
+    return (f"WARNING collisions: hard-sphere step dt = {float(dt_ns):g} ns "
+            f"is coarse against the mean collision time at "
+            f"{float(col.P_torr):g} Torr {col.gas}, {float(col.T_k):g} K. "
+            f"At most one collision is applied per step, so the collision "
+            f"rate is undercounted and ions come out too mobile. For an ion "
+            f"at rest (a LOWER bound; moving ions collide more often): "
+            + "; ".join(parts)
+            + f". The rule dt <= tau / {HS_DT_PER_COLLISION_TIME:g} (SIMION "
+            f"collision_hs1 default) asks for dt <= {dt_ok:.3g} ns here. "
+            f"Fly at that step, or demonstrate a dt plateau for the "
+            f"observable being reported.")
 
 
 def gas_mass(gas):
@@ -111,8 +191,14 @@ def resolve_collisions(collisions):
 
 def gas_kernel_scalars(collisions):
     """Resolve a collision spec (or None) into the scalars every 2-D
-    tracer kernel takes: (enabled, T_k, P_pa, sigma_m2, c_star, c_bar,
-    sig1d, m_gas).
+    tracer kernel takes: (enabled, T_k, P_pa, c_star, c_bar, sig1d,
+    m_gas).
+
+    The hard-sphere CROSS SECTION is deliberately NOT here (2026-10-17):
+    it is a per-ION quantity, and physics.ccs.ion_sigma_m2(collisions,
+    mz, charge) is its one authority. Leaving a run-wide sigma_m2 in this
+    dict would let a route read it and silently fly every ion with one
+    size under sigma_model='ccs_fit'.
 
     ONE derivation, used by every route. Gas is a property of a STAGE,
     not of a geometry class: a drift cell may be r-z and an ion guide
@@ -129,15 +215,14 @@ def gas_kernel_scalars(collisions):
     col = resolve_collisions(collisions)
     if col is None:
         T, mg = _VACUUM_REF_T_K, _VACUUM_REF_M_GAS
-        P_pa = sigma = 0.0
+        P_pa = 0.0
     else:
         T, mg = float(col.T_k), gas_mass(col.gas)
-        P_pa, sigma = float(col.P_pa), float(col.sigma_m2)
+        P_pa = float(col.P_pa)
     return dict(
         enabled=col is not None,
         T_k=T,
         P_pa=P_pa,
-        sigma_m2=sigma,
         c_star=math.sqrt(2 * KB * T / (mg * KG_AMU)) / 1000.0,
         c_bar=math.sqrt(8 * KB * T / (math.pi * mg * KG_AMU)) / 1000.0,
         sig1d=math.sqrt(KB * T / (mg * KG_AMU)) / 1000.0,

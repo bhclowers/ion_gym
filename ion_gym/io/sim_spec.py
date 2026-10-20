@@ -1500,8 +1500,18 @@ class CollisionSpec(_StrictAttrs):
     gas_diam_nm: float = 0.366         # SDS gas diameter (air default)
     flow_mm_us: List[float] = field(
         default_factory=lambda: [0.0, 0.0, 0.0])
+    # PER-ION HARD-SPHERE CROSS SECTION (2026-10-17). "fixed" flies
+    # sigma_m2 for every ion (the historical behaviour). "ccs_fit" takes
+    # each ion's cross section from the N2 drift-tube CCS power-law fit
+    # in physics.ccs, subset ccs_fit_class. physics.ccs.ion_sigma_m2 is
+    # the one authority every route reads.
+    sigma_model: str = "fixed"
+    ccs_fit_class: str = "all"
 
     _RUNTIME_ATTRS = frozenset({"_extras", "_ready"})
+    # Written to a saved deck only when they differ from these values, so
+    # every deck saved before the fields existed round-trips unchanged.
+    _OMIT_WHEN_DEFAULT = (("sigma_model", "fixed"), ("ccs_fit_class", "all"))
     P_TORR_DEFAULT = 1.0               # the dataclass default (R3 ruling)
 
     def __post_init__(self):
@@ -1571,6 +1581,11 @@ class CollisionSpec(_StrictAttrs):
     def to_dict(self):
         d = asdict(self)
         d.pop("P_pa", None)            # derived: Torr is the stored value
+        for key, default in self._OMIT_WHEN_DEFAULT:
+            if d.get(key) == default:
+                # omitted ON PURPOSE: the loader restores the default,
+                # and pre-existing decks stay byte-identical on save
+                d.pop(key)
         return d
 
     @classmethod
@@ -2254,6 +2269,11 @@ class SimSpec(_StrictAttrs):
                     errs.append(
                         f"collisions enabled but {_f} is None -- set it "
                         f"(pressure is collisions.P_torr; P_pa is derived)")
+            # per-ion cross-section model: unknown model, unknown fit
+            # class, or a fit asked of a gas/charge it was not fitted to
+            from ion_gym.physics.ccs import validate_sigma_model
+            errs.extend(validate_sigma_model(self.collisions,
+                                             self.source.charge))
         if self.transporter is not None:
             errs.extend(self.transporter.validate())
         # RADIAL CHANNELS need an axis (L-539): built in on r-z, declared
@@ -2725,6 +2745,19 @@ class SimSpec(_StrictAttrs):
         if (sds_active(self.collisions)
                 and "n_col" in (_it.record_channels or [])):
             out.append(SDS_NO_COLLISION_COUNT)
+        # PER-ION CROSS SECTIONS under sigma_model='ccs_fit': the value
+        # each declared m/z flies with, extrapolations flagged (displayed
+        # equals solver input).
+        from ion_gym.physics.ccs import sigma_note
+        _sig_note = sigma_note(self)
+        if _sig_note:
+            out.append(_sig_note)
+        # HARD-SPHERE STEP vs COLLISION TIME (PI ruling 2026-10-17: a
+        # loud warning, never a refusal).
+        from ion_gym.physics.collision3d import hs_step_note
+        _hs_note = hs_step_note(self, _dt)
+        if _hs_note:
+            out.append(_hs_note)
         return out
 
 
