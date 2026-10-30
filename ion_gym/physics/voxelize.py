@@ -269,7 +269,11 @@ def voxelize_meshes(meshes, grid, surface_eps_gu=0.0):
     Stored/folded frame (nodes at integer gu, origin on the mirror axes)."""
     g = grid
     lab = np.zeros((g.nx, g.ny, g.nz), np.int16)
+    from ion_gym.physics.raster2d import check_cancel
     for idx, mesh in sorted(meshes.items()):
+        # a stop requested through raster2d.cancel_scope lands between
+        # meshes (no-op when no scope is open)
+        check_cancel("mesh voxelization")
         inside = _parity_inside(mesh, g.nx, g.ny, g.nz)
         inside = _shell_promote(mesh, inside, surface_eps_gu)
         clash = inside & (lab != 0) & (lab != idx)

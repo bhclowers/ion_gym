@@ -1081,7 +1081,9 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
     if coll is not None and verbose:
         # the sigma shown is the one the kernel flies: per ion under
         # sigma_model='ccs_fit' (listed in the build advisory), else fixed
-        if str(getattr(coll, "sigma_model", "fixed")) == "ccs_fit":
+        from ion_gym.physics.ccs import SIGMA_MODEL_DEFAULT
+        if str(getattr(coll, "sigma_model",
+                       SIGMA_MODEL_DEFAULT)) == "ccs_fit":
             _sig_txt = f"sigma per ion (CCS fit, {coll.ccs_fit_class})"
         else:
             _sig_txt = f"sigma={coll.sigma_m2:.3g} m^2"

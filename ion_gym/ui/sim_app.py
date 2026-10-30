@@ -43,6 +43,7 @@ except ImportError:
 from ion_gym.io.sim_spec import (SimSpec, OPTIONAL_CHANNELS,
                                 set_pitch)
 from ion_gym.io.spec_io import load_any_spec
+from ion_gym.physics.ccs import SIGMA_MODEL_DEFAULT
 from ion_gym.physics.sim_build import build_run, build_needs_solve, build_route
 from ion_gym.physics.ensemble_driver import run_threaded
 from ion_gym.ui.widget_options import set_options
@@ -145,6 +146,18 @@ def _stop_periodic(pcb, label):
 DRIVE_W = dict(wave=120, amp=120, freq=140, phase=130, duty=90)
 PANEL_MARGIN_PX = 20          # Panel's default per-widget margins
 VIEW_PX = 560                 # pane height when the view is not size-locked
+# Margins (px) of the main view figure, solved and preview alike. With the
+# aspect lock on they are FIXED (viz_core.true_scale_layout) so the plot
+# area, not the pane, is 1:1 in mm.
+VIEW_MARGIN = dict(l=50, r=10, t=30, b=40)
+# Per-thread queue of LOOP-ONLY writes (pane size, status) that code run
+# inside a dispatched figure build must not perform on its worker thread.
+# _dispatch_figure opens the queue on the worker and applies it on the
+# loop, just before publishing. Outside a dispatched build there is no
+# queue and the writes happen at once (headless, or already on the loop).
+_LOOP_WRITES = threading.local()
+# Text of the advisory line before the current spec has been built.
+ADVISORY_NONE_YET = "_not built yet: advisories appear at solve or fly_"
 CONTROL_COL_PX = (sum(DRIVE_W.values())
                   + PANEL_MARGIN_PX * len(DRIVE_W) + 30)
 # Panel/Bokeh give a widget with no declared width this many pixels. It is
@@ -675,9 +688,26 @@ class SimApp:
         import traceback as _tb
 
         import panel as pn
+        from ion_gym.physics.raster2d import RasterInterrupted, cancel_scope
         gen = self._fig_gen = getattr(self, "_fig_gen", 0) + 1
+        # STOPPABLE BUILD (2026-10-30: a fine-pitch electrode preview ran
+        # for a minute and Stop did nothing). Each build runs inside its
+        # own raster2d cancel scope. A newer build cancels the older one
+        # (its result would be dropped as stale anyway), and Stop cancels
+        # the live one (_on_stop). The rasterizers check the event between
+        # shapes and polygon edges.
+        _prev = getattr(self, "_fig_cancel", None)
+        if _prev is not None:
+            _prev.set()
+        cancel = self._fig_cancel = threading.Event()
 
         def _report_error(e, tb_text):
+            if isinstance(e, RasterInterrupted):
+                # a requested stop is a clean outcome, not a failure
+                self.status.object = (
+                    f"**{label} stopped** — the picture was not drawn. "
+                    f"Change the plane or apply a pitch to draw it again.")
+                return
             print(tb_text, end="")
             if on_error is not None:
                 on_error(e)
@@ -687,7 +717,9 @@ class SimApp:
 
         if pn.state.curdoc is None:
             try:
-                publish(build())
+                with cancel_scope(cancel):
+                    payload = build()
+                publish(payload)
             except Exception as e:
                 _report_error(e, _tb.format_exc())
             return
@@ -705,12 +737,16 @@ class SimApp:
         state = {"base_obj": self.pane.object}   # pinned: identity, not id()
 
         def work():
+            _LOOP_WRITES.queue = []          # loop-only writes, deferred
             try:
-                state["payload"] = build()
+                with cancel_scope(cancel):
+                    state["payload"] = build()
             except Exception as e:           # transport, not a swallow:
                 state["err"] = e             # re-surfaced on the loop,
                 state["tb"] = _tb.format_exc()   # traceback and all
             finally:
+                state["loop_writes"] = _LOOP_WRITES.queue
+                _LOOP_WRITES.queue = None
                 state["done"] = True
 
         worker = threading.Thread(target=work, daemon=True)
@@ -729,12 +765,15 @@ class SimApp:
             payload = state.pop("payload", None)
             err = state.pop("err", None)
             tb = state.pop("tb", None)
+            loop_writes = state.pop("loop_writes", None) or []
             stale = (gen != self._fig_gen
                      or self.pane.object is not base_obj)
             if stale:
                 why = ("a newer redraw" if gen != self._fig_gen
                        else "another publisher (run/PE/assembly figure)")
-                note = (f"failed ({type(err).__name__}: "
+                note = ("was stopped and" if isinstance(
+                            err, RasterInterrupted) else
+                        f"failed ({type(err).__name__}: "
                         f"{err}) and was" if err is not None
                         else "was")
                 print(f"[sim_app] {label}: build {note} superseded by "
@@ -743,6 +782,11 @@ class SimApp:
             if err is not None:
                 _report_error(err, tb)
                 return
+            # the build's pane-size and status writes, on the loop, for
+            # the figure about to be published (a stale build's writes
+            # were dropped above with its payload)
+            for _write in loop_writes:
+                _write()
             publish(payload)
 
         def poll():
@@ -1571,12 +1615,32 @@ class SimApp:
             "ions relax toward.")
         self.w_P = pn.widgets.FloatInput(name="P (Torr)",
                                          value=float(col.P_torr))
+        # σ SOURCE made explicit (Brian 2026-10-21: "it is currently
+        # unclear in the GUI which value for the HS is being honored").
+        # The spec always had sigma_model; the GUI had no widget for it,
+        # so a ccs_fit deck silently ignored the σ field below while the
+        # user edited it. One Select decides, the readout under it shows
+        # the σ each kernel will actually fly (same authority as the
+        # kernel: physics.ccs.ion_sigma_m2), and the σ field is greyed
+        # out whenever it is not the honored source.
+        self.w_sigma_model = pn.widgets.Select(
+            name="HS σ source",
+            value=getattr(col, "sigma_model", SIGMA_MODEL_DEFAULT),
+            options={"fixed value (the σ field below)": "fixed",
+                     "CCS fit (per-ion from the m/z fit, the default)":
+                     "ccs_fit"},
+            description="What sets the hard-sphere cross-section: the "
+            "explicit σ below for every ion, or the per-m/z CCS fit "
+            "(physics.ccs). The readout underneath shows the value "
+            "actually handed to the kernel either way.")
         self.w_sigma = pn.widgets.LiteralInput(
             name="HS cross-section σ (m²)", value=col.sigma_m2,
             type=(int, float),
             description="Hard-sphere ion–neutral collision cross-section. "
-            "Used only by the HS model; larger σ = more frequent "
+            "Used only by the HS model, and only when the σ source above "
+            "is 'fixed value'; larger σ = more frequent "
             "collisions. Typical N₂ value ≈ 2.3e-18 m².")
+        self.w_sigma_honored = pn.pane.Markdown("", width=560)
         self.w_gdiam = pn.widgets.FloatInput(
             name="SDS gas diameter (nm)",
             value=float(col.gas_diam_nm),     # the spec's own value
@@ -1590,10 +1654,17 @@ class SimApp:
         self.w_dt_advice = pn.pane.Markdown("", width=560)
         gas_tab = pn.Column(self.w_gas_on, self.w_col_model, self.w_gas,
                             self.w_T, self.w_P, self.w_dt_advice,
-                            self.w_sigma, self.w_gdiam)
+                            self.w_sigma_model, self.w_sigma,
+                            self.w_sigma_honored, self.w_gdiam)
         for _w in (self.w_gas_on, self.w_col_model, self.w_gas, self.w_T,
-                   self.w_P, self.w_sigma, self.w_gdiam):
+                   self.w_P, self.w_sigma_model, self.w_sigma,
+                   self.w_gdiam):
             _w.param.watch(lambda _e: self._update_dt_advice(), "value")
+        for _w in (self.w_gas_on, self.w_col_model, self.w_gas,
+                   self.w_sigma_model, self.w_sigma):
+            _w.param.watch(lambda _e: self._update_sigma_honored(),
+                           "value")
+        self._update_sigma_honored()
 
         # --- Integration tab
         self.w_dt = pn.widgets.FloatInput(
@@ -1984,6 +2055,16 @@ class SimApp:
             self.w_plot_btn = pn.widgets.Button(
                 name="Plot", button_type="primary", width=90)
             self.w_plot_btn.on_click(self._on_analysis_plot)
+            # CSV export of the plotted data (Brian 2026-10-21). The
+            # button downloads the series STASHED when the figure was
+            # drawn — export twin of the plot, never a re-extraction
+            # that could disagree with what is on screen. Disabled
+            # until a plot exists; both plot paths (single-stage and
+            # assembly) enable it.
+            self.w_acsv = pn.widgets.FileDownload(
+                callback=self._analysis_csv_payload,
+                filename="analysis.csv", auto=True, width=220,
+                label="Export plotted data (CSV)", disabled=True)
             self.analysis_pane = pn.pane.Plotly(
                 height=560, sizing_mode="stretch_width")
             # --- Thermal assessment (two-estimator temperatures) ---
@@ -2016,7 +2097,8 @@ class SimApp:
                 pn.Row(self.w_amode, self.w_agroup, self.w_astyle,
                        self.w_bins, self.w_amz),
                 pn.Row(self.w_ascheme, self.w_an_alpha),
-                self.w_plot_btn, self.analysis_pane,
+                pn.Row(self.w_plot_btn, self.w_acsv),
+                self.analysis_pane,
                 sizing_mode="stretch_width")
             # --- THERMAL tab (thermal analysis lives
             # in its own tab, with hot-spot analysis) --------------
@@ -2721,6 +2803,11 @@ class SimApp:
                 spec.collisions = self.spec.collisions
                 spec.integration = self.spec.integration
                 self._pre_stl_spec = self.spec        # for restore on clear
+                # A NEW SPEC DROPS ANY INSTRUMENT, as every other load path
+                # does: without this an STL import after viewing an
+                # assembly kept the multi-FA banner and the whole-assembly
+                # subject over a single-FA spec.
+                self._clear_assembly_state()
                 self.spec = spec
                 self._rebuild_for_new_spec(solve=False, box_from_loaded=True)
                 # FLAG the dimensionality assumption rather than hiding it:
@@ -2767,7 +2854,7 @@ class SimApp:
                 get_results=lambda: (self._runs[self._active].results
                                      if self._active in self._runs else None),
                 get_run_id=lambda: self._active)
-            self._pe_tab.w_mz.value = float(self.spec.source.mz_list[0])
+            self._sync_pe_mz_to_spec()
 
         # Field Slice tab: a flat sliced heatmap+contour view of |E| / φ /
         # PE on any plane, with colormap/log/range and contour controls
@@ -3014,9 +3101,20 @@ class SimApp:
         self._ensure_machine_widgets()
         self.workers_line = pn.pane.Markdown(
             "_no flight this session_", sizing_mode="stretch_width")
+        # ADVISORIES FOR THE CURRENT SPEC, PERSISTENT (PI ruling
+        # 2026-10-24). Advisories used to be written to the status line,
+        # where the next message ("reused the solved field", the solve
+        # progress line) replaced them within a fraction of a second, so a
+        # warning such as an extrapolated CCS never stayed readable. This
+        # line keeps them until the spec changes (_set_advisories).
+        self.w_advisory = pn.pane.Markdown(
+            ADVISORY_NONE_YET, sizing_mode="stretch_width",
+            styles={"overflow-wrap": "anywhere"})
         self._status_col = pn.Column(
             pn.pane.Markdown("#### current"),
             self.status,
+            pn.pane.Markdown("#### advisories for this spec"),
+            self.w_advisory,
             pn.layout.Divider(),
             pn.pane.Markdown("#### workers"),
             # The worker-count and record-RAM CONTROLS moved to the
@@ -3916,6 +4014,7 @@ class SimApp:
         s.collisions.set_pressure_torr(self.w_P.value)   # both fields, atomically
         s.collisions.__post_init__()
         s.collisions.sigma_m2 = self.w_sigma.value
+        s.collisions.sigma_model = self.w_sigma_model.value
         s.collisions.model = self.w_col_model.value
         s.collisions.gas_diam_nm = self.w_gdiam.value
         s.integration.dt_ns = self.w_dt.value
@@ -3949,6 +4048,60 @@ class SimApp:
         self._update_dt_advice()
 
     # --------------------------------------------------- rendering
+    def _update_sigma_honored(self):
+        """The σ the HS kernel will actually fly, shown under the σ
+        widgets — from the SAME authority the kernel uses
+        (physics.ccs.ion_sigma_m2), per declared species at the source's
+        charge, so display == solver input. Also greys the σ field out
+        whenever it is not the honored source. Errors render IN the
+        pane, never silently."""
+        import copy as _copy
+        try:
+            from ion_gym.physics.ccs import (ion_sigma_m2,
+                                             validate_sigma_model)
+            pane = self.w_sigma_honored
+            model = self.w_col_model.value
+            if not self.w_gas_on.value:
+                self.w_sigma.disabled = False
+                pane.object = "*collisions off — no σ in play.*"
+                return
+            if str(model) == "sds":
+                self.w_sigma.disabled = False
+                pane.object = ("*SDS model — σ is unused (the gas "
+                               "diameter below governs SDS).*")
+                return
+            src = self.w_sigma_model.value
+            self.w_sigma.disabled = (src == "ccs_fit")
+            col_now = _copy.copy(self.spec.collisions)
+            col_now.gas = self.w_gas.value
+            col_now.sigma_m2 = float(self.w_sigma.value)
+            col_now.sigma_model = src
+            charge = int(getattr(self.spec.source, "charge", 1) or 1)
+            masses = list(self.spec.source.mz_list or [])
+            errs = validate_sigma_model(col_now, charge)
+            if errs:
+                pane.object = ("**σ source not usable:** "
+                               + "; ".join(errs))
+                return
+            if src == "fixed":
+                pane.object = (
+                    "**HS σ honored: the fixed value above** — "
+                    "{0:.3g} m² for every ion.".format(col_now.sigma_m2))
+                return
+            per = ", ".join(
+                "m/z {0:g} → {1:.3g} m²".format(
+                    m, ion_sigma_m2(col_now, m, charge))
+                for m in masses) or "no species declared yet"
+            pane.object = (
+                "**HS σ honored: the CCS fit** (class "
+                "{0}, z = {1}): {2}. _The σ field above is ignored "
+                "under the fit._".format(
+                    getattr(col_now, "ccs_fit_class", "all"), charge, per))
+        except Exception as e:
+            self.w_sigma_honored.object = (
+                "**σ readout failed:** {0}: {1}".format(
+                    type(e).__name__, e))
+
     def _update_dt_advice(self):
         """dt-adequacy text beside the pressure. Two
         physical clocks bound the step, both computed from the SAME
@@ -4134,7 +4287,8 @@ class SimApp:
                                 plane=pl, metal_mode=mm,
                                 electrode_dc=(self._electrode_dc()
                                               if mm != "mask" else None),
-                                trust_cells=int(self._pe_tab.w_trust.value))
+                                trust_cells=int(self._pe_tab.w_trust.value),
+                                **self._pe_tab.text_options())
         # For an RF device the DC potential is ~0, so the view shows the
         # field at the drive PEAK — the quad saddle and its contours become
         # visible instead of a blank DC map.
@@ -4361,9 +4515,9 @@ class SimApp:
                 fig.add_hline(y=val, line=dict(color="#9467bd", width=1.2,
                               dash="dash"))
         fig.update_layout(
-            height=560, xaxis_title=f"{la} (mm)", yaxis=yaxis,
+            xaxis_title=f"{la} (mm)", yaxis=yaxis,
             xaxis=dict(autorange=True), dragmode="zoom",
-            margin=dict(l=50, r=10, t=30, b=40),
+            margin=dict(VIEW_MARGIN),
             # zoom persists WITHIN a plane but resets when the plane
             # changes ("keep" alone froze the previous plane's zoom, which
             # made view switches look broken/empty)
@@ -4459,10 +4613,10 @@ class SimApp:
         # read off it. Deck-driven, instrument-agnostic.
         V.station_overlays(fig, self.spec, la, lb,
                            label=bool(self.w_ellabel.value))
-        self._size_pane(true_shape, ra, rb)
+        self._size_pane(fig, true_shape)
         return fig
 
-    def _finish_preview(self, fig, la, lb, ra=None, rb=None):
+    def _finish_preview(self, fig, la, lb, ra=None, rb=None, note=None):
         """Size the pane and apply the stated ranges to a geometry-preview
         figure, then show it.  EVERY preview branch still ends here -- the
         single finish point is worth keeping even though the square framing
@@ -4474,14 +4628,18 @@ class SimApp:
         display, which is the shape of defect `display == solver input`
         exists to prevent.
         """
-        self.pane.sizing_mode = "stretch_width"
-        self.pane.width = None
-        self.pane.height = VIEW_PX
-        fig.update_layout(autosize=True, width=None, height=VIEW_PX)
         if ra:
             fig.update_xaxes(range=list(ra))
         if rb:
             fig.update_yaxes(range=list(rb))
+        if note is not None:
+            # the preview was drawn coarser than the solve: say so where
+            # the user is looking, as well as on the figure
+            self.status.object = f"⚠ {note}"
+        # THE SAME LOCK RULE AS THE SOLVED VIEW (PI ruling 2026-10-24).
+        # The preview used to force a full-width 560 px pane whatever the
+        # lock said, so the shape jumped when the solve finished.
+        self._size_pane(fig, bool(self.w_lock.value))
         self.pane.object = fig
 
     def _uirev(self, la, lb, prefix="keep"):
@@ -4500,35 +4658,69 @@ class SimApp:
             self._view_rev = getattr(self, "_view_rev", 0) + 1
         return f"{prefix}-{plane}-{getattr(self, '_view_rev', 0)}"
 
-    def _size_pane(self, true_shape, ra, rb):
-        pane = getattr(self, "pane", None)
-        if pane is None:
-            return
-        try:
-            # Only touch the pane when the size ACTUALLY changes. Writing
-            # width/height on every redraw makes Panel resize the pane, which
-            # makes Plotly relayout, which throws away the user's wheel-zoom
-            # -- the view snaps back and reads as a spurious "autoscale".
-            if true_shape and ra and rb:
-                from ion_gym.viz import viz_core
-                sz = viz_core.pane_size_for((ra[0], ra[1], rb[0], rb[1]),
-                                            px_width=900)
+    def _size_pane(self, fig, true_shape):
+        """THE one writer of the main view's pixel box (solved and preview).
+
+        Locked: viz_core.true_scale_layout makes the PLOT AREA 1:1 in mm
+        from the figure's own axis ranges, fixes its margins and legend
+        band, and returns the pane box. The figure has no size of its
+        own. Three defects made a locked view stretched (an Orbitrap xy
+        rendered at ~28 px/mm in x and ~18.5 in y). The figure set
+        height=560 over the pane's box. The pane, not the plot area, was
+        sized 1:1, so the margins skewed it. The box was sized from the
+        declared domain while the axes showed the domain unioned with
+        drawn geometry. Reading the displayed ranges retires the last one.
+
+        Unlocked: the pane fills the width at VIEW_PX and the figure
+        autosizes into it.
+
+        The FIGURE is changed here, on whatever thread builds it. The
+        PANE and STATUS writes are loop-only, so inside a dispatched build
+        they are queued (_LOOP_WRITES) and applied on the loop just
+        before the figure is published.
+        """
+        msg = None
+        sz = None
+        if true_shape:
+            try:
+                sz = V.true_scale_layout(fig, margin=VIEW_MARGIN,
+                                         px_width=900)
+            except V.VizError as e:
+                # an autoranged axis has no extent to lock. Stated where
+                # the user is looking, then the view fills the width.
+                msg = f"aspect lock not applied to this view: {e}"
+                print(f"[sim_app] {msg}")
+        if sz is None:
+            fig.update_layout(width=None, height=None, autosize=True)
+
+        def _apply():
+            pane = getattr(self, "pane", None)
+            if pane is None:
+                return
+            if msg is not None:
+                self.status.object = f"⚠ {msg}"
+            if sz is not None:
+                # Only touch the pane when the size ACTUALLY changes.
+                # Writing width/height on every redraw makes Panel resize
+                # the pane, which makes Plotly relayout, which throws away
+                # the user's wheel-zoom.
                 if (pane.sizing_mode != "fixed"
                         or pane.width != sz["width"]
                         or pane.height != sz["height"]):
                     pane.sizing_mode = "fixed"
                     pane.width = sz["width"]
                     pane.height = sz["height"]
-            elif pane.sizing_mode != "stretch_width":
+            elif (pane.sizing_mode != "stretch_width"
+                    or pane.height != VIEW_PX):
                 pane.sizing_mode = "stretch_width"
                 pane.width = None
                 pane.height = VIEW_PX
-        except (ValueError, TypeError, AttributeError) as e:
-            # Sizing must not break a solve -- but it must not fail SILENTLY
-            # either: a pane that never resizes renders every locked view
-            # stretched, and that is exactly the class of bug that shipped.
-            print(f"[sim_app] WARNING: pane sizing failed ({e}); "
-                  f"the view may render stretched")
+
+        queue = getattr(_LOOP_WRITES, "queue", None)
+        if queue is not None:
+            queue.append(_apply)
+        else:
+            _apply()
 
     @staticmethod
     def _el_mask(masks, i, el):
@@ -5053,11 +5245,14 @@ class SimApp:
             self.status.object = "**spec errors:** " + "; ".join(errs)
             return
         _advs = self.spec.advisories()
+        # warned, not blocked: the build proceeds. The advisories go to
+        # the persistent line, and the status line points there, because
+        # later status writes replace the status line within moments.
+        self._set_advisories(_advs)
         if _advs:
-            # warned, not blocked: the build proceeds;
-            # the reason is stated where the user is looking.
-            self.status.object = ("⚠ **advisory** — "
-                                  + " | ".join(_advs))
+            self.status.object = (f"⚠ **{len(_advs)} advisory(ies)** for "
+                                  f"this spec, listed under *advisories "
+                                  f"for this spec* in the Status tab")
         spec = self.spec
         vb = self.w_verbose.value
         # one-click save offer (explicit save plus an
@@ -5224,8 +5419,13 @@ class SimApp:
                         _w = getattr(self, "w_ram_budget", None)
                         _budget = (float(_w.value)
                                    if (_w is not None and _w.value) else None)
-                        st["res"] = build_run(spec, verbose=vb,
-                                              record_budget_gb=_budget)
+                        # the solve's own electrode rasterization runs
+                        # BEFORE the first V-cycle, so Stop reaches it
+                        # through the same event the multigrid polls
+                        from ion_gym.physics.raster2d import cancel_scope
+                        with cancel_scope(multigrid3d.stop_event()):
+                            st["res"] = build_run(
+                                spec, verbose=vb, record_budget_gb=_budget)
                 except Exception as e:
                     st["err"] = e
                     st["tb"] = _tb.format_exc()
@@ -5321,7 +5521,8 @@ class SimApp:
             if st["err"] is not None:
                 e = st["err"]
                 from ion_gym.physics.multigrid3d import SolveInterrupted
-                if isinstance(e, SolveInterrupted):
+                from ion_gym.physics.raster2d import RasterInterrupted
+                if isinstance(e, (SolveInterrupted, RasterInterrupted)):
                     # a requested stop is a clean outcome, not a failure
                     self.status.object = ("**solve stopped** — no field "
                                           "computed; press Go to restart")
@@ -5709,14 +5910,24 @@ class SimApp:
         if (self.w_showfield.value
                 and self.w_fieldmode.value.startswith("PE 3D")
                 and hasattr(self._model, "pe_surface")):
-            from ion_gym.viz.pe_view import pe_figure_3d
+            from ion_gym.viz.pe_view import pe_figure_3d, resolve_drape_scope
             mzq = float(self._pe_tab.w_mz.value or self.spec.source.mz_list[0])
             pl, mm = self._pe_opts()
+            # THE SAME DRAPE SCOPE AS THE PE TAB, resolved for THIS plane
+            # and stated on the figure. This view used to take
+            # pe_figure_3d's default ("slice"), so an axial flight on a
+            # crossing plane was draped as dots here while the PE tab
+            # drew whole paths for the same run.
+            _scope, _why = resolve_drape_scope(
+                self._pe_tab.w_drape_scope.value, pl,
+                self.spec.source.direction)
             self.pane.object = pe_figure_3d(
                 self._model, mz=mzq, results=results,
                 decimate=self.w_decim.value, plane=pl, metal_mode=mm,
                 electrode_dc=(self._electrode_dc() if mm != "mask" else None),
-                trust_cells=int(self._pe_tab.w_trust.value))
+                trust_cells=int(self._pe_tab.w_trust.value),
+                drape_scope=_scope, subtitles=(_why,),
+                **self._pe_tab.text_options())
             self.stats.update(results, self.spec,
                               stations=self._station_stats(results))
             if getattr(self, "stats_impact", None) is not None:
@@ -5950,13 +6161,24 @@ class SimApp:
                                   width=self.w_width.value),
                         marker=dict(color=g["color"], size=3),
                         opacity=self.w_alpha.value,
-                        showlegend=bool(g["showlegend"]),
+                        showlegend=(bool(g["showlegend"])
+                                    and (g["name"], g["legendgroup"])
+                                    not in _hidden_legend()),
                         name=g["name"], legendgroup=g["legendgroup"],
                         hoverinfo="skip")
+
+        def _hidden_legend():
+            # legend entries the last sized full build hid for lack of
+            # room (true_scale_layout), so a streamed frame keeps them
+            # hidden instead of spilling out of the band
+            _b = getattr(self, "_live_bank", None) or {}
+            return _b.get("legend_hidden", set())
 
         def _fate_dict(code, xs, ys):
             return dict(type="scatter", x=xs, y=ys, mode="markers",
                         name=fate_name(code),
+                        showlegend=((fate_name(code), None)
+                                    not in _hidden_legend()),
                         marker=dict(color=fate_color(code),
                                     size=self.w_impactsize.value,
                                     symbol=self.w_impactsym.value,
@@ -6017,6 +6239,19 @@ class SimApp:
                 xs, ys = _fate_xy(code)
                 _fate_trace(fig, code, xs, ys)
             _apply_disclosure()
+            # SIZE THE FINISHED FIGURE. _base_figure sized the pane before
+            # the m/z and fate traces existed, so their legend had no band
+            # under the lock. Sizing again here counts them, and streamed
+            # frames then reuse this sized layout, not the pre-trace one.
+            self._size_pane(fig, bool(self.w_lock.value))
+            if live:
+                self._live_bank["base_layout"] = dict(
+                    fig.to_plotly_json()["layout"])
+                # streamed frames rebuild the path and fate traces from
+                # dicts, so they must keep hidden the entries the sizing hid
+                self._live_bank["legend_hidden"] = {
+                    (tr.name, getattr(tr, "legendgroup", None))
+                    for tr in fig.data if V.legend_hidden(tr)}
             self.pane.object = fig
             if not live:
                 # a stored/final draw retires the live bank: the flight
@@ -7301,131 +7536,216 @@ class SimApp:
             rf_period = None            # DC-only run: no split, reported
         gas = resolve_collisions(self.spec.collisions)
         bath = None if gas is None else float(gas.T_k)
-        rep = two_estimator_report(V, KE, m_kg, fit_from_pctl=pctl,
-                                   n_bins=nb, t_by_axis=T,
-                                   rf_period_us=rf_period, bath_K=bath)
-        # DIAGNOSE 'no motion': if every axis came back None, the velocity
-        # arrays were empty or ~all-zero — say WHICH, and the likely cause,
-        # instead of three silent dashes (the table read all '—'
-        # on an imported run whose ions clearly flew). SDS carries no thermal
-        # velocity by design; HS/vacuum records real velocities.
-        if all(rep.get(ax) is None for ax in ("x", "y", "z")):
-            import numpy as _np
-            stat = []
+        # ---- OFF-LOOP COMPUTE (Brian 2026-10-21, after the hang dump):
+        # everything above is widget reads and O(N) assembly; everything
+        # below — the estimators, the ride-height report, the figure
+        # build — is pure compute on snapshots and runs on a WORKER, so
+        # a heavy run cannot hold the Bokeh loop (the secular_micro
+        # O(N x W) defect froze every session from this very button; the
+        # kernel is fixed, and this removes the exposure class). Same
+        # worker + generation + poll doctrine as _dispatch_figure and
+        # the solve path; publishes land back on the loop via the poll,
+        # and the Status tab reports the compute while it runs.
+        spec_snap = self.spec
+        active = self._active
+        drive_sum = self.spec.drive_summary()
+
+        def _compute():
+            rep = two_estimator_report(V, KE, m_kg, fit_from_pctl=pctl,
+                                       n_bins=nb, t_by_axis=T,
+                                       rf_period_us=rf_period, bath_K=bath)
+            # DIAGNOSE 'no motion': if every axis came back None, the velocity
+            # arrays were empty or ~all-zero — say WHICH, and the likely cause,
+            # instead of three silent dashes (the table read all '—'
+            # on an imported run whose ions clearly flew). SDS carries no thermal
+            # velocity by design; HS/vacuum records real velocities.
+            if all(rep.get(ax) is None for ax in ("x", "y", "z")):
+                import numpy as _np
+                stat = []
+                for ax in ("x", "y", "z"):
+                    a = _np.asarray(V[ax], float)
+                    k = _np.asarray(KE[ax], float)
+                    rms = float(_np.sqrt(_np.mean(a * a))) if a.size else 0.0
+                    kpos = int((k > 0).sum())
+                    kmean = float(k[k > 0].mean()) if kpos else 0.0
+                    stat.append(
+                        "{0}: n={1}, v_rms={2:.3e} mm/us, KE>0 count={3}, "
+                        "mean KE(>0)={4:.3e} eV".format(ax, a.size, rms,
+                                                        kpos, kmean))
+                model_kind = str(spec_snap.collisions.model)
+                gas_on = bool(spec_snap.collisions.enabled)
+                cause = ("SDS gas model carries NO thermal velocity by design "
+                         "(drift + positional diffusion) — use HS for a "
+                         "temperature read"
+                         if (gas_on and model_kind == "sds")
+                         else "velocities recorded are ~zero — check that "
+                         "vx/vy/vz recording is on and the run is not "
+                         "endpoint-only")
+                return dict(
+                    table=("**no resolvable motion on any axis.**\n\n"
+                           + "\n".join("- " + s for s in stat)
+                           + "\n\n_Likely cause: {0}._".format(cause)),
+                    fig=None,
+                    status=("**temperature: no motion** — see the Analysis "
+                            "panel for per-axis velocity stats and the "
+                            "likely cause."))
+            # table
+            def _f(x):
+                return "—" if x is None else "{0:.0f}".format(x)
+            lines = ["| axis | T_var (K) | T_sec (K) | T_mic (K) | T_mean (K) "
+                     "| T_slope (K) | excess vs bath (K) | drift |",
+                     "|---|---|---|---|---|---|---|---|"]
             for ax in ("x", "y", "z"):
-                a = _np.asarray(V[ax], float)
-                k = _np.asarray(KE[ax], float)
-                rms = float(_np.sqrt(_np.mean(a * a))) if a.size else 0.0
-                kpos = int((k > 0).sum())
-                kmean = float(k[k > 0].mean()) if kpos else 0.0
-                stat.append(
-                    "{0}: n={1}, v_rms={2:.3e} mm/us, KE>0 count={3}, "
-                    "mean KE(>0)={4:.3e} eV".format(ax, a.size, rms,
-                                                    kpos, kmean))
-            model_kind = str(self.spec.collisions.model)
-            gas_on = bool(self.spec.collisions.enabled)
-            cause = ("SDS gas model carries NO thermal velocity by design "
-                     "(drift + positional diffusion) — use HS for a "
-                     "temperature read"
-                     if (gas_on and model_kind == "sds")
-                     else "velocities recorded are ~zero — check that "
-                     "vx/vy/vz recording is on and the run is not "
-                     "endpoint-only")
-            self.thermal_table.object = (
-                "**no resolvable motion on any axis.**\n\n"
-                + "\n".join("- " + s for s in stat)
-                + "\n\n_Likely cause: {0}._".format(cause))
-            self.status.object = ("**temperature: no motion** — see the "
-                                  "Analysis panel for per-axis velocity "
-                                  "stats and the likely cause.")
-            return
-        # table
-        def _f(x):
-            return "—" if x is None else "{0:.0f}".format(x)
-        lines = ["| axis | T_var (K) | T_sec (K) | T_mic (K) | T_mean (K) "
-                 "| T_slope (K) | excess vs bath (K) | drift |",
-                 "|---|---|---|---|---|---|---|---|"]
-        for ax in ("x", "y", "z"):
-            e = rep.get(ax)
-            if e is None:
-                lines.append("| {0} | — | — | — | — | — | — | (no motion) |"
-                             .format(ax))
-            else:
-                lines.append(
-                    "| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} |"
-                    .format(ax, _f(e["T_var"]), _f(e.get("T_sec")),
-                            _f(e.get("T_mic")), _f(e["T_mean"]),
-                            _f(e["T_slope"]), _f(e.get("excess_K")),
-                            "yes" if e["drift"] else "no"))
-        _bath_note = (
-            "a T_var below the {0:g} K bath is accounted for by "
-            "micromotion (T_mic), NOT sub-bath cooling. **excess vs bath** "
-            "= T_var - {0:g} K is the heating figure the audits quote."
-            .format(bath) if bath is not None else
-            "this is a VACUUM run: there is no bath, so no excess column.")
-        note = ("\n\n_All temperatures are ABSOLUTE (K), not excess. "
-                "Assessed: {1} ion(s) at m/z {2}{3}. "
-                "T_var (secular) = T_sec; the full velocity spread is "
-                "T_sec + T_mic, so {4} T_var vs T_slope "
-                "disagreement flags a non-thermal tail; tail fit from "
-                "the {0:g}th percentile (reliable band ~10-35%)._"
-                .format(pctl, len(flown), mz_key(mz_run),
-                        (f"; {no_mz} without a recorded m/z left out"
-                         if no_mz else ""), _bath_note))
-        # ride-height section: WHERE the cloud sits
-        # relative to the carpets — T_mic is set by ride position, so the
-        # standoff is the observable that explains the temperatures above.
-        try:
-            from ion_gym.physics.traj_stats import ride_height_report
-            rh = ride_height_report(flown, cols, self.spec)
-            if rh.get("standoff_mean_mm") is not None:
+                e = rep.get(ax)
+                if e is None:
+                    lines.append("| {0} | — | — | — | — | — | — | (no motion) |"
+                                 .format(ax))
+                else:
+                    lines.append(
+                        "| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} |"
+                        .format(ax, _f(e["T_var"]), _f(e.get("T_sec")),
+                                _f(e.get("T_mic")), _f(e["T_mean"]),
+                                _f(e["T_slope"]), _f(e.get("excess_K")),
+                                "yes" if e["drift"] else "no"))
+            _bath_note = (
+                "a T_var below the {0:g} K bath is accounted for by "
+                "micromotion (T_mic), NOT sub-bath cooling. **excess vs bath** "
+                "= T_var - {0:g} K is the heating figure the audits quote."
+                .format(bath) if bath is not None else
+                "this is a VACUUM run: there is no bath, so no excess column.")
+            note = ("\n\n_All temperatures are ABSOLUTE (K), not excess. "
+                    "Assessed: {1} ion(s) at m/z {2}{3}. "
+                    "T_var (secular) = T_sec; the full velocity spread is "
+                    "T_sec + T_mic, so {4} T_var vs T_slope "
+                    "disagreement flags a non-thermal tail; tail fit from "
+                    "the {0:g}th percentile (reliable band ~10-35%)._"
+                    .format(pctl, len(flown), mz_key(mz_run),
+                            (f"; {no_mz} without a recorded m/z left out"
+                             if no_mz else ""), _bath_note))
+            # ride-height section: WHERE the cloud sits
+            # relative to the carpets — T_mic is set by ride position, so the
+            # standoff is the observable that explains the temperatures above.
+            try:
+                from ion_gym.physics.traj_stats import ride_height_report
+                rh = ride_height_report(flown, cols, spec_snap)
+                if rh.get("standoff_mean_mm") is not None:
+                    lines.append("")
+                    lines.append("**Ride height** (standoff from nearest "
+                                 "carpet; gap {0:.1f} mm):".format(rh["gap_mm"]))
+                    lines.append(
+                        "mean {0:.2f} mm | p5 {1:.2f} | median {2:.2f} | "
+                        "within 1 mm: {3:.0%} | within 0.5 mm: {4:.0%} | "
+                        "mid-half of gap: {5:.0%}".format(
+                            rh["standoff_mean_mm"], rh["standoff_p5_mm"],
+                            rh["standoff_p50_mm"], rh["frac_within_1mm"],
+                            rh["frac_within_half_mm"], rh["mid_fraction"]))
+                    lines.append(
+                        "*mid-fraction ~1 = mid-channel (cold basin); "
+                        "large within-1mm fraction = RF-riding (T_mic from "
+                        "pseudopotential at the ride position).*")
+                else:
+                    lines.append("")
+                    lines.append("**Ride height:** " +
+                                 str(rh.get("note", "unavailable")))
+            except ValueError as e:
                 lines.append("")
-                lines.append("**Ride height** (standoff from nearest "
-                             "carpet; gap {0:.1f} mm):".format(rh["gap_mm"]))
-                lines.append(
-                    "mean {0:.2f} mm | p5 {1:.2f} | median {2:.2f} | "
-                    "within 1 mm: {3:.0%} | within 0.5 mm: {4:.0%} | "
-                    "mid-half of gap: {5:.0%}".format(
-                        rh["standoff_mean_mm"], rh["standoff_p5_mm"],
-                        rh["standoff_p50_mm"], rh["frac_within_1mm"],
-                        rh["frac_within_half_mm"], rh["mid_fraction"]))
-                lines.append(
-                    "*mid-fraction ~1 = mid-channel (cold basin); "
-                    "large within-1mm fraction = RF-riding (T_mic from "
-                    "pseudopotential at the ride position).*")
-            else:
-                lines.append("")
-                lines.append("**Ride height:** " +
-                             str(rh.get("note", "unavailable")))
-        except ValueError as e:
-            lines.append("")
-            lines.append("**Ride height:** not measurable for this "
-                         "geometry — " + str(e))
-        self.thermal_table.object = "\n".join(lines) + note
-        try:
-            fig = temperature_estimator_figure(
-                V, KE, m_kg, fit_from_pctl=pctl, n_bins=nb,
-                title="two temperature estimators — {0} — {2} "
-                      "(tail fit {1:g}th pctl)".format(
-                          self._active, pctl,
-                          self.spec.drive_summary()))
-        except Exception as e:
-            # surface the ACTUAL failure (no silent/opaque fail) —
-            # the figure renders fine on standard 3-D data in isolation, so
-            # a break here is data-shape-specific and its message is the
-            # diagnostic we need to see.
-            import traceback
-            tb = traceback.format_exc().strip().splitlines()
-            self.thermal_table.object = (
-                "**temperature figure failed** — {0}: {1}\n\n```\n{2}\n```"
-                .format(type(e).__name__, e, "\n".join(tb[-4:])))
-            self.status.object = "**temperature assessment failed** (see "\
-                                 "the Analysis panel for the traceback)."
+                lines.append("**Ride height:** not measurable for this "
+                             "geometry — " + str(e))
+            table_md = "\n".join(lines) + note
+            try:
+                fig = temperature_estimator_figure(
+                    V, KE, m_kg, fit_from_pctl=pctl, n_bins=nb,
+                    title="two temperature estimators — {0} — {2} "
+                          "(tail fit {1:g}th pctl)".format(
+                              active, pctl, drive_sum))
+            except Exception as e:
+                # surface the ACTUAL failure (no silent/opaque fail) —
+                # the figure renders fine on standard 3-D data in isolation, so
+                # a break here is data-shape-specific and its message is the
+                # diagnostic we need to see.
+                import traceback
+                tb = traceback.format_exc().strip().splitlines()
+                return dict(
+                    table=("**temperature figure failed** — {0}: {1}"
+                           "\n\n```\n{2}\n```"
+                           .format(type(e).__name__, e,
+                                   "\n".join(tb[-4:]))),
+                    fig=None,
+                    status=("**temperature assessment failed** (see the "
+                            "Analysis panel for the traceback)."))
+            return dict(
+                table=table_md, fig=fig,
+                status=("**temperature assessed** for {0} (tail pctl "
+                        "{1:g}).".format(active, pctl)))
+
+        def _publish(payload):
+            self.thermal_table.object = payload["table"]
+            if payload["fig"] is not None:
+                self.thermal_pane.object = payload["fig"]
+            self.status.object = payload["status"]
+
+        import panel as pn
+        if pn.state.curdoc is None:
+            # headless: synchronous, exactly the old behaviour
+            _publish(_compute())
             return
-        self.thermal_pane.object = fig
-        self.status.object = ("**temperature assessed** for {0} "
-                              "(tail pctl {1:g}).".format(self._active,
-                                                          pctl))
+
+        import traceback as _tb
+        gen = self._therm_gen = getattr(self, "_therm_gen", 0) + 1
+        self.w_therm_btn.disabled = True
+        self.thermal_table.object = "*computing…*"
+        self.status.object = (
+            "**temperature assessment computing…** {0} ion(s) at "
+            "m/z {1} — the Analysis panel updates when it lands."
+            .format(len(flown), mz_key(mz_run)))
+        st = {"done": False}
+
+        def work():
+            try:
+                st["payload"] = _compute()
+            except Exception as e:       # transport, not a swallow: the
+                st["err"] = e            # poll re-surfaces it on the
+                st["tb"] = _tb.format_exc()   # loop, traceback and all
+            finally:
+                st["done"] = True
+
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+        own = {"pcb": None}
+
+        def poll():
+            if self._therm_gen != gen:
+                # superseded by a newer click: drop this result, on the
+                # record (the newer dispatch owns the button and status)
+                own["pcb"] = _stop_periodic(own["pcb"], "thermal")
+                print(f"[thermal] assessment superseded (gen {gen} < "
+                      f"{self._therm_gen}) — result dropped", flush=True)
+                return
+            if not st["done"]:
+                if not worker.is_alive():
+                    # worker died without a result (OOM, a C-level crash
+                    # no except can catch): report, never spin forever
+                    own["pcb"] = _stop_periodic(own["pcb"], "thermal")
+                    self.w_therm_btn.disabled = False
+                    self.status.object = (
+                        "**temperature assessment stopped unexpectedly** "
+                        "— the worker ended without a result; the "
+                        "console may have more. Nothing was computed.")
+                return
+            own["pcb"] = _stop_periodic(own["pcb"], "thermal")
+            self.w_therm_btn.disabled = False
+            if "err" in st:
+                print(st["tb"], end="")
+                self.thermal_table.object = (
+                    "**temperature assessment failed** — {0}: {1}"
+                    .format(type(st["err"]).__name__, st["err"]))
+                self.status.object = (
+                    "**temperature assessment failed** (traceback on "
+                    "the console).")
+                return
+            _publish(st["payload"])
+
+        own["pcb"] = pn.state.add_periodic_callback(poll, 150)
 
     def _sync_analysis_mz(self):
         """Refresh the Analysis m/z-filter options from the DISPLAYED run's
@@ -7626,6 +7946,16 @@ class SimApp:
             fate_style=_fate_style, x_label=self._chan_label(ax),
             y_label=self._chan_label(ay), title=_cap, height=560)
         self.analysis_pane.object = fig
+        self._stash_analysis_export(
+            series=series,
+            kind=("hist" if hist else "traj" if mode == "traj" else "end"),
+            x_name=ax, y_name=ay,
+            meta={"source": "ion_gym Analysis tab (assembly flight)",
+                  "operating point": _cap, "mode": mode,
+                  "x": self._chan_label(ax),
+                  "y": ("(histogram of x)" if hist
+                        else self._chan_label(ay))},
+            fate_style=_fate_style)
         self.status.object = (
             f"**analysis drawn** — {_cap}"
             + (f" — showing the first {ANALYSIS_MAX_ION_TRACES} paths "
@@ -7659,6 +7989,40 @@ class SimApp:
                 notes.append(f" — **{ch} has no values in this run** "
                              f"(NaN in every sample).")
         return "".join(notes)
+
+    def _stash_analysis_export(self, *, series, kind, x_name, y_name,
+                               meta, fate_style=None):
+        """Bank what analysis_figure was just given so Export downloads
+        EXACTLY the plotted data, and name the file after it."""
+        import re as _re
+        self._analysis_export = dict(series=series, kind=kind,
+                                     x_name=x_name, y_name=y_name,
+                                     meta=meta, fate_style=fate_style)
+        stem = ("{0}_{1}_hist".format(self._active, x_name)
+                if kind == "hist"
+                else "{0}_{1}_vs_{2}".format(self._active, y_name, x_name))
+        self.w_acsv.filename = (
+            "analysis_" + _re.sub(r"[^\w.-]+", "_", str(stem)) + ".csv")
+        self.w_acsv.disabled = False
+
+    def _analysis_csv_payload(self):
+        """FileDownload callback: CSV of the last-plotted Analysis
+        series (viz_core.analysis_series_csv). Refuses by name when
+        nothing is banked — the button is disabled until a plot
+        exists, so reaching this without a stash is a defect worth
+        hearing about, not an empty file."""
+        import io
+        from ion_gym.viz.viz_core import analysis_series_csv
+        ex = getattr(self, "_analysis_export", None)
+        if ex is None:
+            raise RuntimeError(
+                "no plotted data to export — press Plot first (the "
+                "export banks exactly what the figure was drawn from).")
+        txt = analysis_series_csv(
+            ex["series"], kind=ex["kind"], x_name=ex["x_name"],
+            y_name=ex["y_name"], meta=ex["meta"],
+            fate_style=ex["fate_style"])
+        return io.BytesIO(txt.encode("utf-8"))
 
     def _on_analysis_plot(self, _=None):
         """Scatter/line/histogram of any recorded channel against any other
@@ -7760,6 +8124,17 @@ class SimApp:
             x_label=self._chan_label(ax), y_label=self._chan_label(ay),
             title=title)
         self.analysis_pane.object = fig
+        self._stash_analysis_export(
+            series=series,
+            kind=("hist" if hist else "end" if amode == "end" else "traj"),
+            x_name=ax, y_name=ay,
+            meta={"source": "ion_gym Analysis tab",
+                  "run": self._active, "mode": amode,
+                  "m/z filter": _mz_label,
+                  "x": self._chan_label(ax),
+                  "y": ("(histogram of x)" if hist
+                        else self._chan_label(ay)),
+                  "ions in export": len(series)})
         notes = self._analysis_nan_note(results, cols, _chans)
         if no_mz:
             notes += (f" — **{no_mz} ion(s) carry no recorded m/z**, so "
@@ -8005,6 +8380,19 @@ class SimApp:
 
     def _on_stop(self, _=None):
         self._stop = True
+        # A live FIGURE BUILD (the electrode preview at a fine pitch can
+        # run for a minute) is stopped through its cancel scope; the
+        # rasterizer halts at its next shape or polygon edge and the
+        # dispatcher reports "stopped". Checked first so the message
+        # below about a solve or flight still has the last word when
+        # one of those is also running.
+        _fc = getattr(self, "_fig_cancel", None)
+        stopping_fig = (_fc is not None and not _fc.is_set()
+                        and bool(self.pane.loading))
+        if stopping_fig:
+            _fc.set()
+            self.status.object = ("**stopping** — halting the figure "
+                                  "build at the next electrode...")
         # A long FIELD SOLVE runs on a background thread through the
         # multigrid solver, which polls a cooperative stop flag at every
         # V-cycle and between bases (multigrid3d._STOP). Stop used to wire
@@ -8014,7 +8402,9 @@ class SimApp:
         # caught in the solve thread and shown as "stopped" (not an error).
         from ion_gym.physics import multigrid3d
         multigrid3d.request_stop()
-        solving = self._handle is None or self._handle.done
+        solving = ((self._handle is None or self._handle.done)
+                   and getattr(self, "_solve_worker", None) is not None
+                   and self._solve_worker.is_alive())
         if self._handle is not None and not self._handle.done:
             self._handle.stop("user pressed Stop")
             # the press is ACKNOWLEDGED NOW; the halt lands after the
@@ -8025,6 +8415,9 @@ class SimApp:
         elif solving:
             self.status.object = ("**stopping** — halting the field solve "
                                   "at the next cycle boundary...")
+        elif not stopping_fig:
+            self.status.object = ("**Stop:** nothing is running (no flight, "
+                                  "solve or figure build)")
 
     # ------------------------------------------------- config actions
     def _on_load_example(self, _=None):
@@ -8091,7 +8484,55 @@ class SimApp:
                     f"spec restored; full traceback on the console")
                 return
 
-    def _rebuild_for_new_spec(self, solve=False, *, box_from_loaded):
+    def _set_advisories(self, advs):
+        """Write the current spec's advisories to the persistent line.
+        None = the spec has not been built yet (a load clears the line, so
+        the previous spec's warnings never describe this one). [] = built,
+        and there is nothing to report."""
+        pane = getattr(self, "w_advisory", None)
+        if pane is None:
+            return
+        if advs is None:
+            pane.object = ADVISORY_NONE_YET
+        elif not advs:
+            pane.object = "_none for this spec_"
+        else:
+            pane.object = "\n\n".join(f"⚠ {a}" for a in advs)
+
+    def _sync_pe_mz_to_spec(self):
+        """Set the PE Surface tab's m/z to the spec's first declared m/z.
+
+        Called when the tab is built and on every LOAD, so the surface is
+        computed for the ion the deck flies. The PE tab's Reset default
+        follows, so Reset restores the deck's m/z rather than the value
+        the tab was built with.
+
+        A spec with no m/z cannot name that ion. The load itself has
+        already finished at this point, so this does not raise (a raise
+        here once left the app half rebuilt). It states the problem in
+        the status line and the PE tab and leaves the tab's m/z as it
+        was, which the PE tab's status names as not this deck's ion.
+        Before the tab exists there is nothing to set: the tab calls this
+        itself when it is built.
+        """
+        pe = getattr(self, "_pe_tab", None)
+        if pe is None:
+            return
+        mzs = list(getattr(self.spec.source, "mz_list", None) or [])
+        if not mzs:
+            msg = (f"spec {self.spec.name!r} declares no source m/z "
+                   f"(source.mz_list is empty). The PE Surface tab keeps "
+                   f"m/z {pe.w_mz.value:g}, which is not this deck's ion.")
+            if getattr(self, "status", None) is not None:
+                self.status.object = f"⚠ {msg}"
+            pe.status.object = f"⚠ {msg}"
+            return
+        pe.w_mz.value = float(mzs[0])
+        if hasattr(pe, "_defaults"):
+            pe._defaults[pe.w_mz] = float(mzs[0])
+
+    def _rebuild_for_new_spec(self, solve=False, *, box_from_loaded,
+                              sync_pe_mz=True):
         # box_from_loaded (required, no default — every caller states it):
         #   True  -> a LOAD: the box is replaced by the loaded spec and
         #            becomes the merge ancestor (_box_base).
@@ -8164,6 +8605,22 @@ class SimApp:
         self._scene = None             # scene lives and dies with the model
         self._scene_warning = ""       # ...and so does its refusal
         self._built = None             # drop the reuse cache: new geometry
+        # the previous spec's advisories do not describe this one
+        self._set_advisories(None)
+        # A LOAD SETS THE PE TAB'S ION. The tab is built once and its m/z
+        # was set only at construction, so after loading a deck that flies
+        # m/z 100 the surface was still computed for the startup spec's
+        # m/z 118 (the pseudopotential scales as 1/m: a different surface
+        # under the flown ions). Every load path (Apply JSON, upload,
+        # example, Reset, stage swap, STL commit) comes through here with
+        # box_from_loaded=True, so the sync holds for all of them and any
+        # deck. It runs AFTER the model reset above, so a spec it cannot
+        # sync never leaves new controls over the old model. An EDIT
+        # leaves a typed m/z alone, and so does a pitch change
+        # (sync_pe_mz=False): that re-pitches the loaded deck, it does
+        # not load a new one.
+        if box_from_loaded is True and sync_pe_mz:
+            self._sync_pe_mz_to_spec()
         # LARGE-GEOMETRY FEEDBACK: rendering a big json
         # (e.g. surround SLIM) takes 10-30 s with no sign of life. Set the
         # plot pane's loading overlay + an honest status FIRST, then run
@@ -8248,9 +8705,39 @@ class SimApp:
         ub = {la: self._user_bounds(la), lb: self._user_bounds(lb)}
         self._dispatch_figure(
             "geometry preview",
-            build=lambda: self._build_geometry_preview(
+            build=lambda: self._preview_with_budget(
                 spec, model, la, lb, uirev, label_on, st, dr, ub),
             publish=lambda payload: self._finish_preview(*payload))
+
+    @staticmethod
+    def _preview_with_budget(spec, model, la, lb, uirev, label_on, st, dr,
+                             ub):
+        """WORKER-SIDE: the geometry preview at a pitch within the preview
+        budgets (sim_build.preview_pitch). Over budget, the outline is
+        rasterized on a COPY of the spec at the coarser pitch and the
+        figure says so inside the plot; the spec, and so the solve, keep
+        their own pitch (PI ruling 2026-10-30). Returns the preview
+        payload plus the note (None within budget)."""
+        import copy
+        from ion_gym.physics.sim_build import preview_pitch
+        from ion_gym.io.sim_spec import set_pitch
+        hp, note = preview_pitch(spec)
+        sp = spec
+        if note is not None:
+            sp = copy.deepcopy(spec)
+            set_pitch(sp, hp)
+        fig, la, lb, ra, rb = SimApp._build_geometry_preview(
+            sp, model, la, lb, uirev, label_on, st, dr, ub)
+        if note is not None:
+            fig.add_annotation(
+                text=f"preview at {hp:g} mm/gu (solve at "
+                     f"{float(spec.geometry.mm_per_gu):g} mm/gu)",
+                xref="paper", yref="paper", x=0.01, y=0.99,
+                xanchor="left", yanchor="top", showarrow=False,
+                font=dict(size=11, color="#8a5a00"),
+                bgcolor="rgba(255,255,255,0.85)", bordercolor="#8a5a00",
+                borderwidth=1)
+        return fig, la, lb, ra, rb, note
 
     @staticmethod
     def _build_geometry_preview(spec, model, la, lb, uirev, label_on, st,
@@ -8378,9 +8865,20 @@ class SimApp:
                 fig.update_layout(
                     xaxis_title="y (mm)",
                     yaxis=dict(title="z (mm)"),
-                    margin=dict(l=50, r=10, t=30, b=40),
+                    margin=dict(VIEW_MARGIN),
                     uirevision=uirev)
-                return (fig, "y", "z", None, None)
+                # RANGES FROM THE DRAWN RINGS, so the aspect lock has an
+                # extent (with none, every r-z yz preview reported "lock
+                # not applied"). The rings ARE the declared geometry
+                # revolved, and the solved view frames to the same drawn
+                # extent, so this states no framing the deck lacks.
+                try:
+                    _x0, _x1, _y0, _y1 = V.figure_extent(fig)
+                except V.VizError as e:
+                    print(f"[sim_app] r-z end-on preview: no drawn extent "
+                          f"to frame ({e}). The view autoranges.")
+                    return (fig, "y", "z", None, None)
+                return (fig, "y", "z", [_x0, _x1], [_y0, _y1])
         # per-plane autoscale (transverse spans geometry; transport
         # spans the masks' true axial extent when the domain rule has
         # no answer)
@@ -8412,9 +8910,9 @@ class SimApp:
             return None if r is None else list(r)
 
         fig.update_layout(
-            height=560, xaxis_title=f"{la} (mm)",
+            xaxis_title=f"{la} (mm)",
             yaxis=dict(title=f"{lb} (mm)"), dragmode="zoom",
-            margin=dict(l=50, r=10, t=30, b=40),
+            margin=dict(VIEW_MARGIN),
             # ONE autoscale authority (switching
             # views kept the stale zoom): the plane-string-only
             # revision this replaced is the exact documented _uirev
@@ -9154,6 +9652,16 @@ class SimApp:
                    getattr(self, "view_yz", None)):
             if _b is not None:
                 _b.disabled = False
+        # THE TAB NOTICES ARE CONTROLS TOO. The "Multi-FA instrument
+        # displayed" banner in Thermal / PE Surface / Field Slice / Raster
+        # was only re-synced by the stage and FA-view handlers, so after a
+        # multi-FA flight a new load reset _assembly_stage above while the
+        # banner stayed, calling working tools unavailable on a plain deck.
+        # Re-syncing from the one subject predicate (_subject_is_assembly)
+        # holds for every load path that comes through here (Apply JSON,
+        # upload, example, Reset) and every deck, because it reads the
+        # state just set rather than anything about the incoming document.
+        self._sync_assembly_notices()
         self._clear_beam_panel()
 
     def _impact_tab(self):
@@ -10599,7 +11107,7 @@ class SimApp:
             _det = [(p["x"], p.get("y", 0.0), p.get("z", 0.0))
                     for p in (getattr(self, "_impact_hits", None) or [])
                     if p.get("x") is not None]
-            self.pane.object = V.assembly_overview(
+            _asm_fig = V.assembly_overview(
                 stages, seams=seams,
                 trajs=getattr(self, "_assembly_traces", None),
                 traj_style=dict(
@@ -10621,6 +11129,13 @@ class SimApp:
                 plane=_pl,
                 fill_electrodes=(True if getattr(self, "w_elfill", None)
                                  is None else bool(self.w_elfill.value)))
+            # ONE PANE-SIZE WRITER for this view too. The overview set
+            # height=560 on the figure while a locked view left the pane
+            # at its last fixed box, so the two disagreed. _size_pane
+            # either locks it (when the figure states its ranges) or says
+            # why it cannot and lets it fill the width.
+            self._size_pane(_asm_fig, bool(self.w_lock.value))
+            self.pane.object = _asm_fig
             _rot = [nm for nm, _s, _o, r in stages
                     if V.assembly_stage_draw_mode(_s, r) == "placeholder"]
             _rotmsg = ""
@@ -11423,9 +11938,35 @@ class SimApp:
             # hold. Quoting the solve but not the record is how a run
             # that needs 38 GB gets started by accident.
             self.w_sizing.object = (hdr + p.markdown() + "\n\n"
+                                    + self._preview_quote_md(sp)
                                     + self._record_quote_md(sp) + scope)
         except Exception as e:
             self.w_sizing.object = f"**sizing error:** {e}"
+
+    def _preview_quote_md(self, sp):
+        """What the electrode PREVIEW will cost at the pitch in the box,
+        before Apply (2026-10-30: a fine pitch's preview ran for a
+        minute with no warning). States the pitch the preview will be
+        drawn at when the solve pitch is over the preview budgets."""
+        import copy
+        from ion_gym.io.sim_spec import set_pitch
+        from ion_gym.physics.sim_build import (PREVIEW_WORK_BUDGET,
+                                               preview_cost, preview_pitch)
+        trial = copy.deepcopy(sp)
+        set_pitch(trial, float(self.w_pitch.value))
+        cost = preview_cost(trial)
+        hp, note = preview_pitch(trial)
+        line = (f"**Electrode preview:** {cost['work']:.2e} shape-raster "
+                f"units (budget {PREVIEW_WORK_BUDGET:.0e})"
+                + (f", {cost['voxels'] / 1e6:.1f}M voxels"
+                   if cost["voxels"] is not None else ""))
+        if note is None:
+            line += ", drawn at the solve pitch."
+        else:
+            line += (f". Over budget: the preview will be drawn at "
+                     f"{hp:g} mm/gu and labelled; the solve keeps "
+                     f"{float(self.w_pitch.value):g} mm/gu.")
+        return line + "\n\n"
 
     def _on_json_edited(self, _=None):
         """The text changed: re-sync the pitch widget to the JSON's own
@@ -11540,7 +12081,8 @@ class SimApp:
             finally:
                 self._json_guard = False
             self.spec = sp
-            self._rebuild_for_new_spec(box_from_loaded=True)
+            self._rebuild_for_new_spec(box_from_loaded=True,
+                                       sync_pe_mz=False)
             self._refresh_sizing()
             # The adjustment is REPORTED, always, with no threshold — a
             # domain that moved silently is the defect class this guards

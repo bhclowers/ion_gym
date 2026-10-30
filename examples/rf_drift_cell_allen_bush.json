@@ -1676,6 +1676,7 @@
   "T_k": 298.0,
   "P_torr": 3.5,
   "sigma_m2": 1.55e-18,
+  "sigma_model": "fixed",
   "model": "hs",
   "gas_diam_nm": 0.366,
   "flow_mm_us": [

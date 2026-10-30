@@ -150,7 +150,8 @@ def test_tw_rollover_monotone():
                       amplitude_v=1.0, waveform="square",
                       phase_deg=g.phase_deg) for g in gs]
     assign = {k + 1: gs[k].name for k in range(N_PHASE)}
-    col = dict(enabled=True, gas="He", T_k=298.0, P_pa=533.3)   # 4 Torr
+    col = dict(enabled=True, gas="He", T_k=298.0, P_pa=533.3,   # 4 Torr
+               sigma_model="fixed")
     ratios = []
     Y = np.repeat((np.arange(ny) * h)[None, :], nx, axis=0)
     yc = (ny // 2) * h
@@ -220,7 +221,7 @@ def _mk_duct_spec(q, gas=False, dt_ns=1.0, t_max_us=5.0, rec=5):
                           tob_span_us=0.0, seed=11),
         collisions=CollisionSpec(enabled=gas, gas="N2", T_k=300.0,
                                  P_pa=(50.0 if gas else 0.0),
-                                 sigma_m2=2.27e-18),
+                                 sigma_m2=2.27e-18, sigma_model="fixed"),
         integration=IntegrationSpec(dt_ns=dt_ns, t_max_us=t_max_us,
                                     rec_every=rec,
                                     record_channels=[]))
@@ -387,7 +388,7 @@ def test_collisional_crn_equivalence_tw2d_vs_3d():
     from ion_gym.physics.tracer3d import fly3d
 
     col = dict(enabled=True, gas="N2", T_k=300.0, P_pa=50.0,
-               sigma_m2=2.27e-18)
+               sigma_m2=2.27e-18, sigma_model="fixed")
     for q in (1, 2):
         spec = _mk_duct_spec(q, gas=True)
         model, fly, cols, births = build_run(spec)
@@ -470,9 +471,11 @@ def test_dict_collisions_reach_kernel_through_spec(monkeypatch):
 
     monkeypatch.setattr(T, "_fly_tw2d", spy)
     spec_default = CollisionSpec()
-    for col, want_p_pa in ((dict(enabled=True, gas="He", P_torr=4.0),
+    for col, want_p_pa in ((dict(enabled=True, gas="He", P_torr=4.0,
+                                 sigma_model="fixed"),
                             4.0 * TORR_PA),
-                           (dict(enabled=True, gas="He"),
+                           (dict(enabled=True, gas="He",
+                                 sigma_model="fixed"),
                             spec_default.P_pa)):
         with pytest.raises(_Stop):
             T.fly_tw2d(f, 100.0, (2.0, 2.0), (0.0, 0.0, 0.0), tob_us=0.0,

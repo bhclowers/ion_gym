@@ -63,6 +63,14 @@ def request_stop():
     _STOP.set()
 
 
+def stop_event():
+    """The solver's stop event itself, for code that must stop on the
+    same request (the app opens a raster2d cancel scope on it so the
+    solve's electrode rasterization, which runs before the first
+    V-cycle, stops too)."""
+    return _STOP
+
+
 def clear_stop():
     """Re-arm the solver after a stop. Call before the next solve — and
     if solves can OVERLAP (the app), only while holding SOLVE_EXCLUSIVE:

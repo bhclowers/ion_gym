@@ -28,13 +28,14 @@ _N_TAU = 4001                    # the validated node count, verbatim
 
 
 @njit(cache=True, nogil=True)
-def hill_beta_njit(a, q, square=False):
-    """beta(a, q) by RK4 monodromy over one half-period [0, pi].
-
-    Verbatim algorithm of V02's validated `hill_beta`: two fundamental
-    solutions advanced by classic RK4 on the fixed 4001-node grid;
-    beta = arccos(clip(trace/2)) / pi. `square` selects the Meissner
-    (square-wave) drive exactly as the original does.
+def hill_half_trace_njit(a, q, square=False):
+    """tr(M)/2 of the one-period transfer matrix by RK4 over [0, pi],
+    UNCLIPPED: |tr M|/2 > 1 is the instability margin the stability-map
+    figures color by. The loop is V02's validated `hill_beta` algorithm
+    verbatim (two fundamental solutions, classic RK4, fixed 4001-node
+    grid); hill_beta_njit clips and arccos-es this value, refactored
+    2026-10-21 with a 60-point bit-identity probe across both drives.
+    `square` selects the Meissner (square-wave) drive.
     """
     dtau = np.pi / (_N_TAU - 1)
     y1_0, y1_1 = 1.0, 0.0
@@ -72,7 +73,15 @@ def hill_beta_njit(a, q, square=False):
                 y1_0, y1_1 = y0, y1v
             else:
                 y2_0, y2_1 = y0, y1v
-    tr = (y1_0 + y2_1) / 2.0
+    return (y1_0 + y2_1) / 2.0
+
+
+@njit(cache=True, nogil=True)
+def hill_beta_njit(a, q, square=False):
+    """beta(a, q) = arccos(clip(tr M / 2)) / pi from hill_half_trace_njit
+    (the validated V02 RK4 transfer matrix; see that function). Clipping
+    puts every unstable point exactly on beta 0 or 1."""
+    tr = hill_half_trace_njit(a, q, square)
     if tr > 1.0:
         tr = 1.0
     elif tr < -1.0:
@@ -145,3 +154,71 @@ def compare_to_reference(npz_path, tol=1e-9):
                         f"q={qq3[j]:.4f} (tol {tol:g})")
     worst["fmap_MHz"] = w
     return worst
+
+
+@njit(cache=True, nogil=True)
+def meissner_half_trace(a, q, duty=0.5):
+    """Half-trace tr(M)/2 of the one-period monodromy for the DUTY-CYCLE
+    Meissner (two-level square) Hill drive, computed EXACTLY.
+
+    The drive m(tau) holds +1 for a fraction `duty` of the pi-period and
+    -1 for the rest, so u'' + (a - 2 q m) u = 0 is piecewise constant:
+    p = a - 2q on the high segment, p = a + 2q on the low one. Each
+    segment's propagator is analytic (cos/sin for p > 0, cosh/sinh for
+    p < 0, shear for p = 0), and the monodromy is their product -- the
+    matrix method of the digital-drive literature (Konenkov et al.,
+    J. Am. Soc. Mass Spectrom. 13 (2002) 597). No integration grid, so
+    no step error at the switch instants, which is what a fixed-grid RK4
+    cannot avoid for a discontinuous drive.
+
+    |tr(M)/2| < 1 is stable (any stability zone, not only the first).
+    The x axis of a digital quadrupole takes (a, q, duty); the y axis
+    takes (-a, q, 1 - duty), its drive being the inverted waveform.
+    hill_beta_njit(square=True) is the 50/50 special case; the two agree
+    there (RK4 to its step error) and this form is the authority for
+    duty work.
+    """
+    if not (0.0 < duty < 1.0):
+        raise ValueError("duty must lie strictly between 0 and 1")
+    m00, m01, m10, m11 = 1.0, 0.0, 0.0, 1.0
+    # segments in drive order: high (m=+1) then low (m=-1)
+    for seg in range(2):
+        if seg == 0:
+            p = a - 2.0 * q
+            L = duty * np.pi
+        else:
+            p = a + 2.0 * q
+            L = (1.0 - duty) * np.pi
+        if p > 0.0:
+            w = np.sqrt(p)
+            c = np.cos(w * L)
+            s = np.sin(w * L)
+            a00, a01, a10, a11 = c, s / w, -w * s, c
+        elif p < 0.0:
+            w = np.sqrt(-p)
+            c = np.cosh(w * L)
+            s = np.sinh(w * L)
+            a00, a01, a10, a11 = c, s / w, w * s, c
+        else:
+            a00, a01, a10, a11 = 1.0, L, 0.0, 1.0
+        # M <- A @ M
+        n00 = a00 * m00 + a01 * m10
+        n01 = a00 * m01 + a01 * m11
+        n10 = a10 * m00 + a11 * m10
+        n11 = a10 * m01 + a11 * m11
+        m00, m01, m10, m11 = n00, n01, n10, n11
+    return 0.5 * (m00 + m11)
+
+
+@njit(cache=True, nogil=True)
+def meissner_beta(a, q, duty=0.5):
+    """beta in [0, 1] for the duty-cycle Meissner drive: arccos of the
+    clipped half-trace, the same convention as hill_beta_njit, exact per
+    meissner_half_trace. 0 < beta < 1 is stable; use the unclipped
+    meissner_half_trace for band-edge location."""
+    tr = meissner_half_trace(a, q, duty)
+    if tr > 1.0:
+        tr = 1.0
+    elif tr < -1.0:
+        tr = -1.0
+    return np.arccos(tr) / np.pi

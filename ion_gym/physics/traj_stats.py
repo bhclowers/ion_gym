@@ -68,10 +68,17 @@ def secular_micro(t_us, v_mmus, period_us: float):
     if len(t) < 4 or not period_us or period_us <= 0.0:
         return None, None
     win = np.floor((t - t[0]) / period_us).astype(int)
-    sec = np.empty_like(v)
-    for w in np.unique(win):
-        sel = win == w
-        sec[sel] = v[sel].mean()
+    # Per-window means via bincount, O(N). The loop this replaces
+    # (`for w in unique(win): sec[win == w] = ...`) rescanned the whole
+    # record once per RF window -- O(N x W), ~1e10 comparisons on a
+    # millisecond gas-phase trajectory -- and froze the UI from the
+    # thermal-assess button (hang dump 2026-10-21: both stale-pulse
+    # stacks parked on the masked assignment). Same numbers, same
+    # dtype: sum/count per window, broadcast back by inverse index.
+    _uniq, inv = np.unique(win, return_inverse=True)
+    sums = np.bincount(inv, weights=v)
+    counts = np.bincount(inv)
+    sec = (sums / counts)[inv]
     return sec, v - sec
 
 

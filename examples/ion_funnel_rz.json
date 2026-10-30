@@ -1,9 +1,9 @@
 {
  "schema_version": 1,
  "name": "Ion Funnel (r-z)",
- "notes": "Stacked-ring ion funnel, r-z symmetric. Geometry of record: 18 ring electrodes, thickness 0.6 mm, gap 1.4 mm (pitch 2.0 mm), inner diameter tapering 12.5 mm down to 2.50 mm, wall (OD-ID)/2 = 2.00 mm on every ring; DC exit plate. RF confines radially while the DC gradient walks ions down the taper toward the exit. Solved at 0.05 mm/gu so every dimension above is exact on the lattice (note corrected 2026-10-17; it said 0.005). | 2026-09-15 (L-448): rec_every 10 -> 16. At dt_ns=2 over t_max_us=3000 this wanted 150,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- so this deck was recording only the first 2,000 us of the flight. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 150,002 records per ion.",
+ "notes": "Stacked-ring ion funnel with a conductance-limit exit, r-z symmetric. Geometry of record: 18 ring electrodes, thickness 0.6 mm, gap 1.4 mm (pitch 2.0 mm), inner diameter tapering 12.5 mm down to 2.50 mm, wall (OD-ID)/2 = 2.00 mm on every ring. The last element is a DC-only conductance limit 'conductance_limit': orifice i.d. 2.5 mm, thickness 0.6 mm, faces at x = 37.7 and 38.3 mm, dc 25 V. Transmission = fate 3 at the bounding plane x = 38.4 mm, 0.1 mm behind the CL. Domain ends at x = 39 mm; open edges are Neumann, so the tail floats near the CL potential (no downstream stage or orifice gas jet modelled). RF confines radially while the DC ladder walks ions down the taper. The ladder is written in the weighted form (interp 'weights', dc_weight = (rung-1)/17), which gives exactly the linear 100 -> 75 V ladder; a drop concentrated at the exit is a change of weights (internal/studies/funnel_opt/funnel_dc.py). Collisions: hard sphere with per-ion cross sections from the N2 CCS fit (sigma_model 'ccs_fit', class 'all'). Solved at 0.05 mm/gu so every dimension above is exact on the lattice. | 2026-10-19 (L-577): solid exit plate replaced by the conductance limit and bounding plane of the funnel_opt study, ladder rewritten in the weighted form with unchanged voltages, collisions set to hard sphere with the CCS fit (Brian). | 2026-09-15 (L-448): rec_every 10 -> 16. At dt_ns=2 over t_max_us=3000 this wanted 150,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- so this deck was recording only the first 2,000 us of the flight. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 150,002 records per ion.",
  "geometry": {
-  "width_mm": 38.6,
+  "width_mm": 39.0,
   "height_mm": 9.6,
   "depth_mm": 0.0,
   "metal_depth_mm": 0.0,
@@ -39,7 +39,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 1,
-    "dc_weight": null,
+    "dc_weight": 0.0,
     "color": [
      200,
      60,
@@ -67,7 +67,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 2,
-    "dc_weight": null,
+    "dc_weight": 0.058823529411764705,
     "color": [
      200,
      60,
@@ -95,7 +95,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 3,
-    "dc_weight": null,
+    "dc_weight": 0.11764705882352941,
     "color": [
      200,
      60,
@@ -123,7 +123,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 4,
-    "dc_weight": null,
+    "dc_weight": 0.17647058823529413,
     "color": [
      200,
      60,
@@ -151,7 +151,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 5,
-    "dc_weight": null,
+    "dc_weight": 0.23529411764705882,
     "color": [
      200,
      60,
@@ -179,7 +179,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 6,
-    "dc_weight": null,
+    "dc_weight": 0.29411764705882354,
     "color": [
      200,
      60,
@@ -207,7 +207,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 7,
-    "dc_weight": null,
+    "dc_weight": 0.35294117647058826,
     "color": [
      200,
      60,
@@ -235,7 +235,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 8,
-    "dc_weight": null,
+    "dc_weight": 0.4117647058823529,
     "color": [
      200,
      60,
@@ -263,7 +263,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 9,
-    "dc_weight": null,
+    "dc_weight": 0.47058823529411764,
     "color": [
      200,
      60,
@@ -291,7 +291,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 10,
-    "dc_weight": null,
+    "dc_weight": 0.5294117647058824,
     "color": [
      200,
      60,
@@ -319,7 +319,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 11,
-    "dc_weight": null,
+    "dc_weight": 0.5882352941176471,
     "color": [
      200,
      60,
@@ -347,7 +347,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 12,
-    "dc_weight": null,
+    "dc_weight": 0.6470588235294118,
     "color": [
      200,
      60,
@@ -375,7 +375,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 13,
-    "dc_weight": null,
+    "dc_weight": 0.7058823529411765,
     "color": [
      200,
      60,
@@ -403,7 +403,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 14,
-    "dc_weight": null,
+    "dc_weight": 0.7647058823529411,
     "color": [
      200,
      60,
@@ -431,7 +431,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 15,
-    "dc_weight": null,
+    "dc_weight": 0.8235294117647058,
     "color": [
      200,
      60,
@@ -459,7 +459,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 16,
-    "dc_weight": null,
+    "dc_weight": 0.8823529411764706,
     "color": [
      200,
      60,
@@ -487,7 +487,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 17,
-    "dc_weight": null,
+    "dc_weight": 0.9411764705882353,
     "color": [
      200,
      60,
@@ -515,7 +515,7 @@
     ],
     "dc_group": "funnel_ladder",
     "dc_index": 18,
-    "dc_weight": null,
+    "dc_weight": 1.0,
     "color": [
      200,
      60,
@@ -525,19 +525,19 @@
     "metal_depth_mm": null
    },
    {
-    "name": "exit_plate",
+    "name": "conductance_limit",
     "shapes": [
      {
       "type": "rect",
       "x_mm": 37.7,
-      "y_mm": 0.0,
+      "y_mm": 1.25,
       "width_mm": 0.6,
-      "height_mm": 9.6
+      "height_mm": 8.35
      }
     ],
     "stl": null,
     "is_grid": false,
-    "dc": 25,
+    "dc": 25.0,
     "rf_groups": [],
     "dc_group": null,
     "dc_index": null,
@@ -584,7 +584,7 @@
     "name": "funnel_ladder",
     "v_in": 100.0,
     "v_out": 75.0,
-    "interp": "linear",
+    "interp": "weights",
     "uniform": false
    }
   ]
@@ -645,7 +645,9 @@
    0.0,
    0.0,
    0.0
-  ]
+  ],
+  "sigma_model": "ccs_fit",
+  "ccs_fit_class": "all"
  },
  "integration": {
   "dt_ns": 2,
@@ -666,7 +668,7 @@
   "z_min_on": false,
   "z_max_on": false,
   "x_min": 0.0,
-  "x_max": 37.6,
+  "x_max": 38.4,
   "y_min": -50.0,
   "y_max": 50.0,
   "z_min": -50.0,

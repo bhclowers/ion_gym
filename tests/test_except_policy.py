@@ -133,7 +133,18 @@ ALLOW = {
     # NPZ pre-generation (ValueError/TypeError/MemoryError, reported), and
     # the assembly callback stop (the shared _stop_periodic). Ratcheted
     # to the new count, as this allowlist requires.
-    ("sim_app.py", "Exception"): 33,
+    #
+    # 2026-10-21 (pre-cut fixes): +2, both read at write time. The
+    # thermal-assess off-loop worker is the capture-and-forward pattern
+    # already cited above (st["err"]/st["tb"] stashed on the worker, the
+    # 150 ms poll renders type+message in the Analysis table and prints
+    # the traceback -- a worker thread cannot surface its own error).
+    # _update_sigma_honored is a param-watcher boundary with nothing
+    # above it to catch; it renders "**σ readout failed:** <type>:
+    # <msg>" IN the pane it would otherwise have filled, so a failed
+    # readout can never look like a valid σ. Neither is silent; neither
+    # substitutes behaviour.
+    ("sim_app.py", "Exception"): 35,
 }
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent

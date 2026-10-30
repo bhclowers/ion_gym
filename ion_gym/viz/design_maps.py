@@ -93,13 +93,23 @@ class ProfileCurve:
 
 def render_profiles(curves, *, xlabel, ylabel, title, subtitle,
                     vmarks=(), hmarks=(), logy=False, logx=False,
-                    figsize=(7.0, 4.6)):
+                    figsize=(7.0, 4.6), legend_loc="best", legend_ncol=1,
+                    legend_fontsize=8, title_fontsize=9,
+                    label_fontsize=None, tick_fontsize=None):
     """1-D design profiles with the marks a reader quotes numbers off.
 
     curves : list[ProfileCurve]
     vmarks : [(x, label)] vertical reference lines (e.g. a wall position)
     hmarks : [(y, label)] horizontal reference lines (e.g. kT)
     subtitle: the operating point, stated on the figure (required).
+
+    Publication styling (added 2026-10-22; every default reproduces the
+    previous hardcoded value, so existing callers render identically --
+    the change is additive and configuration-agnostic by construction):
+    legend_loc / legend_ncol / legend_fontsize place and size the
+    legend, title_fontsize sizes the title+subtitle block, and
+    label_fontsize / tick_fontsize override the rcParams sizes when not
+    None.
     """
     if not curves:
         raise VizError("render_profiles: no curves given -- an empty design "
@@ -130,10 +140,14 @@ def render_profiles(curves, *, xlabel, ylabel, title, subtitle,
         ax.set_yscale("log")
     if logx:
         ax.set_xscale("log")
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(f"{_wrap_title(title, ax.figure)}\n{_wrap_sub(subtitle)}", fontsize=9)
-    ax.legend(fontsize=8, framealpha=0.9)
+    ax.set_xlabel(xlabel, fontsize=label_fontsize)
+    ax.set_ylabel(ylabel, fontsize=label_fontsize)
+    ax.set_title(f"{_wrap_title(title, ax.figure)}\n{_wrap_sub(subtitle)}",
+                 fontsize=title_fontsize)
+    if tick_fontsize is not None:
+        ax.tick_params(labelsize=tick_fontsize)
+    ax.legend(fontsize=legend_fontsize, framealpha=0.9, loc=legend_loc,
+              ncol=legend_ncol)
     ax.grid(True, alpha=0.25)
     fig.tight_layout()
     _mpl_release(fig)

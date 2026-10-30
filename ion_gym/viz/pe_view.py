@@ -43,6 +43,65 @@ _PLANE_TRAJ_AXES = {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("y", "z"),
                     "rz": ("x", "y")}
 _PLANE_NORMAL_AXIS = {"xy": "z", "xz": "y", "yz": "x"}
 
+# DRAPE SCOPE: which part of each trajectory is draped on a sliced sheet.
+#   "slice" keeps only recorded points within a slab around the slice. The
+#           sheet is the PE AT the slice, so this is right wherever the
+#           potential changes along the slice normal (a yz cut through a
+#           barrier wall lifted far ions onto the wall before the slab).
+#   "path"  drapes the whole path, projected onto the sheet. The PE under
+#           the path is then the slice's PE, which is exact only where the
+#           potential does not change along the normal (an extruded rod
+#           set) and an approximation elsewhere. The figure says so.
+# A plane the flight CROSSES (its normal is the flight direction, e.g. xy
+# for an axial device) leaves "slice" with the few points an ion records
+# while passing through the slab: a dot. That is why the tab's "auto"
+# resolves to "path" there (resolve_drape_scope).
+DRAPE_SCOPES = ("slice", "path")
+DRAPE_SCOPE_CHOICES = ("auto",) + DRAPE_SCOPES
+
+
+def resolve_drape_scope(choice, plane, direction):
+    """(scope, reason) for a drape-scope CHOICE on `plane`.
+
+    choice    : "slice" or "path" (returned as given), or "auto".
+    plane     : the PE plane ("xy", "xz", "yz", or "rz").
+    direction : the source's declared launch direction, a 3-vector
+                (spec.source.direction).
+
+    "auto" resolves to "path" when the plane's normal is the single
+    largest component of `direction` (the flight crosses the plane), and
+    to "slice" otherwise. A direction with no single largest component
+    (zero, or a tie such as [1, 1, 0]) cannot name a crossing axis, so
+    auto keeps "slice" and the reason says why. A plane with no normal
+    (r-z, or a 2-D model) has no slab to apply. Auto keeps "slice", which
+    is inert there. The reason is figure text: the figure states which
+    scope it used and why.
+    """
+    if choice not in DRAPE_SCOPE_CHOICES:
+        raise ValueError(f"drape scope {choice!r} is not one of "
+                         f"{DRAPE_SCOPE_CHOICES}")
+    if choice != "auto":
+        return choice, f"drape scope: {choice} (chosen)"
+    normal = _PLANE_NORMAL_AXIS.get(plane)
+    if normal is None:
+        return "slice", (f"drape scope: slice (auto, the {plane} plane has "
+                         f"no slice normal)")
+    d = np.abs(np.asarray(direction, float).reshape(-1))
+    if d.size != 3:
+        raise ValueError(f"resolve_drape_scope: source direction must be a "
+                         f"3-vector, got {list(direction)!r}")
+    top = float(d.max())
+    if top == 0.0 or int((d == top).sum()) != 1:
+        return "slice", (f"drape scope: slice (auto, source direction "
+                         f"{list(direction)} has no single dominant axis)")
+    flight = "xyz"[int(d.argmax())]
+    if flight == normal:
+        return "path", (f"drape scope: whole path (auto, the flight runs "
+                        f"along {flight}, which crosses the {plane} plane)")
+    return "slice", (f"drape scope: near the slice (auto, the flight runs "
+                     f"along {flight}, within the {plane} plane)")
+
+
 # THE default 3-D view every PE figure has always used; camera=None
 # resolves to exactly this (the UI's view checkbox off, the API default).
 _PE_CAMERA_DEFAULT = dict(eye=dict(x=1.5, y=-1.7, z=0.9))
@@ -196,7 +255,8 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                  trust_cells=2, quantity=("PE", "eV"),
                  normal_mm=None, h_mm=0.1, t_us=0.0,
                  component="effective", index=None, slice_mm=None,
-                 subtitles=(), camera=None):
+                 subtitles=(), camera=None, drape_scope="slice",
+                 show_title=True, show_legend=None):
     """node-centred 3-D PE landscape.
 
     model: planar/r-z model exposing pe_surface(mz, charge)->(x,y,PE,ele).
@@ -246,7 +306,29 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
     show_adiabatic_caveat: only True for RF devices — the adiabatic-
     approximation note is
         meaningless (and misleading) on a purely DC lens.
+    normal_mm: the slice position along the plane normal, in the world
+        frame. None = derived from the slice that was cut (the usual
+        case). It is ONLY a position: whether a slab is applied around it
+        is decided by drape_scope, never by passing None.
+    drape_scope: "slice" (default) drapes only recorded points within a
+        slab around the slice. "path" drapes every point, projected onto
+        the sheet, and the footer states that the PE under the path is
+        the slice PE. See DRAPE_SCOPES. resolve_drape_scope maps the
+        tab's "auto" choice. Every drape is counted in the footer (ions
+        passed in, drawn, without a trajectory, beyond max_traj, and for
+        "slice" the points inside the slab), so a drape reduced to a dot
+        explains itself.
+    show_title: True (default) draws the title and the header lines
+        under it (slice position, drape scope, lab time). False hides
+        them on screen only: they are still recorded in
+        fig.layout.meta ("title" and "header"), so an exported figure
+        keeps its operating point. Footer lines are not affected.
+    show_legend: None (default) draws the legend whenever a trace has an
+        entry, True forces it, False hides it.
     """
+    if drape_scope not in DRAPE_SCOPES:
+        raise ValueError(f"pe_figure_3d: drape_scope {drape_scope!r} is not "
+                         f"one of {DRAPE_SCOPES}")
     header = [str(t) for t in subtitles]
     footer = []
     if surface is not None:
@@ -505,30 +587,46 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
             mode="markers", marker=dict(size=1.8, color=_col(i)),
             name=nm, hoverinfo="skip", showlegend=True)
 
-    # trajectories draped on the SCALED sheet (sampler on scaled PE)
-    if results:
+    # trajectories draped on the SCALED sheet (sampler on scaled PE).
+    # results=None means the caller asked for no drape. An EMPTY sequence
+    # means it asked for one and had nothing to give, which is stated.
+    if results is not None and len(results) == 0:
+        footer.append("drape: the run has no ion results, so nothing is "
+                      "draped")
+    elif results is not None:
         samp = _pe_sampler(x, y, PEs)
         lift = 0.02 * (hi - lo + 1e-9)
-        # NORMAL-axis column + the slice's position, so a SLICED plane only
-        # drapes ions that actually live near it. The PE surface is ONE
-        # slice at a fixed normal index; an ion far from that slice has a
-        # completely different local PE, so draping it on this slice lifted
-        # it onto whatever the slice happened to cut (a barrier wall ->
-                # an 80 eV spike on a yz cut). We keep only ions
-        # within HALF A SLAB of the slice and drape them on it; the slab is
-        # generous (10% of the normal extent, min a few cells) so a thin
-        # confined cloud still shows.
+        # NORMAL-axis column + the slice's position. With drape_scope
+        # "slice", a SLICED plane only drapes points that live near it.
+        # The PE surface is ONE slice at a fixed normal index. An ion far
+        # from that slice has a completely different local PE, so draping
+        # it on this slice lifted it onto whatever the slice happened to
+        # cut (a barrier wall -> an 80 eV spike on a yz cut). "slice"
+        # keeps only points within HALF A SLAB of the slice. The slab is
+        # generous (10% of the in-plane extent, min a few cells) so a thin
+        # confined cloud still shows. "path" keeps every point and states
+        # that the PE under the path is the slice PE.
         _norm_ax = _PLANE_NORMAL_AXIS.get(plane)
         _norm_pos = None
         if _norm_ax is not None and normal_mm is not None:
             _norm_pos = float(normal_mm)
             _span = float(max(np.ptp(x), np.ptp(y)))
             _slab = max(0.10 * _span, 3.0 * float(h_mm))
+        _use_slab = (drape_scope == "slice" and _norm_pos is not None)
         shown = 0
         skipped_far = 0
+        no_traj = 0
+        over_cap = 0
+        pts_total = 0
+        pts_drawn = 0
         for r in results:
-            if r.traj is None or shown >= max_traj:
+            if r.traj is None:
+                no_traj += 1
                 continue
+            if shown >= max_traj:
+                over_cap += 1
+                continue
+            pts_total += int(r.traj.shape[0])     # RECORDED, before thinning
             tr = r.traj[::max(int(decimate), 1)]
             # IN-PLANE channels for THIS plane, by NAME. The record
             # wraps the guaranteed BASE prefix [t,x,y,z,vx,vy,vz]; the
@@ -543,12 +641,13 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                     f"(known: {sorted(_PLANE_TRAJ_AXES)})")
             ca, cb = _PLANE_TRAJ_AXES[plane]
             xs, ys = rec[ca], rec[cb]
-            if _norm_pos is not None:
+            if _use_slab:
                 near = np.abs(rec[_norm_ax] - _norm_pos) <= _slab
                 if not near.any():
                     skipped_far += 1
                     continue
                 xs, ys = xs[near], ys[near]
+            pts_drawn += int(xs.size)
             zs = samp(np.column_stack([xs, ys])) + lift
             # a summary without a fate is UNKNOWN (grey), never a timeout
             # (L-530: this defaulted to 2)
@@ -576,12 +675,35 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                 line=dict(color=colour, width=traj_width),
                 showlegend=False, hoverinfo="skip")
             shown += 1
-        if _norm_pos is not None and skipped_far:
-            # a skipped item is a REPORTED item: say how many
-            # ions fell outside the slice's slab, so an empty-looking slice
-            # is an explained decision, not a silent drop.
-            footer.append(f"{skipped_far} trajectory(ies) outside the "
-                          f"{plane} slab at {_norm_pos:.3g} mm — not draped")
+        # EVERY DRAPE IS COUNTED. A drape the slab cut to a few points
+        # (an axial flight on a crossing plane) used to draw dots and say
+        # nothing, which read as "no trajectories". The footer now states
+        # what was passed in, what was drawn, and why the rest was not.
+        _dec = max(int(decimate), 1)
+        _cnt = (f"drape: {shown} of {len(results)} ion(s) drawn, "
+                f"{pts_drawn} points plotted of {pts_total} recorded"
+                + (f" (one plotted per {_dec} recorded)" if _dec > 1 else ""))
+        _why = []
+        if no_traj:
+            _why.append(f"{no_traj} without a recorded trajectory")
+        if over_cap:
+            _why.append(f"{over_cap} beyond the {max_traj}-path limit")
+        if skipped_far:
+            # a skipped item is a REPORTED item
+            _why.append(f"{skipped_far} with no point inside the slab")
+        if _why:
+            _cnt += " (" + ", ".join(_why) + ")"
+        footer.append(_cnt)
+        if _use_slab:
+            footer.append(f"draped points lie within ±{_slab:.3g} mm of "
+                          f"the {plane} slice at {_norm_ax} = "
+                          f"{_norm_pos:.3g} mm")
+        elif drape_scope == "path" and _norm_pos is not None:
+            footer.append(f"each draped path is projected whole onto the "
+                          f"{plane} slice at {_norm_ax} = {_norm_pos:.3g} mm."
+                          f" The PE under the path is the slice PE, exact "
+                          f"only where the potential does not change along "
+                          f"{_norm_ax}")
 
     _inst = model_instant_drives(model) if model is not None else []
     if _inst:
@@ -604,7 +726,20 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                 if np.ptp(y) > 0 else 1.6,
                 y=1.0, z=max(float(z_aspect), 0.05)),
             camera=camera_eye(**camera) if camera else _PE_CAMERA_DEFAULT))
-    V.layout_plotly_text(fig, title=title, subtitles=header, footers=footer)
+    if show_title:
+        V.layout_plotly_text(fig, title=title, subtitles=header,
+                             footers=footer, legend=show_legend)
+    else:
+        # hidden on screen, kept in the figure's metadata (see docstring)
+        V.layout_plotly_text(fig, title=None, subtitles=(),
+                             footers=footer, legend=show_legend)
+        meta = (dict(fig.layout.meta) if isinstance(fig.layout.meta, dict)
+                else {})
+        if title:
+            meta["title"] = str(title)
+        meta["header"] = [str(h) for h in header]
+        meta["title_hidden"] = True
+        fig.update_layout(meta=meta)
     return fig
 
 
@@ -844,7 +979,8 @@ def save_pe_frames(model, times_us, out_dir, *, mz=None, charge=1,
 
 # --------------------------------------------------------------- PE tab
 def _surface_signature(spec, mz, exag, stride, drape, run_id, component,
-                       plane="xy", metal="mask", slice_pos=None, t_us=0.0):
+                       plane="xy", metal="mask", slice_pos=None, t_us=0.0,
+                       *, drape_scope):
     """Hash of everything that changes the rendered surface — geometry,
     per-electrode DC + RF group, resolution, mass, scaling (mode+factor),
     view options, THE PLANE, the metal mode, and the draped run. Irrelevant
@@ -864,7 +1000,8 @@ def _surface_signature(spec, mz, exag, stride, drape, run_id, component,
         parts.append(f"{e.name}|{e.dc:.6g}|{grps}|{e.stl}|"
                      f"{bool(e.shapes)}")
     parts += [f"mz={mz:.6g}", f"scale={exag}", f"st={stride}",
-              f"dr={int(drape)}", f"run={run_id}", f"comp={component}",
+              f"dr={int(drape)}", f"drs={drape_scope}", f"run={run_id}",
+              f"comp={component}",
               f"plane={plane}", f"metal={metal}", f"slice={slice_pos}"]
     return hashlib.sha256("::".join(parts).encode()).hexdigest()
 
@@ -1667,6 +1804,29 @@ class PeSurfaceTab:
             step=20, value=200, width=240)
         self.w_drape = pn.widgets.Checkbox(
             name="drape current trajectories", value=True)
+        # FIGURE TEXT (PI request 2026-10-25). Pure display: toggling
+        # rebuilds the figure from the cached surface (no recompute), and
+        # the main view's PE 3D mode follows the same two switches.
+        self.w_show_title = pn.widgets.Checkbox(
+            name="show title", value=True)
+        self.w_show_legend = pn.widgets.Checkbox(
+            name="show legend", value=True)
+        # which part of each path is draped (DRAPE_SCOPES). "auto" resolves
+        # per compute from the plane and the source direction
+        # (resolve_drape_scope), and the figure states what it used.
+        self.w_drape_scope = pn.widgets.Select(
+            name="drape scope", value="auto", width=240,
+            options={"auto (whole path on a plane the flight crosses)":
+                     "auto",
+                     "near the slice only": "slice",
+                     "whole path, projected": "path"},
+            description="Which part of each trajectory is draped on the "
+            "sliced sheet. 'auto' reads the source's declared LAUNCH "
+            "direction (source.direction): when that direction is normal "
+            "to the plane it drapes whole paths, otherwise only points "
+            "near the slice. A launch direction need not be the flight "
+            "axis (a thermal or trapped cloud), so choose a scope by hand "
+            "when it is not. The figure states the scope it used.")
         self.w_plane = pn.widgets.Select(
             name="plane", value="xy", options=["xy", "xz", "yz"], width=90)
         # slice position along the axis NOT in the plane (viewing xz,
@@ -1734,8 +1894,8 @@ class PeSurfaceTab:
         # compute() calls (harness, scripts) stay synchronous.
         self.compute_btn.on_click(self._on_go)
         for w in (self.w_mz, self.w_comp, self.w_exag, self.w_scalemode,
-                  self.w_res, self.w_drape, self.w_plane, self.w_metal,
-                  self.w_trust, self.w_slicepos, self.w_t_us):
+                  self.w_res, self.w_drape, self.w_drape_scope, self.w_plane,
+                  self.w_metal, self.w_trust, self.w_slicepos, self.w_t_us):
             w.param.watch(lambda e: self.refresh(), "value")
         self.w_time_on.param.watch(self._on_time_toggle, "value")
         for w in (self.w_azim, self.w_elev, self.w_dist, self.w_ortho):
@@ -1747,13 +1907,53 @@ class PeSurfaceTab:
         # second hand-maintained default table to drift (L-463)
         self._defaults = {w: w.value for w in (
             self.w_mz, self.w_comp, self.w_exag, self.w_scalemode,
-            self.w_res, self.w_drape, self.w_plane, self.w_metal,
-            self.w_trust, self.w_slicepos, self.w_slicenum,
+            self.w_res, self.w_drape, self.w_drape_scope, self.w_plane,
+            self.w_metal, self.w_trust, self.w_slicepos, self.w_slicenum,
             self.w_time_on, self.w_t_us, self.w_view_on, self.w_azim,
-            self.w_elev, self.w_dist, self.w_ortho, self.w_zaspect)}
+            self.w_elev, self.w_dist, self.w_ortho, self.w_zaspect,
+            self.w_show_title, self.w_show_legend)}
         # z-aspect is a pure VIEW property: restyle the cached figure in
         # place — no invalidation, no recompute.
         self.w_zaspect.param.watch(self._on_aspect, "value")
+        for w in (self.w_show_title, self.w_show_legend):
+            w.param.watch(self._on_text_toggle, "value")
+
+    def text_options(self):
+        """The figure-text switches as pe_figure_3d keyword arguments,
+        for this tab and for the main view's PE 3D mode. show_legend
+        True maps to None, the automatic rule (a legend only when a
+        trace has an entry)."""
+        return dict(show_title=bool(self.w_show_title.value),
+                    show_legend=(None if self.w_show_legend.value
+                                 else False))
+
+    def _on_text_toggle(self, _event=None):
+        """Rebuild the displayed figure with the new text switches, from
+        the cached surface: nothing is recomputed. With no current figure
+        (none computed yet, or the last one invalidated) there is nothing
+        to rebuild, and the next Compute uses the switches."""
+        last = getattr(self, "_last_p", None)
+        if self._fig is None or last is None:
+            return
+        if getattr(self, "_busy", False):
+            self.status.object = ("_a compute is running: the text switches "
+                                  "apply when it finishes_")
+            self._text_pending = True
+            return
+        import copy
+        p = copy.copy(last)
+        p.__dict__.update(self.text_options())
+        self._busy = True
+        self.pane.loading = True
+
+        def _fail(e, tb):
+            self.pane.loading = False
+            self._busy = False
+            self.status.object = (f"**figure rebuild failed** — "
+                                  f"{type(e).__name__}: {e}")
+
+        _run_off_doc(lambda: self._build(p),
+                     lambda out: self._apply(p, out), _fail)
 
     def _on_aspect(self, event):
         if self._fig is not None:
@@ -1828,7 +2028,17 @@ class PeSurfaceTab:
             plane=self.w_plane.value,
             metal=(self.w_metal.value, int(self.w_trust.value)),
             slice_pos=round(float(self.w_slicepos.value), 4),
-            t_us=self._time_value())
+            t_us=self._time_value(),
+            # the RESOLVED scope, so an "auto" that changes meaning (plane
+            # or source direction edited) invalidates the cached figure
+            drape_scope=self._drape_scope()[0])
+
+    def _drape_scope(self):
+        """(scope, reason) the drape will use: the selector's choice, with
+        "auto" resolved from the plane and the source direction."""
+        return resolve_drape_scope(
+            self.w_drape_scope.value, self.w_plane.value,
+            self.get_spec().source.direction)
 
     def _sync_planes(self, model):
         """The selector offers exactly the planes the model DECLARES.
@@ -1963,16 +2173,16 @@ class PeSurfaceTab:
                         "</sup>")
         # RF caveat only when the device has RF AND the component shows it
         p.caveat = p.has_rf and p.comp in ("effective", "rf")
-        # the slice position in the CANONICAL frame, for the drape's
-        # slab filter (only ions near a SLICED plane get draped on it).
-        # None on an auto/electrode-dense slice -> no slab restriction.
-        p.norm_mm = None
-        if p.plane in ("xz", "yz") and p.idx is not None:
-            _h = float(getattr(model, "h_mm", 0.0)) or 0.0
-            _mo = _world_off(model)   # world frame, not stored
-            _axn = {"xz": 1, "yz": 0}[p.plane]
-            if _h > 0:
-                p.norm_mm = p.idx * _h + _mo[_axn]
+        # DRAPE SCOPE, resolved here and stated on the figure. The slice
+        # position itself is NOT computed here any more: pe_figure_3d
+        # derives it from the slice it cut (one authority, through
+        # _world_off). This tab used to pass normal_mm=None to mean "no
+        # slab", which pe_figure_3d read as "derive the position" and
+        # then applied the slab anyway, so an axial flight on xy was
+        # draped as a dot. Whether a slab applies is now drape_scope's
+        # job alone.
+        p.drape_scope, p.drape_reason = self._drape_scope()
+        p.__dict__.update(self.text_options())
         p.trust_cells = int(self.w_trust.value)
         p.z_exaggerate = self.w_exag.value
         p.pe_scale_mode = self.w_scalemode.value
@@ -1986,10 +2196,13 @@ class PeSurfaceTab:
         no widgets, no Panel objects, no shared spec (everything arrives
         in `p`, assembled on the doc thread by _prep)."""
         import numpy as np
-        surface = compute_component(p.model, p.mz,
-                                    getattr(p, "charge", 1), p.comp,
-                                    plane=p.plane, index=p.idx,
-                                    t_us=getattr(p, "t_us", 0.0))
+        # a text-only rebuild hands in the surface it already has
+        surface = getattr(p, "surface", None)
+        if surface is None:
+            surface = compute_component(p.model, p.mz,
+                                        getattr(p, "charge", 1), p.comp,
+                                        plane=p.plane, index=p.idx,
+                                        t_us=getattr(p, "t_us", 0.0))
         fig = pe_figure_3d(
             p.model, surface=surface, results=p.results,
             t_us=getattr(p, "t_us", 0.0),
@@ -2001,8 +2214,11 @@ class PeSurfaceTab:
             metal_mode=p.mmode, electrode_dc=p.edc,
             trust_cells=p.trust_cells,
             quantity=p.quant, plane=p.plane, index=p.idx,
-            normal_mm=p.norm_mm,
-            h_mm=p.h_mm)
+            h_mm=p.h_mm, drape_scope=p.drape_scope,
+            subtitles=((p.drape_reason,) if p.results is not None
+                       else ()),
+            show_title=getattr(p, "show_title", True),
+            show_legend=getattr(p, "show_legend", None))
         npts = surface[2][::p.stride, ::p.stride].size
         # report the surface's actual EXTENT + grid shape, so a slice
         # that looks like it covers only part of the model can be read
@@ -2015,11 +2231,15 @@ class PeSurfaceTab:
                   .format(p.plane[0], float(_sa.min()), float(_sa.max()),
                           p.plane[1], float(_sb.min()), float(_sb.max()))
                   if _sa.size and _sb.size else "empty")
-        return fig, npts, extent, fullshape
+        return fig, npts, extent, fullshape, surface
 
     def _apply(self, p, out):
         """Doc-thread part: pane/status/cache writes."""
-        fig, npts, extent, fullshape = out
+        fig, npts, extent, fullshape, surface = out
+        # the pack and its surface, so a text toggle can rebuild the
+        # figure without recomputing the grid
+        p.surface = surface
+        self._last_p = p
         self._fig = fig
         self._sig = self._current_sig(p.model)
         self.pane.object = fig
@@ -2034,6 +2254,9 @@ class PeSurfaceTab:
             f". Cached until a parameter changes.{note}")
         self.pane.loading = False
         self._busy = False
+        if getattr(self, "_text_pending", False):
+            self._text_pending = False
+            self._on_text_toggle()
 
     def compute(self):
         """Synchronous composition — the headless harness and any script
@@ -2079,6 +2302,7 @@ class PeSurfaceTab:
             if self._fig is not None:
                 self._fig = None
                 self._sig = None
+                self._last_p = None       # releases the old model too
                 self.pane.object = self._pn.pane.Plotly().object
             self.status.object = ("_no solved field yet — press Fly or "
                                   "Recompute, then Compute surface_")
@@ -2139,6 +2363,7 @@ class PeSurfaceTab:
         if self._current_sig(model) != self._sig:
             self._fig = None                       # destroy cached surface
             self._sig = None
+            self._last_p = None       # and the pack, which holds the model
             self.pane.object = self._pn.pane.Plotly().object
             self.status.object = ("**parameters changed** — cached surface "
                                   "discarded. Press **Compute surface** "
@@ -2153,7 +2378,8 @@ class PeSurfaceTab:
             pn.Row(self.w_time_on, self.w_t_us),
             pn.Row(self.w_view_on, self.w_azim, self.w_elev, self.w_dist,
                    self.w_ortho),
-            pn.Row(self.w_drape),
+            pn.Row(self.w_drape, self.w_drape_scope),
+            pn.Row(self.w_show_title, self.w_show_legend),
             pn.Row(self.w_zaspect),
             pn.Row(self.w_scalemode, self.w_exag),
             pn.Row(self.w_res),

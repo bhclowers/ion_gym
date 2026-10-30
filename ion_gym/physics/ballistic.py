@@ -9,14 +9,6 @@ That lets a 2-D (two-axis) flight be extended to three dimensions without
 a new solve: the third axis rides on top, and nothing in the two flown
 axes changes.
 
-GENERIC by design (D6b, 2026-10-16; PI: "That is basic physics. To the
-degree possible code should be agnostic"). This was viz/deck_v.py, an
-oa-TOF module carrying that instrument's numbers as defaults (a 22-34 eV
-energy window, a 16 mm slit footprint, a 0.64 eV spread) and a retyped
-96.485. Every value is now a REQUIRED argument -- an instrument's numbers
-live with that instrument's study -- and the unit constant is
-physics.constants.ACC.
-
 Units: positions mm, time us, energy eV, mass Da (m/z at charge 1),
 speed mm/us.
 """

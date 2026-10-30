@@ -32,7 +32,7 @@ import math
 
 import numpy as np
 
-from ion_gym.io.sim_spec import SimSpec
+from ion_gym.io.sim_spec import SimSpec, set_pitch
 from ion_gym.physics.sizing import record_volume
 from ion_gym.physics.collision3d import E_CHG, KG_AMU, KB
 
@@ -48,6 +48,23 @@ _ADVISED: set = set()
 # import (the case that produced the old 48 h solve estimate) is well
 # above it and is correctly skipped rather than hanging the UI.
 PREVIEW_VOXEL_BUDGET = 30_000_000
+
+# Preview WORK budget for the shape rasterizer, in raster2d work units
+# (grid nodes x whole-grid passes per shape; a polygon costs two passes
+# per edge). Ruled 2026-10-30: ~10 s of preview is acceptable. Measured
+# on the build container: the Orbitrap at 0.02 mm/gu is 1.4e9 units and
+# took 10.4 s (~7.5e-9 s per unit), so 1e9 units is ~7.5 s there; other
+# machines differ by their numpy speed. Node count alone missed the
+# worst case: the Orbitrap has two
+# electrodes but 965 polygon vertices, and at 0.01 mm/gu its 2.9M-node
+# preview took 62 s. Over budget, the preview is DRAWN at a coarser pitch
+# and says so (preview_pitch); the solve pitch is untouched.
+PREVIEW_WORK_BUDGET = 1.0e9
+# preview_pitch search: the first guess scales the pitch by the budget
+# ratio; if set_pitch's lattice re-derivation leaves it still over, the
+# pitch grows by this factor, at most this many times, then refuses.
+PREVIEW_PITCH_STEP = 1.1
+PREVIEW_PITCH_TRIES = 40
 
 # Gaussian FWHM = FWHM_PER_SIGMA * sigma.  Named because every beam spread
 # in this project is quoted as FWHM while every generator wants sigma, and
@@ -465,6 +482,93 @@ def sizing_for(spec: SimSpec, *, pitch=None, min_feature_mm=None,
                                   min_feature_mm=min_feature_mm,
                                   field_method=field_method,
                                   channel_dtype=channel_dtype)
+
+
+def preview_cost(spec: SimSpec):
+    """What the pre-solve electrode preview of `spec` costs at its own
+    pitch: {"work": shape-raster work units (raster2d.raster_work),
+    "voxels": 3-D voxel count or None for a 2-D route}.
+
+    Dispatched on the SAME BuildRoute as build_run. Planar and r-z routes
+    rasterize their shapes on the 2-D grid; shapes3d rasterizes each
+    shape on the x-y cross-section and extrudes it, so its work is the
+    cross-section raster, with the voxel count gated separately; the
+    STL and scene routes
+    voxelize meshes or analytic solids, gated by voxel count alone. A
+    route without a cheap preview source costs nothing here."""
+    from ion_gym.io.lattice import gu_nodes
+    from ion_gym.physics.raster2d import raster_work
+    g = spec.geometry
+    h = float(g.mm_per_gu)
+    r = build_route(spec)
+    if r.builder in ("planar", "rz", "shapes3d"):
+        nodes = (gu_nodes(g.width_mm, h, axis="x",
+                          what="width_mm domain extent")
+                 * gu_nodes(g.height_mm, h, axis="y",
+                            what="height_mm domain extent"))
+        work = raster_work(g.electrodes, nodes)
+        # the extrusion into 3-D is a broadcast, priced by the voxel
+        # budget (measured: SLIM 3D at 17.6M voxels in 2.5 s), not by
+        # shape count
+        voxels = (int(sizing_for(spec).n_voxels)
+                  if r.builder == "shapes3d" else None)
+        return {"work": int(work), "voxels": voxels}
+    if r.builder in ("stl3d", "scene3d"):
+        return {"work": 0, "voxels": int(sizing_for(spec).n_voxels)}
+    return {"work": 0, "voxels": None}
+
+
+def _preview_over(cost):
+    """(work ratio, voxel ratio) against the two preview budgets."""
+    rw = cost["work"] / PREVIEW_WORK_BUDGET
+    rv = ((cost["voxels"] / PREVIEW_VOXEL_BUDGET)
+          if cost["voxels"] is not None else 0.0)
+    return rw, rv
+
+
+def preview_pitch(spec: SimSpec):
+    """(pitch_mm, note) for the electrode preview of `spec`.
+
+    Within both preview budgets: (spec's own pitch, None), and the
+    preview is the solver's raster. Over either: the coarsest-needed
+    pitch that fits, and a note saying the preview is drawn at that
+    pitch while the solve keeps its own (PI ruling 2026-10-30: draw
+    coarser and label it, rather than skip or block). Work scales as
+    pitch^-2 (the 2-D raster) and voxels as pitch^-3, so the first guess
+    is exact up to set_pitch's lattice adjustment; the search then grows
+    the pitch by PREVIEW_PITCH_STEP until it fits, and refuses with the
+    numbers if PREVIEW_PITCH_TRIES steps do not."""
+    import copy
+    h = float(spec.geometry.mm_per_gu)
+    cost = preview_cost(spec)
+    rw, rv = _preview_over(cost)
+    if rw <= 1.0 and rv <= 1.0:
+        return h, None
+    hp = h * max(rw ** 0.5, rv ** (1.0 / 3.0), 1.0)
+    hp = float(f"{hp:.3g}")
+    for _ in range(PREVIEW_PITCH_TRIES):
+        trial = copy.deepcopy(spec)
+        set_pitch(trial, hp)
+        rw2, rv2 = _preview_over(preview_cost(trial))
+        if rw2 <= 1.0 and rv2 <= 1.0:
+            over = []
+            if rw > 1.0:
+                over.append(f"{rw:.1f}x the shape-raster budget "
+                            f"({cost['work']:.2e} of "
+                            f"{PREVIEW_WORK_BUDGET:.0e} units)")
+            if rv > 1.0:
+                over.append(f"{rv:.1f}x the voxel budget "
+                            f"({cost['voxels'] / 1e6:.1f}M of "
+                            f"{PREVIEW_VOXEL_BUDGET / 1e6:.0f}M)")
+            note = (f"electrode preview drawn at {hp:g} mm/gu; the solve "
+                    f"uses {h:g} mm/gu. At the solve pitch the preview "
+                    f"would be " + " and ".join(over) + ".")
+            return hp, note
+        hp = float(f"{hp * PREVIEW_PITCH_STEP:.3g}")
+    raise ValueError(
+        f"preview_pitch: no preview pitch up to {hp:g} mm/gu fits the "
+        f"preview budgets for {spec.name!r} (solve pitch {h:g} mm/gu, "
+        f"work {cost['work']:.2e} units, voxels {cost['voxels']})")
 
 
 def preview_masks3d(spec: SimSpec):

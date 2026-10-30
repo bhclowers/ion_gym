@@ -50,7 +50,11 @@ def rasterize(scene: GeomScene) -> np.ndarray:
                           np.arange(g.ny, dtype=float),
                           np.arange(g.nz, dtype=float), indexing="ij")
     lab = np.zeros((g.nx, g.ny, g.nz), np.int16)
+    from ion_gym.physics.raster2d import check_cancel
     for e in sc.electrodes:
+        # a stop requested through raster2d.cancel_scope lands between
+        # electrodes (no-op when no scope is open)
+        check_cancel("scene rasterization")
         m = np.zeros_like(lab, bool)
         for sh in e.shapes:
             w = np.zeros_like(m)

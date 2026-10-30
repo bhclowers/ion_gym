@@ -1,9 +1,12 @@
 """Per-ion hard-sphere cross sections (physics.ccs) and the hard-sphere
 step advisory (collision3d.hs_step_note). Requested by Brian 2026-10-17.
+Updated 2026-10-24 for his rulings: the CCS fit is the default sigma
+model, the default refuses outside the fit's domain, sigma_model is
+written on every save, and extrapolation is a separate WARNING advisory.
 
 Fast: no field solve and no flight. Checks read the shipped coefficient
-table and a SimSpec loaded from the shipped funnel deck (geometry only;
-nothing is solved), so the file needs no fixture of its own.
+table and SimSpecs loaded from shipped decks (geometry only, nothing
+is solved), so the file needs no fixture of its own.
 """
 import copy
 import math
@@ -32,11 +35,44 @@ def _gas_spec(sigma_model="ccs_fit", gas="N2", charge=1, mz_list=None,
     return spec
 
 
-def test_fixed_model_is_the_default_and_returns_sigma_m2():
-    col = CollisionSpec(enabled=True, sigma_m2=3.0e-18)
-    assert col.sigma_model == "fixed"
+# The He decks pinned to sigma_model "fixed" when the CCS fit became the
+# default (PI ruling 2026-10-24). Paths are relative to the repo root.
+PINNED_HE_DECKS = (
+    "examples/drift_tube_mason_schamp.json",
+    "examples/paul_trap_r-z_he_cooling.json",
+    "examples/rf_drift_cell_allen_bush.json",
+    "internal/studies/drift_tube_v11/pack/drift_tube_spec.json",
+    "notebooks/data/20_drift_tube_matrix/drift_winner_spec.json",
+)
+
+
+def test_ccs_fit_is_the_default():
+    col = CollisionSpec(enabled=True)
+    assert col.sigma_model == ccs.SIGMA_MODEL_DEFAULT == "ccs_fit"
+
+
+def test_fixed_model_returns_sigma_m2_for_every_ion():
+    col = CollisionSpec(enabled=True, sigma_m2=3.0e-18, sigma_model="fixed")
     for mz in (50.0, 500.0, 5000.0):
         assert ccs.ion_sigma_m2(col, mz, 1) == 3.0e-18
+
+
+def test_default_refuses_outside_the_fit_and_names_the_fix():
+    # a He deck that names no model gets the default fit, which refuses
+    spec = _gas_spec()
+    spec.collisions = CollisionSpec(enabled=True, gas="He", T_k=273.0,
+                                    P_torr=2.5, model="hs")
+    errs = [e for e in spec.validate() if "ccs_fit" in e]
+    assert errs, spec.validate()
+    assert "default" in errs[0] and "fixed" in errs[0]
+
+
+@pytest.mark.parametrize("rel", PINNED_HE_DECKS)
+def test_pinned_he_decks_state_fixed_and_validate(rel):
+    spec = SimSpec.from_json(str(Path(repo_root()) / rel))
+    assert spec.collisions.gas == "He"
+    assert spec.collisions.sigma_model == "fixed"
+    assert not [e for e in spec.validate() if "ccs_fit" in e]
 
 
 def test_vacuum_returns_zero_like_the_old_scalars():
@@ -111,13 +147,22 @@ def test_shared_scalars_no_longer_carry_a_cross_section():
     assert "sigma_m2" not in g
 
 
-def test_save_omits_the_new_fields_at_their_defaults():
+def test_save_always_writes_sigma_model_and_omits_default_class():
+    # sigma_model is written on every save, whatever its value
+    for model in ("ccs_fit", "fixed"):
+        d = CollisionSpec(enabled=True, sigma_model=model).to_dict()
+        assert d["sigma_model"] == model
+        assert CollisionSpec.from_dict(d).sigma_model == model
+    # ccs_fit_class is still omitted at its default and restored on load
     d = CollisionSpec(enabled=True).to_dict()
-    assert "sigma_model" not in d and "ccs_fit_class" not in d
-    d = CollisionSpec(enabled=True, sigma_model="ccs_fit").to_dict()
-    assert d["sigma_model"] == "ccs_fit"
-    back = CollisionSpec.from_dict(d)
-    assert back.sigma_model == "ccs_fit" and back.ccs_fit_class == "all"
+    assert "ccs_fit_class" not in d
+    assert CollisionSpec.from_dict(d).ccs_fit_class == "all"
+
+
+def test_deck_without_sigma_model_loads_with_the_default():
+    d = CollisionSpec(enabled=True).to_dict()
+    d.pop("sigma_model")
+    assert CollisionSpec.from_dict(d).sigma_model == ccs.SIGMA_MODEL_DEFAULT
 
 
 def test_advisory_lists_the_flown_cross_sections():
@@ -126,6 +171,21 @@ def test_advisory_lists_the_flown_cross_sections():
              if a.startswith("collisions: hard-sphere cross sections")]
     assert len(notes) == 1
     assert "m/z 322" in notes[0] and "EXTRAPOLATED" in notes[0]
+
+
+def test_extrapolation_is_its_own_warning_advisory():
+    spec = _gas_spec(mz_list=[322.0, 5000.0])
+    warns = [a for a in spec.advisories()
+             if a.startswith("WARNING: the CCS fit")]
+    assert len(warns) == 1
+    assert "m/z 5000" in warns[0] and "m/z 322" not in warns[0]
+
+
+def test_no_extrapolation_warning_in_range_or_under_fixed():
+    spec = _gas_spec(mz_list=[322.0, 622.0])
+    assert ccs.extrapolation_note(spec) is None
+    spec = _gas_spec(sigma_model="fixed", mz_list=[5000.0])
+    assert ccs.extrapolation_note(spec) is None
 
 
 def test_step_advisory_warns_on_a_coarse_step_and_never_raises():

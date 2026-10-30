@@ -3530,6 +3530,140 @@ def pane_size_for(extent, *, px_width: int = 900,
     return {"width": int(round(dx * s)), "height": int(round(dy * s))}
 
 
+# LEGEND BAND for a true-scale view (true_scale_layout). These are layout
+# defaults, not physics, surfaced here so a caller can override them.
+# LEGEND_ROW_PX is the height one horizontal legend row takes at
+# LEGEND_FONT_PX. It is an estimate from plotly's default item padding and
+# only decides whether a long legend crowds the band, never the plot
+# area's scale (the margins are fixed, so the scale is exact regardless).
+LEGEND_FONT_PX = 12
+LEGEND_ENTRY_PX = 150      # fixed width of one horizontal legend entry
+LEGEND_ROW_PX = 22
+LEGEND_MAX_ROWS = 2        # rows the band may grow to before entries are cut
+# trace.meta key marking a legend entry true_scale_layout hid for lack of
+# room, so a later call on the same figure lists it again before counting
+# (the app sizes a figure once as a base and again when traces are added)
+LEGEND_HIDDEN_META = "legend_hidden_by_true_scale_layout"
+
+
+def legend_hidden(trace):
+    """True when true_scale_layout hid this trace's legend entry."""
+    meta = getattr(trace, "meta", None)
+    return isinstance(meta, dict) and bool(meta.get(LEGEND_HIDDEN_META))
+
+
+def _legend_entries(fig):
+    """Traces plotly will list in the legend, in order, or [] when plotly
+    would draw no legend at all (layout.showlegend False, or left unset
+    with fewer than two candidates and none explicitly shown)."""
+    cand = [tr for tr in fig.data
+            if getattr(tr, "showlegend", None) is not False
+            and getattr(tr, "name", None)]
+    shown = fig.layout.showlegend
+    if shown is None:
+        shown = (len(cand) >= 2
+                 or any(getattr(tr, "showlegend", None) is True
+                        for tr in cand))
+    return cand if shown else []
+
+
+def true_scale_layout(fig, *, margin, px_width: int = 900,
+                      max_width: int = 1000, max_height: int = 760,
+                      legend_entry_px: int = LEGEND_ENTRY_PX,
+                      legend_row_px: int = LEGEND_ROW_PX,
+                      legend_font_px: int = LEGEND_FONT_PX,
+                      legend_max_rows: int = LEGEND_MAX_ROWS) -> dict:
+    """Make a 2-D plotly figure's PLOT AREA exactly 1:1 in mm, and return
+    the pane box ({"width", "height"}) that delivers it.
+
+    WHY THE PANE BOX ALONE WAS NOT ENOUGH. pane_size_for sizes a box to
+    the data, but the axes sit inside the figure's margins, so giving
+    that box to the whole pane shrank each axis by a different number of
+    pixels. Plotly also GROWS a margin on its own when a legend or tick
+    labels do not fit (margin.autoexpand), by an amount no caller can
+    know in advance. Both broke the 1:1 scale the lock promises.
+
+    WHAT THIS DOES. It reads the figure's own axis ranges (the extent
+    actually displayed, not a second estimate of it), fits an isotropic
+    plot box inside the screen box minus the stated margins and a legend
+    band, fixes the margins (autoexpand off), and returns the pane box =
+    plot box + margins + band. The figure has no width or height of its
+    own, because the pane is the one sizing authority (M-VIZ-Z2).
+
+    The legend sits in a band above the plot, sized from the number of
+    entries at a fixed entry width (PI ruling 2026-10-24). Entries beyond
+    legend_max_rows rows are hidden from the legend, and the legend title
+    states how many, so nothing is dropped silently.
+
+    margin : dict(l=, r=, t=, b=) in px, the figure's stated margins.
+    Refuses (VizError) when an axis has no explicit range: an
+    autoranged axis has no extent to make true-scale.
+    """
+    xr, yr = fig.layout.xaxis.range, fig.layout.yaxis.range
+    if xr is None or yr is None:
+        raise VizError(
+            f"true_scale_layout: the figure has no explicit axis range "
+            f"(x={xr}, y={yr}), so there is no extent to draw at 1:1")
+    try:
+        l, r, t, b = (int(margin[k]) for k in ("l", "r", "t", "b"))
+    except KeyError as e:
+        raise VizError(f"true_scale_layout: margin {margin!r} lacks "
+                       f"{e.args[0]!r} (need l, r, t, b in px)") from e
+    extent = (min(xr), max(xr), min(yr), max(yr))
+    # entries an earlier call hid are listed again before this count, so
+    # the "(N more not listed)" note covers every hidden entry, not only
+    # the ones this call cuts
+    for tr in fig.data:
+        if legend_hidden(tr):
+            meta = dict(tr.meta)
+            meta.pop(LEGEND_HIDDEN_META)
+            tr.meta = meta or None
+            tr.showlegend = True
+    entries = _legend_entries(fig)
+    n = len(entries)
+
+    def _box(band):
+        return pane_size_for(extent, px_width=px_width - l - r,
+                             max_width=max_width - l - r,
+                             max_height=max_height - t - b - band)
+
+    rows = 0
+    box = _box(0)
+    if n:
+        # two passes: the band shrinks the height cap, which can narrow
+        # the box, which can change how many entries fit on a row
+        for _ in range(2):
+            per_row = max(1, box["width"] // int(legend_entry_px))
+            rows = min(-(-n // per_row), int(legend_max_rows))
+            box = _box(rows * int(legend_row_px))
+        per_row = max(1, box["width"] // int(legend_entry_px))
+        capacity = per_row * rows
+        hidden = entries[capacity:]
+        for tr in hidden:
+            meta = getattr(tr, "meta", None)
+            if meta is not None and not isinstance(meta, dict):
+                raise VizError(
+                    f"true_scale_layout: trace {tr.name!r} has a non-dict "
+                    f"meta ({type(meta).__name__}), so its hidden legend "
+                    f"entry cannot be marked for a later recount")
+            tr.meta = {**(meta or {}), LEGEND_HIDDEN_META: True}
+            tr.showlegend = False
+        legend = dict(orientation="h", x=0, xanchor="left", y=1.0,
+                      yanchor="bottom", entrywidth=int(legend_entry_px),
+                      entrywidthmode="pixels",
+                      font=dict(size=int(legend_font_px)))
+        legend["title"] = dict(
+            text=(f"({len(hidden)} more not listed)" if hidden else ""),
+            side="left")      # inline on the first row: no extra row
+        fig.update_layout(legend=legend)
+    band = rows * int(legend_row_px)
+    fig.update_layout(
+        width=None, height=None, autosize=True,
+        margin=dict(l=l, r=r, t=t + band, b=b, autoexpand=False))
+    return {"width": box["width"] + l + r,
+            "height": box["height"] + t + band + b}
+
+
 def apply_zoom_policy(fig, extent=None, *, true_scale: bool = True, **kw):
     """Apply M-VIZ-Z to an existing plotly Figure.  If `extent` is omitted it
     is measured from the figure's own data, so this works on any figure from
@@ -5361,6 +5495,57 @@ class AnalysisSeries:
     y: np.ndarray | None
     mz: float | None
     fate: object
+
+
+def analysis_series_csv(series, *, kind, x_name, y_name, meta=None,
+                        fate_style=None):
+    """CSV text of the EXACT series handed to analysis_figure — the
+    export twin of the plot, so what downloads is what was plotted
+    (the figure's decimation and trace caps are rendering measures and
+    do not apply here: every sample of every plotted series is
+    written). Long/tidy layout, one row per sample: ion, mz, fate,
+    <x_name>[, <y_name>] — y is omitted for kind 'hist', whose rows are
+    the values being histogrammed (the bin counts are the renderer's;
+    the values are the data). Floats are written with repr, which
+    round-trips exactly. `meta` (an ordered mapping) becomes leading
+    '# key: value' lines so the operating point travels with the
+    numbers (pandas: read_csv(..., comment='#')). Fate labels come
+    from `fate_style` — the SAME styling the figure used — so the CSV
+    names fates exactly as the legend did. Refuses empty input by
+    name."""
+    import csv as _csv
+    import io as _io
+    if not series:
+        raise ValueError(
+            "analysis_series_csv: no series to export — nothing was "
+            "plotted (empty selection or filter).")
+    if fate_style is None:
+        fate_style = _default_fate_style
+    buf = _io.StringIO()
+    for k, v in (meta or {}).items():
+        buf.write("# {0}: {1}\n".format(k, v))
+    w = _csv.writer(buf, lineterminator="\n")
+    hist = (kind == "hist")
+    w.writerow(["ion", "mz", "fate", x_name] + ([] if hist else [y_name]))
+    for ser in series:
+        label, _colour = fate_style(ser.fate)
+        mz_txt = "" if ser.mz is None else repr(float(ser.mz))
+        xs = np.asarray(ser.x, float)
+        if hist or ser.y is None:
+            w.writerows([ser.ion, mz_txt, label, repr(float(xv))]
+                        for xv in xs)
+        else:
+            ys = np.asarray(ser.y, float)
+            if len(ys) != len(xs):
+                raise ValueError(
+                    "analysis_series_csv: ion {0} has {1} x samples but "
+                    "{2} y samples — the series is malformed and will "
+                    "not be exported misaligned.".format(
+                        ser.ion, len(xs), len(ys)))
+            w.writerows([ser.ion, mz_txt, label,
+                         repr(float(xv)), repr(float(yv))]
+                        for xv, yv in zip(xs, ys))
+    return buf.getvalue()
 
 
 def _default_fate_style(fate):
@@ -7356,7 +7541,8 @@ def _rec_extent(rec, axis):
 
 def deck_multiview(spec, *, operating_point, planes=None,
                    views=("xy", "xz", "yz"), aspect="equal",
-                   figsize=(11.0, 8.0), trajectories=None, show=None):
+                   figsize=(11.0, 8.0), trajectories=None, show=None,
+                   holes=None, holes_label="hole (fab only, not in deck)"):
     """Multi-axis schematic of a 3-D deck — the doctrine view (any
     3-D representation is shown multi-axis; axial coordinate
     horizontal): xy plan, xz side, yz cross-section, drawn FROM THE
@@ -7377,6 +7563,12 @@ def deck_multiview(spec, *, operating_point, planes=None,
     stay keyed to the whole deck, so a layer figure and the full figure
     of one deck always color a group alike. The title states how many
     of the deck's electrodes are shown. Unknown names refuse.
+    ``holes`` (iterable of (x, y, z_lo, z_hi, diameter) in mm, deck
+    frame, physical z) overlays vertical drilled holes that are NOT part
+    of the deck -- fabrication features such as rod mounting holes --
+    as an outlined circle in xy and the hole's depth span in xz and
+    yz, with one legend entry, ``holes_label``. They never change what
+    the deck draws. A malformed entry refuses by index.
     Returns the figure; no side effects."""
     import textwrap
     import matplotlib.pyplot as plt
@@ -7401,6 +7593,16 @@ def deck_multiview(spec, *, operating_point, planes=None,
         if v not in ("xy", "xz", "yz"):
             raise ValueError(f"deck_multiview: unknown view {v!r} "
                              f"(xy|xz|yz)")
+    hole_rows = []
+    for i, h in enumerate(holes or ()):
+        if len(h) != 5:
+            raise ValueError(f"deck_multiview: holes[{i}] = {h!r}; expected "
+                             f"(x, y, z_lo, z_hi, diameter) in mm")
+        hx, hy, hz0, hz1, hd = (float(t) for t in h)
+        if not (hd > 0 and hz1 > hz0):
+            raise ValueError(f"deck_multiview: holes[{i}] needs diameter "
+                             f"> 0 and z_hi > z_lo, got {h!r}")
+        hole_rows.append((hx, hy, hz0, hz1, hd))
     sym = getattr(spec.geometry, "symmetry", None)
     zmirror = bool(sym and (getattr(sym, "planes", None) or {})
                    .get("z") == "mirror")
@@ -7510,6 +7712,16 @@ def deck_multiview(spec, *, operating_point, planes=None,
         if _cut_section:
             _t += " (holes shown at the z = 0 section)"
         ax.set_title(_t, fontsize=9)
+        # fab-only holes, over the metal; never part of the deck
+        hole_style = dict(facecolor="white", edgecolor="black", lw=0.9,
+                          zorder=6)
+        for hx, hy, hz0, hz1, hd in hole_rows:
+            c = {"x": hx, "y": hy}
+            if v == "xy":
+                ax.add_patch(plt.Circle((hx, hy), hd / 2.0, **hole_style))
+            else:                          # xz or yz: the depth span
+                ax.add_patch(plt.Rectangle((c[A] - hd / 2.0, hz0), hd,
+                                           hz1 - hz0, **hole_style))
         for lab, xv in (planes or {}).items():
             if v in ("xy", "xz"):
                 ax.axvline(float(xv), ls="--", lw=1.2, color="k")
@@ -7549,6 +7761,11 @@ def deck_multiview(spec, *, operating_point, planes=None,
                 fontsize=7, color="0.4")
     handles = [plt.Line2D([], [], color=gcol[g], lw=4, label=g)
                for g in groups]
+    if hole_rows:
+        handles.append(plt.Line2D([], [], ls="none", marker="o",
+                                  markerfacecolor="white",
+                                  markeredgecolor="black",
+                                  label=f"{holes_label} ({len(hole_rows)})"))
     fig.legend(handles=handles, fontsize=7, frameon=False,
                loc="outside right upper")
     fig.suptitle("\n".join(textwrap.wrap(

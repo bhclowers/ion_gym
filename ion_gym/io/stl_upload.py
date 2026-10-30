@@ -287,13 +287,11 @@ class StlUploadPanel:
         # remain, so a deck cannot commit with an electrode missing (L-529)
         self.skipped: List[str] = []
 
-        # NB: do NOT set accepted_filetypes here. FilePond's MIME detection
-        # rejects .stl (no consistent MIME type) and the drop silently fails
-        # — the value never changes so the watcher never fires. Accept
-        # everything and validate by trying to parse as STL in _on_files.
-        self.dropper = pn.widgets.FileDropper(
-            multiple=True, max_file_size="200MB", height=110,
-            layout="integrated")
+        # the drop area sits in its own container so Clear can replace it
+        # with an empty one (see _new_dropper)
+        self.dropper = self._new_dropper()
+        self._dropper_box = pn.Column(self.dropper,
+                                      sizing_mode="stretch_width")
         self.table = pn.widgets.Tabulator(
             value=self._df([]), show_index=False, height=180,
             editors={"dc [V]": {"type": "number"},
@@ -319,11 +317,33 @@ class StlUploadPanel:
         self.preview_pane = pn.pane.Plotly(height=720,
                                            sizing_mode="stretch_width")
 
-        self.dropper.param.watch(self._on_files, "value")
         self.pitch.param.watch(lambda e: self._resize(), "value")
         self.preview_btn.on_click(self._on_preview)
         self.commit_btn.on_click(self._on_commit)
         self.clear_btn.on_click(self._on_clear)
+
+    def _new_dropper(self):
+        """A fresh, empty drop area, wired to _on_files.
+
+        WHY CLEAR REPLACES IT. FileDropper's value is cumulative: every
+        file dropped in the session stays in it until the user removes
+        that file with the x in the drop area, and Python cannot empty
+        the browser-side list. Clear used to reset this panel's meshes
+        but not the dropper, so after loading examples/rods, clearing,
+        and dropping examples/quad_stl_rods, the dropper's value held all
+        eight files and all eight were staged. A new widget starts with
+        an empty list on both sides, which is what Clear promises.
+        """
+        pn = self._pn
+        # NB: do NOT set accepted_filetypes here. FilePond's MIME detection
+        # rejects .stl (no consistent MIME type) and the drop silently fails
+        # — the value never changes so the watcher never fires. Accept
+        # everything and validate by trying to parse as STL in _on_files.
+        dropper = pn.widgets.FileDropper(
+            multiple=True, max_file_size="200MB", height=110,
+            layout="integrated")
+        dropper.param.watch(self._on_files, "value")
+        return dropper
 
     def _on_clear(self, _=None):
         """Clear staged STLs from memory, wipe the upload workdir, and
@@ -334,6 +354,10 @@ class StlUploadPanel:
         self.meshes = []
         self.skipped = []
         self.sizing = None
+        # the staged files live in the dropper too: replace it with an
+        # empty one, or the next drop re-stages these (see _new_dropper)
+        self.dropper = self._new_dropper()
+        self._dropper_box.objects = [self.dropper]
         self.table.value = self._df([])
         self.preview_pane.object = None
         self.commit_btn.disabled = True
@@ -479,7 +503,7 @@ class StlUploadPanel:
         # its OWN row under a divider, right-aligned away from the plot —
         # it can neither crowd the actions nor overlap the canvas.
         return pn.Column(
-            self.dropper,
+            self._dropper_box,
             self.table,
             pn.Row(self.pitch, self.preview_btn, self.commit_btn),
             self.w_3d,

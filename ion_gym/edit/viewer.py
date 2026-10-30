@@ -19,9 +19,13 @@ courtesy ghost with a 270-degree cutaway; planar gets xy + perspective
 with the display-only ghost slab.  Anything the viewer cannot draw
 faithfully is written into the legend, never silently dropped.
 
-three.js is pinned at r168 (same pin and reason as the Slice 1 probe:
-r169 changed how TransformControls joins the scene; this file has no
-gizmo yet but keeps ONE pin for the epic).
+three.js is pinned at r170 (PI ruling 2026-10-24), the same pin as the
+Slice 1 probe. r169 made TransformControls a Controls object rather than
+an Object3D, so the gizmo joins the scene through its helper,
+scene.add(gizmo.getHelper()). r170 is the last release that ships one
+minified module. From r171 the library is split into three.module.js
+plus three.core.js, which the data-URL importmap cannot load without a
+rewrite of the core import, so any move past r170 is its own change.
 """
 from __future__ import annotations
 
@@ -64,7 +68,7 @@ import warnings as _warnings
 from pathlib import Path
 
 _VENDOR_DIR = Path(__file__).resolve().parent / "vendor" / "three"
-THREE_VERSION = "0.168.0"           # the pin (VENDOR_MANIFEST.json agrees)
+THREE_VERSION = "0.170.0"           # the pin (VENDOR_MANIFEST.json agrees)
 _CDN_ROOT = f"https://cdn.jsdelivr.net/npm/three@{THREE_VERSION}"
 _CDN_PROBE_TIMEOUT_S = 5.0
 
@@ -81,7 +85,7 @@ def _vendor_files():
             _VENDOR_DIR / "jsm/controls/OrbitControls.js",
         "three/addons/controls/TransformControls.js":
             _VENDOR_DIR / "jsm/controls/TransformControls.js",
-        # fat-line family (trajectory width; same r168 pin —
+        # fat-line family (trajectory width; same three pin —
         # WebGL ignores LineBasicMaterial.linewidth, Line2 does not)
         "three/addons/lines/Line2.js":
             _VENDOR_DIR / "jsm/lines/Line2.js",
@@ -793,8 +797,10 @@ class EditorViewer(JSComponent):
           renderer.domElement);
         gizmo.setMode('translate');
         gizmo.translationSnap = scene2.pitch_mm || null;
-        // r168: the controls object itself joins the scene
-        scene.add(gizmo);
+        // r169+: TransformControls is a Controls object, not an
+        // Object3D. Its visible gizmo is the helper, and that is what
+        // joins the scene.
+        scene.add(gizmo.getHelper());
         gizmo.addEventListener('dragging-changed', (e) => {
           if (orbit) orbit.enabled = !e.value;
           if (!e.value && gizmo.object) {

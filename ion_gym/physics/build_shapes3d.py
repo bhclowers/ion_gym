@@ -211,6 +211,10 @@ def shapes_masks_3d(spec: SimSpec, verbose=False):
                 f"shapes3d: electrode {el.name!r} has no shapes — a "
                 f"Dirichlet electrode with zero volume would solve "
                 f"silently as if absent.")
+        # a stop requested through raster2d.cancel_scope lands between
+        # electrodes (and between polygon edges inside _shape_mask)
+        from ion_gym.physics.raster2d import check_cancel
+        check_cancel("3-D electrode rasterization")
         m = electrode_mask_3d(el, coords, mirror_axes, extents_mm)
         if not m.any():
             raise ValueError(

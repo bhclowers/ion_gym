@@ -71,6 +71,7 @@ def test_noisy_objective_crn_audit():
     base.source.n_ions = 8
     base.collisions.enabled = True
     base.collisions.gas = "He"
+    base.collisions.sigma_model = "fixed"   # He is outside the CCS fit
     base.collisions.T_k = 298.0
     base.collisions.P_torr = 0.002          # ~13 collisions per flight
     if hasattr(base.collisions, "P_pa"):

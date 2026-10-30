@@ -1,0 +1,28 @@
+# ion_gym public repository .gitignore
+#
+# Shipped by pack_release.py --public as the root .gitignore of the
+# public cut. The dev tree's own .gitignore is not shipped because it
+# names internal paths. Edit THIS file to change the public rules; the
+# public repo's copy is overwritten by every install.
+
+# Python and tool caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# Solved fields, saved runs and generated outputs are per-machine state,
+# rebuildable from the decks. The public cut ships no .npz file, so every
+# .npz in a checkout was produced locally.
+*.npz
+fields/
+outputs/
+trajectories/
+notebooks/out/
+
+# Editor and OS state
+.vscode/
+.DS_Store

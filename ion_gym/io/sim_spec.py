@@ -1444,6 +1444,8 @@ class SourceSpec(_StrictAttrs):
 
 # ------------------------------------------------------------- collisions
 from ion_gym.physics.constants import TORR_PA  # noqa: E402  (101325/760, exact)
+from ion_gym.physics.ccs import (  # noqa: E402  (one default each)
+    LEGACY_FIXED_SIGMA_M2, SIGMA_MODEL_DEFAULT)
 
 # R2b (PI ruling 2026-10-15). One fixed text, so Python's warning filter
 # shows it once per call site rather than once per deck in a sweep.
@@ -1492,7 +1494,7 @@ class CollisionSpec(_StrictAttrs):
     T_k: float = 273.0
     P_torr: Optional[float] = None     # None = not authored -> 1.0 Torr
     P_pa: Optional[float] = None       # DERIVED; authoring it is deprecated
-    sigma_m2: float = 2.27e-18
+    sigma_m2: float = LEGACY_FIXED_SIGMA_M2   # used under sigma_model "fixed"
     model: str = "hs"                  # "hs" (hard-sphere) or "sds";
                                        # legacy "hs1" is accepted and
                                        # normalized at ingest (renamed
@@ -1501,17 +1503,27 @@ class CollisionSpec(_StrictAttrs):
     flow_mm_us: List[float] = field(
         default_factory=lambda: [0.0, 0.0, 0.0])
     # PER-ION HARD-SPHERE CROSS SECTION (2026-10-17). "fixed" flies
-    # sigma_m2 for every ion (the historical behaviour). "ccs_fit" takes
-    # each ion's cross section from the N2 drift-tube CCS power-law fit
-    # in physics.ccs, subset ccs_fit_class. physics.ccs.ion_sigma_m2 is
-    # the one authority every route reads.
-    sigma_model: str = "fixed"
+    # sigma_m2 for every ion. "ccs_fit" takes each ion's cross section
+    # from the N2 drift-tube CCS power-law fit in physics.ccs, subset
+    # ccs_fit_class. physics.ccs.ion_sigma_m2 is the one authority every
+    # route reads.
+    # DEFAULT IS THE FIT (PI ruling 2026-10-24): a deck that names no
+    # sigma_model flies the CCS fit, because the old fixed 2.27e-18 was a
+    # SIMION default (He with a ~200 amu ion) inherited without a reason.
+    # Outside the fit's domain (gas other than N2, |z| != 1) the default
+    # REFUSES with a diagnostic, through validate(). A deck that means one
+    # sigma for every ion states sigma_model: "fixed". The default lives in
+    # physics.ccs (SIGMA_MODEL_DEFAULT), the module that owns the models.
+    sigma_model: str = SIGMA_MODEL_DEFAULT
     ccs_fit_class: str = "all"
 
     _RUNTIME_ATTRS = frozenset({"_extras", "_ready"})
-    # Written to a saved deck only when they differ from these values, so
-    # every deck saved before the fields existed round-trips unchanged.
-    _OMIT_WHEN_DEFAULT = (("sigma_model", "fixed"), ("ccs_fit_class", "all"))
+    # Written to a saved deck only when they differ from these values.
+    # sigma_model is NOT here: it is written on every save (PI ruling
+    # 2026-10-24), so a saved deck states which model it flew whatever the
+    # default is later. A pre-ruling deck that omits it loads with the
+    # current default, which is the point of the ruling.
+    _OMIT_WHEN_DEFAULT = (("ccs_fit_class", "all"),)
     P_TORR_DEFAULT = 1.0               # the dataclass default (R3 ruling)
 
     def __post_init__(self):
@@ -2748,10 +2760,17 @@ class SimSpec(_StrictAttrs):
         # PER-ION CROSS SECTIONS under sigma_model='ccs_fit': the value
         # each declared m/z flies with, extrapolations flagged (displayed
         # equals solver input).
-        from ion_gym.physics.ccs import sigma_note
+        from ion_gym.physics.ccs import (sigma_note, extrapolation_note,
+                                         stated_sigma_note)
         _sig_note = sigma_note(self)
         if _sig_note:
             out.append(_sig_note)
+        # ...any extrapolated m/z as its OWN warning, so it is not buried
+        # in that list, and a stated sigma_m2 the fit leaves unused (PI
+        # rulings 2026-10-24: console and the app's advisory line)
+        for _note in (extrapolation_note(self), stated_sigma_note(self)):
+            if _note:
+                out.append(_note)
         # HARD-SPHERE STEP vs COLLISION TIME (PI ruling 2026-10-17: a
         # loud warning, never a refusal).
         from ion_gym.physics.collision3d import hs_step_note

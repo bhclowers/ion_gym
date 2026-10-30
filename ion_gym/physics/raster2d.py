@@ -20,10 +20,80 @@ byte-equal at extraction). Consumers import from HERE — build_planar
 included; no re-exports (the solve_bases lesson: hidden indirections
 break silently under cleanup).
 """
+import contextlib
 import math
+import threading
 
 import numpy as np
 from numba import njit
+
+
+# ---------------------------------------------------- cooperative cancel
+# A rasterization can run for minutes at a fine pitch (the Orbitrap's
+# 965-vertex polygons at 0.01 mm/gu took 62 s), and Python cannot kill
+# the thread doing it. So the shape loops CHECK a cancel event between
+# pieces of work. The event comes from a THREAD-LOCAL scope that only
+# the caller who wants stopping opens (the app's figure worker, its
+# solve thread). With no scope open, check_cancel is a no-op, so every
+# other caller (notebooks, scripts, tests) rasterizes exactly as before.
+class RasterInterrupted(Exception):
+    """Raised inside a rasterization when its cancel scope was set."""
+
+
+_CANCEL = threading.local()
+
+
+@contextlib.contextmanager
+def cancel_scope(event):
+    """Run the enclosed rasterization so that setting `event` (a
+    threading.Event) stops it at the next check, raising
+    RasterInterrupted. Scopes nest; the innermost event is checked."""
+    prev = getattr(_CANCEL, "event", None)
+    _CANCEL.event = event
+    try:
+        yield event
+    finally:
+        _CANCEL.event = prev
+
+
+def check_cancel(where="rasterization"):
+    """Raise RasterInterrupted when this thread's cancel scope is set.
+    A no-op outside any scope."""
+    ev = getattr(_CANCEL, "event", None)
+    if ev is not None and ev.is_set():
+        raise RasterInterrupted(f"{where} stopped on request")
+
+
+# ---------------------------------------------------- rasterization work
+# Work units for rasterizing shapes on a grid: grid nodes x the number of
+# whole-grid array passes a shape costs. A polygon costs two passes per
+# edge (the crossing test and the boundary-distance test each loop over
+# every edge, each pass touching every node), a rect or ellipse about
+# one. Measured on the build container, one unit costs ~7.5e-9 s (the
+# Orbitrap at 0.02 mm/gu: 1.4e9 units in 10.4 s); other machines differ
+# by their numpy speed.
+SHAPE_PASSES = {"rect": 1, "ellipse": 1}
+
+
+def shape_passes(shape):
+    """Whole-grid array passes one ShapeSpec costs (see the work note
+    above). A cutout costs its inner shape. Unknown types refuse."""
+    t = shape.type
+    if t == "cutout":
+        inner = shape.children[0] if shape.children else None
+        return shape_passes(inner) if inner is not None else 0
+    if t == "polygon":
+        return 2 * len(shape.params["points_mm"])
+    if t in SHAPE_PASSES:
+        return SHAPE_PASSES[t]
+    raise ValueError(f"shape_passes: no work rule for shape type {t!r}")
+
+
+def raster_work(electrodes, nodes):
+    """Work units to rasterize every shape of `electrodes` on a grid of
+    `nodes` points (the 2-D grid, or a 3-D route's cross-section)."""
+    return int(nodes) * sum(shape_passes(s) for el in electrodes
+                            for s in (el.shapes or []))
 
 # ---------------------------------------------------- shape rasterization
 # Boundary tolerance for the closed-solid rule, in mm. Sized to swallow
@@ -129,6 +199,7 @@ def _polygon_mask(X, Y, p):
     # ---- even-odd crossing test (strict interior) ----------------------
     inside = np.zeros(x.shape, bool)
     for j in range(len(pts)):
+        check_cancel("polygon rasterization")
         ax, ay, bx, by = x0[j], y0[j], x1[j], y1[j]
         if ay == by:
             continue
@@ -142,6 +213,7 @@ def _polygon_mask(X, Y, p):
     seg2 = ex * ex + ey * ey
     d2 = np.full(x.shape, np.inf)
     for j in range(len(pts)):
+        check_cancel("polygon rasterization")
         if seg2[j] == 0.0:
             dj2 = (x - x0[j]) ** 2 + (y - y0[j]) ** 2
         else:
@@ -191,6 +263,7 @@ def electrode_mask(el, X, Y):
     already applied."""
     m = np.zeros(X.shape, bool)
     for s in el.shapes:
+        check_cancel("electrode rasterization")
         inner = (s.children[0] if s.type == "cutout" and s.children
                  else None)
         for chk in (s, inner):
