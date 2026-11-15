@@ -20,6 +20,7 @@ adiabatic caveat annotation is carried onto the 3-D view too.
 """
 from __future__ import annotations
 from ion_gym.viz.viz_core import world_off as _world_off
+from ion_gym.physics.ion_envelope import ion_label_both
 import numpy as np
 import plotly.graph_objects as go
 from ion_gym.viz import viz_core as V
@@ -38,7 +39,7 @@ from ion_gym.physics.ion_envelope import FATE_COLOR  # noqa: F401
 # guaranteed BASE_CHANNELS prefix (column_names() always puts
 # [t,x,y,z,vx,vy,vz] first, so the prefix schema holds for every run).
 # "rz": the r-z record frame is x = axial, y = radial (RZModel.PLANES);
-# it was reached only through a silent ('x', 'y') fallback (L-554)
+# it was reached only through a silent ('x', 'y') fallback
 _PLANE_TRAJ_AXES = {"xy": ("x", "y"), "xz": ("x", "z"), "yz": ("y", "z"),
                     "rz": ("x", "y")}
 _PLANE_NORMAL_AXIS = {"xy": "z", "xz": "y", "yz": "x"}
@@ -227,13 +228,13 @@ def model_has_rf(model):
 
     The model DECLARES the answer (has_drive(), computed from its own
     data) and this reads it, refusing a model that does not declare --
-    the same pattern as viz_core.model_planes and peak_potential_image
-    (2026-09-18). Before that, this function and a second copy in
+    the same pattern as viz_core.model_planes and peak_potential_image.
+    Before that, this function and a second copy in
     sim_app each SNIFFED attributes (drives / chan_groups / Bk / rf_V +
     frequency) and the two copies had already drifted apart. Sniffing is
-    how the rf_V-only version read a square-only r-z deck as drive-free
-    (L-455), and how the peak-snapshot dispatch broke the RF planar field
-    view (L-499)."""
+    how the rf_V-only version read a square-only r-z deck as drive-free,
+    and how the peak-snapshot dispatch broke the RF planar field
+    view."""
     fn = getattr(model, "has_drive", None)
     if fn is None:
         raise V.VizError(
@@ -272,7 +273,7 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
         single colour string to draw them all alike, or a {fate: colour}
         dict to override selected fates. Display preference only — it
         changes no value, position or fate.
-    title: figure title (be specific: device · component · m/z).
+    title: figure title (be specific: device · component · ion).
     plane: None (default) = the MODEL's own first declared plane ("rz"
         for an r-z model), so a bare call works on every route; an
         explicit plane the model does not declare refuses. With a
@@ -372,16 +373,12 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
     # Mask the metal AND a thin adjacent ring (the divergence extends a couple
     # of nodes into vacuum) so the CONFINING WELL sets the colour/height scale.
     metal = np.asarray(ele) > 0.5
-    # ImportError ONLY.  `except Exception` also caught binary_dilation FAILING,
-    # and then silently used the undilated mask -- which changes the trust region,
-    # which changes the colour/height scale of the whole surface.  A different
-    # picture, unannounced.
-    try:
-        from scipy.ndimage import binary_dilation
-    except ImportError:
-        _mask = metal          # no scipy: the ring is not dilated
-    else:
-        _mask = binary_dilation(metal, iterations=int(trust_cells))
+    # scipy is a core dependency: imported, never guarded. Without the
+    # dilation the trust region changes, which changes the colour/height
+    # scale of the whole surface -- a different picture, unannounced (first
+    # an `except Exception`, then an `except ImportError`, did exactly that).
+    from scipy.ndimage import binary_dilation
+    _mask = binary_dilation(metal, iterations=int(trust_cells))
 
     # ---- WHERE DOES AN ELECTRODE SIT ON THE PE SCALE? --------------------
     #
@@ -416,6 +413,10 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
     # is reported, never hidden. The plateau remains a LANDMARK, not a PE
     # value -- but 'barrier' at least puts the landmark on the right side of
     # the ion.
+    # why the 'barrier' plateaus fell back to raw DC, if they did: the
+    # FIGURE carries it (footer + meta["pe_fallback"]) and the PE tab's
+    # status repeats it; a console print alone was missed
+    plateau_note = None
     if metal_mode in ("drape", "dc", "barrier"):
         if metal_mode == "drape":
             metal_mode = "dc"                     # legacy alias
@@ -446,9 +447,17 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
                 print(f"[pe_view] WARNING: electrode plateau measurement failed "
                       f"({e}); falling back to raw DC for the plateau heights")
                 plateau = {}
+                plateau_note = (f"plateau measurement failed "
+                                f"({type(e).__name__}: {e})")
             if not plateau and electrode_dc:      # no ring survived
+                if plateau_note is None:
+                    plateau_note = ("no trusted vacuum ring around any "
+                                    "electrode")
                 plateau = {int(k): float(v) * float(charge)
                            for k, v in electrode_dc.items()}
+            if plateau_note is not None:
+                footer.append(f"⚠ electrode heights are RAW DC (q·V), not "
+                              f"the measured barrier: {plateau_note}")
         elif electrode_dc:
             plateau = {int(k): float(v) * float(charge)
                        for k, v in electrode_dc.items()}
@@ -456,23 +465,19 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
         if plateau:
             # the SKIRT (the dropped divergent ring, _mask & ~metal) is
             # part of the same wall landmark: leaving it NaN tore the
-            # sheet into stripes wherever rings cut the slice (the PI's
-            # "holes and rips", L-463). Each electrode's skirt fills at
+            # sheet into stripes wherever rings cut the slice ("holes
+            # and rips"). Each electrode's skirt fills at
             # its plateau; where two skirts overlap the WALL is the
             # higher one (max). Metal cells then get their exact
             # plateau, as before.
-            try:
-                from scipy.ndimage import binary_dilation as _dil2
-                wall = np.full(PE.shape, -np.inf)
-                for idx, v in plateau.items():
-                    sel = np.asarray(ele) == idx
-                    if sel.any():
-                        reach = _dil2(sel, iterations=int(trust_cells))
-                        wall[reach] = np.maximum(wall[reach], v)
-                skirt = _mask & ~metal & np.isfinite(wall)
-                PE[skirt] = wall[skirt]
-            except ImportError:
-                pass          # no scipy: _mask is undilated, no skirt exists
+            wall = np.full(PE.shape, -np.inf)
+            for idx, v in plateau.items():
+                sel = np.asarray(ele) == idx
+                if sel.any():
+                    reach = binary_dilation(sel, iterations=int(trust_cells))
+                    wall[reach] = np.maximum(wall[reach], v)
+            skirt = _mask & ~metal & np.isfinite(wall)
+            PE[skirt] = wall[skirt]
             for idx, v in plateau.items():
                 sel = np.asarray(ele) == idx
                 if sel.any():
@@ -650,7 +655,7 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
             pts_drawn += int(xs.size)
             zs = samp(np.column_stack([xs, ys])) + lift
             # a summary without a fate is UNKNOWN (grey), never a timeout
-            # (L-530: this defaulted to 2)
+            # (this used to default to 2)
             from ion_gym.physics.ion_envelope import (summary_fate,
                                                       fate_color)
             kind = summary_fate(r.summary)
@@ -740,6 +745,11 @@ def pe_figure_3d(model=None, mz=None, results=None, *, charge=1,
         meta["header"] = [str(h) for h in header]
         meta["title_hidden"] = True
         fig.update_layout(meta=meta)
+    if plateau_note is not None:
+        meta = (dict(fig.layout.meta) if isinstance(fig.layout.meta, dict)
+                else {})
+        meta["pe_fallback"] = plateau_note
+        fig.update_layout(meta=meta)
     return fig
 
 
@@ -751,15 +761,10 @@ def pe_overlay_2d(fig, model, mz=None, *, charge=1, n_contours=12,
     existing 2-D figure."""
     x, y, PE, _ele = model.pe_surface(mz=mz, charge=charge, t_us=t_us)
     PE = np.asarray(PE, float).copy()
-    try:
-        from scipy.ndimage import binary_dilation
-        _m = binary_dilation(np.asarray(_ele) > 0.5, iterations=2)
-    except ImportError:
-        # scipy is optional: without it the near-surface ring is not
-        # dilated (metal itself still masked). AUDITED:
-        # narrowed from Exception — a dilation failure WITH scipy
-        # present is a bug and must raise.
-        _m = np.asarray(_ele) > 0.5
+    # scipy is a core dependency: imported, never guarded (an undilated
+    # ring was a different picture, unannounced)
+    from scipy.ndimage import binary_dilation
+    _m = binary_dilation(np.asarray(_ele) > 0.5, iterations=2)
     PE[_m] = np.nan                              # mask metal + near-surface ring
     _finite = PE[np.isfinite(PE)]
     if _finite.size:
@@ -769,7 +774,9 @@ def pe_overlay_2d(fig, model, mz=None, *, charge=1, n_contours=12,
     lo, hi = float(np.nanmin(PE)), float(np.nanmax(PE))
     fig.add_contour(
         x=x, y=y, z=PE.T, showscale=False,
-        contours=dict(coloring="lines", start=lo, end=hi,
+        # coloring "none" so line.color applies; under "lines" plotly
+        # paints its default colorscale and the stated colour is lost.
+        contours=dict(coloring="none", start=lo, end=hi,
                       size=max((hi - lo) / n_contours, 1e-9)),
         line=dict(width=1.3, color=_CONTOUR))
     return fig
@@ -1041,7 +1048,7 @@ def _run_off_doc(build, apply_fn, on_error, join_timeout_s=120.0):
         # keeps _poll -> _finish -> st alive for the session. Anything
         # st still references is therefore pinned too — including the
         # CALLER'S apply/on_error closures and whatever THEY captured.
-        # Measured live 2026-09-29 on the split-float tetramer: each PE
+        # Measured live on the split-float tetramer: each PE
         # compute's prep pack (`p`, a SimpleNamespace) rode the apply
         # closure and pinned a whole Stl3DModel (~1.6 GB) plus, on the
         # 3-D tab, the draped IonResults — the referrer walk named
@@ -1079,12 +1086,21 @@ def _run_off_doc(build, apply_fn, on_error, join_timeout_s=120.0):
     except (RuntimeError, AttributeError):
         in_server = False
     if in_server:
+        # the try covers ONLY the scheduling call: it once also covered the
+        # first _poll(), whose _finish pops the callbacks before calling
+        # them, so a failure inside apply_cb was swallowed and the surface
+        # silently never appeared
+        scheduled = False
         try:
             own["pcb"] = pn.state.add_periodic_callback(_poll, 60)
+            scheduled = True
+        except (RuntimeError, ValueError) as e:
+            print(f"[pe_view] cannot schedule the compute poll "
+                  f"({type(e).__name__}: {e}); waiting on the worker "
+                  f"instead")
+        if scheduled:
             _poll()
             return
-        except (RuntimeError, ValueError):
-            pass                          # no schedulable doc after all
     # headless/notebook: bounded join, then finish synchronously
     w.join(timeout=join_timeout_s)
     if w.is_alive():
@@ -1201,7 +1217,7 @@ class FieldSliceTab:
                      "potential φ [V]": "phi",
                      "PE [eV]": "pe"},
             value="efield")
-        self.w_mz = pn.widgets.FloatInput(name="ion m/z (Da)", value=100.0,
+        self.w_mz = pn.widgets.FloatInput(name="ion mass (Da)", value=100.0,
                                           width=120)
         self.w_plane = pn.widgets.Select(name="plane", width=90,
                                          options=["xy", "xz", "yz"],
@@ -1248,7 +1264,7 @@ class FieldSliceTab:
             name="lock aspect (true mm)", value=False)
         self.w_go = pn.widgets.Button(name="Compute slice",
                                       button_type="primary", width=180)
-        # L-58b: button -> async path; compute() stays synchronous
+        # button -> async path; compute() stays synchronous
         self.w_go.on_click(self._on_go)
         # changing the PLANE changes which axis is sliced, so the slice-
         # position slider's range must follow it (the
@@ -1340,16 +1356,20 @@ class FieldSliceTab:
             return None
         return slice_index(model, plane, float(self.w_slicepos.value))
 
-    def _surface(self, model, plane, idx, q=None, mz=None):
+    def _surface(self, model, plane, idx, q=None, mz=None, charge=None):
         """(a, b, values, ele) for the chosen quantity, or a diagnostic
         RuntimeError naming what the model cannot answer (never a silent
         empty plot). q/mz default from the widgets for direct (doc-thread)
         callers; the async path passes the _prep snapshot so the WORKER
-        never touches a widget (L-58b)."""
+        never touches a widget."""
         if q is None:
             q = self.w_quantity.value
         if mz is None:
             mz = float(self.w_mz.value)
+        if charge is None:
+            # the deck's charge state: PE = z*phi_DC + pseudopotential
+            # (~z^2/m); this tab used to pass charge=1 for every deck
+            charge = int(self.get_spec().source.charge)
         if plane == "rz":
             # r-z models (ion funnel, cylindrical builds) carry their own
             # accessor family: pe_surface(mz, charge, plane='rz') and
@@ -1363,7 +1383,7 @@ class FieldSliceTab:
                     raise RuntimeError("this r-z model exposes no PE "
                                        "surface")
                 return model.pe_surface(mz=mz,
-                                        charge=1, plane="rz")
+                                        charge=charge, plane="rz")
             if not hasattr(model, "potential_image"):
                 raise RuntimeError("this r-z model exposes no potential "
                                    "image")
@@ -1391,7 +1411,7 @@ class FieldSliceTab:
         if q == "pe":
             if not hasattr(model, "pe_surface"):
                 raise RuntimeError("this model exposes no PE surface")
-            return model.pe_surface(mz=mz, charge=1,
+            return model.pe_surface(mz=mz, charge=charge,
                                     plane=plane, **_kw)
         # potential: a 2-D planar model answers phi DIRECTLY via
         # potential_image (the _has_phi_component probe
@@ -1406,7 +1426,7 @@ class FieldSliceTab:
                                  plane=plane, **_kw)
 
     def _prep_slice(self):
-        """Doc-thread part (L-58b): capability probing, option switching,
+        """Doc-thread part: capability probing, option switching,
         and the widget snapshot the worker-safe _surface call needs.
         Returns None (status set) when there is nothing to compute."""
         import types
@@ -1448,6 +1468,7 @@ class FieldSliceTab:
             return None
         p.q = self.w_quantity.value
         p.mz = float(self.w_mz.value)
+        p.charge = int(self.get_spec().source.charge)
         return p
 
     def compute(self):
@@ -1458,14 +1479,15 @@ class FieldSliceTab:
         if p is None:
             return
         try:
-            surf = self._surface(p.model, p.plane, p.idx, q=p.q, mz=p.mz)
+            surf = self._surface(p.model, p.plane, p.idx, q=p.q, mz=p.mz,
+                                 charge=p.charge)
         except RuntimeError as e:
             self.status.object = f"**cannot slice** — {e}"
             return
         self._finish_slice(p, surf)
 
     def _on_go(self, _event=None):
-        """Button path (L-58b): the grid extraction/PE evaluation runs
+        """Button path: the grid extraction/PE evaluation runs
         off the doc thread; everything that touches a widget or pane
         stays on it."""
         if getattr(self, "_busy", False):
@@ -1494,7 +1516,8 @@ class FieldSliceTab:
                 self._busy = False
 
         _run_off_doc(
-            lambda: self._surface(p.model, p.plane, p.idx, q=p.q, mz=p.mz),
+            lambda: self._surface(p.model, p.plane, p.idx, q=p.q, mz=p.mz,
+                                 charge=p.charge),
             _ok, _fail)
 
     def _finish_slice(self, p, surf):
@@ -1619,6 +1642,7 @@ class FieldSliceTab:
                 vals=np.asarray(vals, float),
                 plane=plane, quantity=self.w_quantity.value,
                 qlabel=qlabel, mz=float(self.w_mz.value),
+                charge=int(self.get_spec().source.charge),
                 slice_idx=(None if idx is None else int(idx)),
                 stride=int(stride))
             self.status.object = (
@@ -1715,7 +1739,8 @@ class FieldSliceTab:
                         bn, float(b.min()), float(b.max())))
         w("# node pitch h: {0:g} mm\n".format(h))
         if s["quantity"] == "pe":
-            w("# ion m/z: {0:g} Da\n".format(s["mz"]))
+            w("# ion mass: {0:g} Da, charge {1:+d}\n".format(
+                s["mz"], s["charge"]))
         w("# import_path: {0}\n".format(
             getattr(spec, "import_path", "") if spec else ""))
         w("#\n")
@@ -1782,7 +1807,7 @@ class PeSurfaceTab:
         self._sig = None
         self._fig = None
 
-        self.w_mz = pn.widgets.FloatInput(name="ion m/z (Da)", value=100.0,
+        self.w_mz = pn.widgets.FloatInput(name="ion mass (Da)", value=100.0,
                                           width=130)
         self.w_comp = pn.widgets.Select(
             name="component", width=200,
@@ -1804,7 +1829,7 @@ class PeSurfaceTab:
             step=20, value=200, width=240)
         self.w_drape = pn.widgets.Checkbox(
             name="drape current trajectories", value=True)
-        # FIGURE TEXT (PI request 2026-10-25). Pure display: toggling
+        # FIGURE TEXT. Pure display: toggling
         # rebuilds the figure from the cached surface (no recompute), and
         # the main view's PE 3D mode follows the same two switches.
         self.w_show_title = pn.widgets.Checkbox(
@@ -1890,7 +1915,7 @@ class PeSurfaceTab:
         self.pane = pn.pane.Plotly(height=560, sizing_mode="stretch_width",
                                    config={"scrollZoom": True})
 
-        # L-58b: the button runs the split async path; direct
+        # the button runs the split async path; direct
         # compute() calls (harness, scripts) stay synchronous.
         self.compute_btn.on_click(self._on_go)
         for w in (self.w_mz, self.w_comp, self.w_exag, self.w_scalemode,
@@ -1904,7 +1929,7 @@ class PeSurfaceTab:
         self.reset_btn.on_click(self._on_reset)
         # widget defaults captured ONCE, right here at construction, so
         # Reset restores exactly what a fresh tab would show -- no
-        # second hand-maintained default table to drift (L-463)
+        # second hand-maintained default table to drift
         self._defaults = {w: w.value for w in (
             self.w_mz, self.w_comp, self.w_exag, self.w_scalemode,
             self.w_res, self.w_drape, self.w_drape_scope, self.w_plane,
@@ -2151,8 +2176,8 @@ class PeSurfaceTab:
             p.mmode = "mask"
         p.title = ((f"|E| surface — {p.device} · {p.plane} plane"
                     if _is_E else
-                    f"PE surface — {p.device} · {p.comp_label} · m/z "
-                    f"{p.mz:g} · {p.plane} plane"))
+                    f"PE surface — {p.device} · {p.comp_label} · "
+                    f"{ion_label_both(p.mz, p.charge)} · {p.plane} plane"))
         if self.w_time_on.value:
             p.title += f" · t = {p.t_us:g} µs"
         if _is_E:
@@ -2247,8 +2272,14 @@ class PeSurfaceTab:
         if p.has_rf and p.comp == "dc":
             note = " ⚠️ DC-only on an RF device hides the pseudopotential "\
                    "confinement — use 'effective' or 'RF pseudopotential'"
+        _meta = fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
+        if _meta.get("pe_fallback"):
+            # the figure's footer says it too
+            note += (f" ⚠️ **electrode heights are RAW DC (q·V), not the "
+                     f"measured barrier:** {_meta['pe_fallback']}")
         self.status.object = (
-            f"**computed** — {p.comp_label}, m/z {p.mz:g}, "
+            f"**computed** — {p.comp_label}, "
+            f"{ion_label_both(p.mz, p.charge)}, "
             f"{npts:,} pts (stride {p.stride}); extent {extent}"
             f"{'; model grid ' + '×'.join(map(str, fullshape)) if fullshape else ''}"
             f". Cached until a parameter changes.{note}")
@@ -2271,7 +2302,7 @@ class PeSurfaceTab:
             self.pane.loading = False
 
     def _on_go(self, _event=None):
-        """Button path: heavy _build off the doc thread (L-58b)."""
+        """Button path: heavy _build off the doc thread."""
         if getattr(self, "_busy", False):
             self.status.object = "_already computing — one at a time_"
             return
@@ -2342,7 +2373,7 @@ class PeSurfaceTab:
                     # the OLD sentinel moves to the NEW one. Without this
                     # the default -1.0 read as a user request on any axis
                     # extending below -1 mm (mirrored decks), and the
-                    # "auto" view silently cut z = -1 (L-462; exposed by
+                    # "auto" view silently cut z = -1 (exposed by
                     # the slice stamp). A genuine request is kept as-is;
                     # if it is now off-grid, Compute REFUSES with the
                     # range (slice_index) -- never a quiet reset to auto.
@@ -2354,11 +2385,17 @@ class PeSurfaceTab:
                     if _was_auto:
                         self.w_slicepos.value = lo - step
         except Exception as e:
-            # UI boundary; AUDITED: silent pass -> reports.
-            self.status.object = (f"**slice-range sync failed** — "
-                                  f"{type(e).__name__}: {e}")
+            # UI boundary; AUDITED: silent pass -> reports. The note is
+            # carried into the status writes below, which used to replace
+            # it at once (so in effect it was silent again).
+            _sync_note = (f"\n\n**slice-range sync failed** — "
+                          f"{type(e).__name__}: {e}")
+            self.status.object = _sync_note.strip()
+        else:
+            _sync_note = ""
         if self._sig is None:
-            self.status.object = ("_press **Compute surface** for this view_")
+            self.status.object = ("_press **Compute surface** for this view_"
+                                  + _sync_note)
             return
         if self._current_sig(model) != self._sig:
             self._fig = None                       # destroy cached surface
@@ -2367,7 +2404,7 @@ class PeSurfaceTab:
             self.pane.object = self._pn.pane.Plotly().object
             self.status.object = ("**parameters changed** — cached surface "
                                   "discarded. Press **Compute surface** "
-                                  "to rebuild.")
+                                  "to rebuild." + _sync_note)
 
     def panel(self):
         pn = self._pn

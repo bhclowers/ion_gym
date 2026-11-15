@@ -6,9 +6,10 @@ producer-side milestone that makes the gym self-sufficient: solve fields
 for GeomScene geometries with no external field solver in the loop.
 
 Conventions inherited from the validated consume side (do not drift):
-  * Outer open edges: linear ghost-value convention phi_ghost = phi_edge
-    (empirically matched to refine at 1e-6 relative on the einzel;
-    solver2d edge_ghost='ghost_linear').
+  * Outer open edges: EVEN reflection, ghost = the first interior node,
+    so the zero-gradient plane is ON the edge node (second order; the
+    same rule as solver2d's default edge_ghost='mirror', so a full-depth
+    extrusion solves to the planar field).
   * Mirror planes (opt-in per axis, LOW side): potential EVEN across the
     plane -> ghost(-1) = phi(+1).
   * Electrode nodes are Dirichlet; fast-adjust bases solve one electrode
@@ -143,9 +144,8 @@ def _sweep(phi, fixed, th, mirror_x, mirror_y, mirror_z, omega, colour,
                 # ghosts: EVEN reflection at mirror planes AND at open
                 # outer edges — pinned empirically in 3-D: the
                 # refined array satisfies ghost=inner to machine zero at
-                # regular boundary nodes, while the 2-D-banked ghost=edge
-                # leaves 30-40 V residuals. (2-D einzel keeps its own
-                # validated convention; the two differ by dimension.)
+                # regular boundary nodes, while ghost=edge leaves 30-40 V
+                # residuals. The 2-D solver uses the same reflection.
                 # Edge ghosts reflect to the first interior node. Guard the
                 # DEGENERATE case (a size-1 axis): there is no interior to
                 # reflect to, so the ghost is the node itself — this makes a

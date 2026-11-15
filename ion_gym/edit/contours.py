@@ -41,7 +41,7 @@ MAX_TOTAL_POINTS = 150_000
 FLAT_RANGE_EV = 1e-9
 # r-z contours keep the stored half r >= 0; a point this far below the
 # axis is round-off from contourpy's interpolation ON the axis, not the
-# mirrored half (L-552: was a literal in the clip)
+# mirrored half (was a literal in the clip)
 R_CLIP_TOL_MM = 1e-9
 
 
@@ -57,8 +57,8 @@ def contour_primitives(session: EditSession,
     pol = session.policy
     if pol.out_of_plane == "per_shape_extrude":
         return {"refused":
-                "contours on a 3-D field need a slice-plane ruling "
-                "(which z?) — not yet chartered; 2-D routes only"}
+                "contours on a 3-D field need a slice-plane choice "
+                "(which z?) — not yet supported; 2-D routes only"}
 
     g = session.spec.geometry
     h = float(g.mm_per_gu)
@@ -70,15 +70,13 @@ def contour_primitives(session: EditSession,
                 f"contour budget ({NODE_BUDGET:,}); view fields in "
                 f"sim_app instead"}
 
-    try:
-        # lazy: pe_view pulls plotly; the editor stays importable without
-        # it and the failure is named here instead of at module import
-        from ion_gym.physics.sim_build import build_run
-        from ion_gym.viz.pe_view import compute_component
-        from ion_gym.viz.viz_core import VizError
-        import contourpy
-    except ImportError as e:
-        return {"refused": f"contour dependencies unavailable: {e}"}
+    # lazy (pe_view pulls plotly) but unguarded: these are ion_gym's own
+    # modules and core dependencies, so an ImportError is a broken install,
+    # not a policy refusal to show in the viewer
+    from ion_gym.physics.sim_build import build_run
+    from ion_gym.viz.pe_view import compute_component
+    from ion_gym.viz.viz_core import VizError
+    import contourpy
 
     # the COMMITTED document — what the viewer draws is what gets solved
     from ion_gym.io.sim_spec import SimSpec
@@ -91,7 +89,7 @@ def contour_primitives(session: EditSession,
         # the build's and the viewer's REFUSALS (ValueError, which covers
         # MissingPhysicsKey and BirthInMetal; VizError): displayable. A
         # malfunction is anything else and raises, as the docstring says
-        # -- it was `except Exception`, so a bug read as "refused" (L-541).
+        # -- it was `except Exception`, so a bug read as "refused".
         return {"refused": f"field build refused: "
                            f"{type(e).__name__}: {e}"}
     build_s = time.time() - t0

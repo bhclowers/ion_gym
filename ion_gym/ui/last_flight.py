@@ -26,7 +26,7 @@ corrupted) is met by construction, not by hope:
 * DETECTION AS BACKSTOP — a fingerprint (path count, total points,
   coordinate checksum) is computed at publish and verified on the FIRST
   `snapshot` of each record; a mismatch raises naming the stamp instead
-  of rendering garbage. The verdict is cached per stamp (L-414): the
+  of rendering garbage. The verdict is cached per stamp: the
   full re-sum cost ~0.3 s per /flight interaction at 2.4 GB banked.
   A mutation AFTER that first read is caught by the frozen arrays (it
   raises at the mutation site), not by a later checksum.
@@ -77,6 +77,16 @@ def _freeze_path(idx: int, p: dict) -> dict:
                 f"{t.shape} does not match pts {len(pts)}")
         t.setflags(write=False)
         out["t_us"] = t
+    if "ke_ev" in p and p["ke_ev"] is not None:
+        # the run's RECORDED kinetic energy per point (eV), so the viewer
+        # colours by KE for any mix of masses without re-deriving it
+        ke = np.ascontiguousarray(np.asarray(p["ke_ev"], dtype=float))
+        if ke.shape != (len(pts),) or not np.all(np.isfinite(ke)):
+            raise ValueError(
+                f"last_flight.publish: path {idx} ke_ev must be {len(pts)} "
+                f"finite values, got shape {ke.shape}")
+        ke.setflags(write=False)
+        out["ke_ev"] = ke
     return out
 
 

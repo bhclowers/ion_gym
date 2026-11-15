@@ -44,7 +44,8 @@ from ion_gym.io.sim_spec import (SimSpec, GeometrySpec, ElectrodeSpec,
                                  ShapeSpec, SymmetrySpec, SourceSpec,
                                  CollisionSpec, IntegrationSpec, ViewSpec,
                                  BoundsSpec, MissingPhysicsKey,
-                                 shift_shape_dict, shape_metal_bounds_mm)
+                                 check_schema_version, shift_shape_dict,
+                                 shape_metal_bounds_mm)
 
 
 @dataclass
@@ -100,11 +101,11 @@ class AssemblySpec:
     other_extent_mm: float = 20.0          # radial (r-z) / transverse span
     name: str = "assembly"
     source: SourceSpec = field(default_factory=SourceSpec)
-    collisions: CollisionSpec = field(       # left out = vacuum (R3 Q1)
+    collisions: CollisionSpec = field(       # left out = vacuum
         default_factory=lambda: CollisionSpec(enabled=False))
     integration: IntegrationSpec = field(default_factory=IntegrationSpec)
     view: Optional[ViewSpec] = None
-    # carried into the flattened SimSpec (L-525: both were listed as
+    # carried into the flattened SimSpec (both were listed as
     # known keys and then never read, so they vanished on a round trip)
     bounds: Optional[BoundsSpec] = None
     notes: str = ""
@@ -135,10 +136,11 @@ class AssemblySpec:
             raise ValueError(
                 f"not an assembly spec (kind={d.get('kind')!r}); load a "
                 f"single-FA spec with SimSpec.from_dict instead")
+        check_schema_version(d, "AssemblySpec")
         # Every key listed here is READ below. width_mm / height_mm were
         # listed and never read (the flatten derives the axial span from
         # the shapes and the other span from other_extent_mm), so a
-        # declared value silenced the warning and then vanished (L-525):
+        # declared value silenced the warning and then vanished:
         # they now warn as not interpreted.
         _known = {"kind", "units", "coords", "mm_per_gu", "axis",
                   "other_extent_mm", "source", "collisions",
@@ -152,7 +154,7 @@ class AssemblySpec:
                 f"retained in the saved file but NOT interpreted — "
                 f"misspelled or foreign parameter?",
                 stacklevel=3)
-        # R2 (PI ruling 2026-10-15), the SimSpec rule applied to the
+        # The SimSpec rule applied to the
         # assembly door: the frame (coords, pitch, transverse span) and
         # the source / integration blocks set the physics and their old
         # defaults (rz, 1.0 mm/gu, 20 mm, the funnel source) are one
@@ -179,7 +181,7 @@ class AssemblySpec:
             source=SourceSpec.from_dict(d["source"]),
             collisions=(CollisionSpec.from_dict(d["collisions"])
                         if "collisions" in d
-                        else CollisionSpec(enabled=False)),   # R3 Q1: vacuum
+                        else CollisionSpec(enabled=False)),   # absent: vacuum
             integration=IntegrationSpec.from_dict(d["integration"]),
             view=(ViewSpec.from_dict(d["view"]) if "view" in d else None),
             bounds=(BoundsSpec.from_dict(d["bounds"]) if "bounds" in d
@@ -199,7 +201,7 @@ def _shift_electrode(el: ElectrodeSpec, dax: float, drad: float,
     """A FULL copy of an electrode (every field: dc ganging, color, basis,
     metal depth, retained foreign keys) with its shapes shifted by (dax
     along `axis`, drad along the other in-plane axis) through THE shape-
-    offset authority, sim_spec.shift_shape_dict (L-527). It used to shift
+    offset authority, sim_spec.shift_shape_dict. It used to shift
     only x_mm/y_mm -- ellipse and polygon units stayed at their own
     origin -- drop cutout children, and rebuild the electrode from five
     fields. Only inline-shape electrodes are placeable; an STL-backed unit

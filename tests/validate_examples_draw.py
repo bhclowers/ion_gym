@@ -24,10 +24,14 @@ for name, mk in sorted(specs.items()):
         app._draw_background()                  # warmed -> inline path (ui_smoke pattern)
         assert app._model is not None, "model not built"
         assert app._scene is not None, "Phase A scene not built"
-        for la, lb in (("x", "y"), ("x", "z"), ("y", "z")):
+        # THE APP'S OWN PLANE LABELS, not hand-typed pairs: the plot
+        # labels and the deck axes differ (the r-z xz view is labelled
+        # (z, x)), and _base_figure takes labels. Iterating the app's
+        # plane map draws exactly what the xy/xz/yz buttons draw.
+        for plane, (*_chans, la, lb) in app._plane_map().items():
             fig = app._base_figure(app._model, la, lb)
             nt = len(fig.data) + len(fig.layout.shapes or ())
-            assert nt >= 1, f"{la}{lb}: empty figure"
+            assert nt >= 1, f"{plane}: empty figure"
         print(f"  [{time.strftime('%H:%M:%S')}] OK  {name}  "
               f"({time.time()-t0:.0f}s)")
     except Exception as e:

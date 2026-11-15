@@ -12,8 +12,8 @@ CONVENTIONS (measured against the tree):
     rect's occupied cells have principal axis at +29.96 deg, and the
     +30-rotated corner is inside while the -30 one is not.  The outline
     below applies R(+rot) about (x0+w/2, y0+h/2) to the four corners.
-  * extrude axis: ANY SINGLE axis of x|y|z (2026-09-12; supersedes
-    the z-only refusal). The JS still extrudes along its own z only —
+  * extrude axis: ANY SINGLE axis of x|y|z (supersedes the z-only
+    refusal). The JS still extrudes along its own z only —
     that stays true — but the ShapeSpec convention stores outlines in
     the extrude axis's cyclic in-plane coordinates, so a whole deck
     extruded along world A renders exactly by handing outlines through
@@ -240,7 +240,7 @@ def _extrude_of(shape: dict) -> Optional[dict]:
         raise EditRefusal(
             f"extrude axis {ax!r} is not one of 'x'|'y'|'z' — the "
             f"shape cannot be outlined")
-    # ANY single axis renders (2026-09-12, supersedes the z-only
+    # ANY single axis renders (supersedes the z-only
     # refusal that stood here): outlines are stored in the extrude
     # axis's cyclic in-plane coordinates (the ShapeSpec convention),
     # so the JS extrudes them along ITS z unchanged and the payload
@@ -342,7 +342,7 @@ def electrode_primitives(shapes: List[dict],
         if host is not None:
             host["holes"].append(k_out)
             continue
-        # BOUNDARY SUBTRACTION (2026-09-12, Brian's browser pass on
+        # BOUNDARY SUBTRACTION (found in a browser pass on
         # the StepWave: 112 truncated plates rendered as SOLID slabs
         # because their open-sided bores could only ghost). A kid that
         # crosses its host's boundary is a boolean difference of the
@@ -396,7 +396,7 @@ def shift_shape(shape: dict, dx: float = 0.0, dy: float = 0.0,
     the gizmo drag, the gate, and any future nudge tool all shift a
     shape through here.  Refuses unknown types by name.
 
-    The rule itself lives in io.sim_spec.shift_shape_dict (L-527: the
+    The rule itself lives in io.sim_spec.shift_shape_dict (the
     assembly flatten needs it too, and io stands below edit); this keeps
     the editor's own refusal type."""
     from ion_gym.io.sim_spec import shift_shape_dict
@@ -460,7 +460,7 @@ def render_primitives(session: EditSession) -> dict:
         bbox2d = [min(all_x), min(all_y), max(all_x), max(all_y)]
     else:
         # an empty deck shows its DECLARED domain over the stored in-plane
-        # axes -- from origin_mm, on the deck's own axes (L-553: this was
+        # axes -- from origin_mm, on the deck's own axes (this was once
         # [0, 0, width, height], wrong for a signed frame or an x/y deck)
         (u0, u1), (v0, v1) = inplane_domain_mm(g, axis)
         bbox2d = [u0, v0, u1, v1]

@@ -41,7 +41,7 @@ def main():
         ["ruff", "check", *TARGETS, "--select", SEVERE, "--quiet"],
         cwd=ROOT, capture_output=True, text=True)
     if sev.returncode != 0:
-        # Charter: surface what failed, don't swallow. If ruff reported
+        # Surface what failed, don't swallow. If ruff reported
         # findings, show them; if it errored, show stderr.
         output = sev.stdout.strip() or sev.stderr.strip()
         if output:

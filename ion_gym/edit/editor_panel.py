@@ -35,6 +35,7 @@ import panel as pn
 from ion_gym.edit.policy import (EditRefusal, deck_extrude_axis,
                                  inplane_domain_mm, world_domain_mm)
 from ion_gym.edit.session import EditSession
+from ion_gym.io.paths import examples_dir, is_shipped_example
 from ion_gym.edit.outline import shift_shape
 from ion_gym.edit.viewer import viewer_for_session, DEFAULT_WIDTH
 
@@ -137,11 +138,18 @@ class EditorApp:
             name="Color electrode", width=130)
         self.w_color_all = pn.widgets.Button(
             name="Color all", width=90)
+        # A shipped example opens with an EMPTY save path, the same as an
+        # upload: pre-filling its own path would make the default Save an
+        # overwrite of the example, which _on_save refuses anyway.
+        shipped = self.path is not None and is_shipped_example(self.path)
         self.w_save_path = pn.widgets.TextInput(
             name="save path",
-            value=str(self.path) if self.path is not None else "",
-            placeholder=("uploaded document — type a destination path "
-                         "to save"),
+            value=("" if self.path is None or shipped
+                   else str(self.path)),
+            placeholder=(
+                "shipped example (read-only) — type a new path "
+                "outside examples/ to save a copy" if shipped else
+                "uploaded document — type a destination path to save"),
             width=460)
         self.w_save = pn.widgets.Button(name="Save",
                                         button_type="success", width=80)
@@ -170,7 +178,7 @@ class EditorApp:
         self._say(f"**REFUSED:** {e}")
 
     def _shapes_of(self, el_i: int) -> list:
-        # COMMITTED state (v420 defect: reading the original doc
+        # COMMITTED state (an earlier defect: reading the original doc
         # made added shapes invisible and stale after edits)
         return self.session.committed_electrodes()[el_i] \
             .get("shapes", [])
@@ -220,7 +228,7 @@ class EditorApp:
                 # THE UI BOUNDARY for an optional overlay: a contour
                 # MALFUNCTION (contour_primitives returns refusals and
                 # raises bugs) must not take the geometry view down with
-                # it, and must not read as a refusal either (L-541). It is
+                # it, and must not read as a refusal either. It is
                 # named as a failure here, with its traceback on the
                 # console, and the viewer draws without contours.
                 import traceback
@@ -322,7 +330,7 @@ class EditorApp:
         shapes = self._shapes_of(el_i)
         if not (0 <= sh_j < len(shapes)):
             # a stale pick (the shape list changed under the picker): said
-            # on the form, not an empty form with no reason (L-553)
+            # on the form, not an empty form with no reason
             self.fields[:] = [pn.pane.Markdown(
                 f"**shape {sh_j} does not exist** on this electrode "
                 f"({len(shapes)} shape(s)) — pick again")]
@@ -411,7 +419,7 @@ class EditorApp:
                         f"body")
                 # the shape's own axis if it has one, else the deck's (it
                 # was always 'z', which rewrote an x/y shape's axis on
-                # every Apply -- L-553)
+                # every Apply)
                 axis = ((base.get("extrude") or {}).get("axis")
                         or self._deck_axis())
                 shape["extrude"] = {"axis": axis, "lo_mm": lo, "hi_mm": hi}
@@ -433,10 +441,10 @@ class EditorApp:
                           "leaves the document byte-identical)")
                 return
             warns = self.session.shape_warnings(shape)
-            self.session.set_shape(el_i, sh_j, shape)
-            rep = self.session.verify_commit()
+            rep = self.session.verified(
+                lambda: self.session.set_shape(el_i, sh_j, shape))
         except EditRefusal as e:
-            self._refuse(e)
+            self._refuse(e)               # rolled back: nothing queued
             return
         lines = [f"applied: {len(rep['diff_paths'])} path(s) changed, "
                  f"geometry key changed = {rep['geometry_key_changed']}"]
@@ -473,8 +481,8 @@ class EditorApp:
             self._say("**nothing selected**")
             return
         try:
-            self.session.remove_shape(el_i, sh_j)
-            rep = self.session.verify_commit()
+            rep = self.session.verified(
+                lambda: self.session.remove_shape(el_i, sh_j))
         except EditRefusal as e:
             self._refuse(e)
             return
@@ -493,7 +501,7 @@ class EditorApp:
     def _default_shape(self, t: str) -> dict:
         # A new shape sits at the centre of the deck's DECLARED domain, in
         # the deck's STORED in-plane frame, and extrudes along the deck's
-        # own axis (L-553): it was centred on (width/2, height/2) from a
+        # own axis: it was once centred on (width/2, height/2) from a
         # zero origin and always extruded along z, so on an x/y-extruded
         # deck one Add made the deck mixed-axis (the next render refused)
         # and on a signed-frame deck it landed off-centre or outside.
@@ -537,8 +545,8 @@ class EditorApp:
         try:
             shape = self._default_shape(self.w_new_type.value)
             warns = self.session.shape_warnings(shape)
-            self.session.add_shape(el_i, shape)
-            self.session.verify_commit()
+            self.session.verified(
+                lambda: self.session.add_shape(el_i, shape))
         except EditRefusal as e:
             self._refuse(e)
             return
@@ -561,8 +569,9 @@ class EditorApp:
     def _on_add_electrode(self, _event) -> None:
         try:
             shape = self._default_shape(self.w_new_type.value)
-            self.session.add_electrode(self.w_new_el.value, shape)
-            self.session.verify_commit()
+            self.session.verified(
+                lambda: self.session.add_electrode(self.w_new_el.value,
+                                                   shape))
         except EditRefusal as e:
             self._refuse(e)
             return
@@ -617,6 +626,14 @@ class EditorApp:
         dz = float(d.get("dz", 0.0))
         try:
             current = self._shapes_of(el_i)[sh_i]
+        except IndexError as e:
+            # the dragged shape is no longer in the committed document; an
+            # IndexError from the shift/snap/commit below is a bug, not a
+            # refusal, so it is not caught there
+            self._refuse(e)
+            self._refresh_viewer()       # revert the dangling visual
+            return
+        try:
             moved = shift_shape(current, dx=dx, dy=dy, dz=dz)
             if self.w_snap.value:
                 moved = self._snap_shape(moved)
@@ -625,9 +642,9 @@ class EditorApp:
                 self._say("drag snapped back to the original position")
                 return
             warns = self.session.shape_warnings(moved)
-            self.session.set_shape(el_i, sh_i, moved)
-            rep = self.session.verify_commit()
-        except (EditRefusal, IndexError) as e:
+            rep = self.session.verified(
+                lambda: self.session.set_shape(el_i, sh_i, moved))
+        except EditRefusal as e:
             self._refuse(e)
             self._refresh_viewer()       # revert the dangling visual
             return
@@ -666,16 +683,18 @@ class EditorApp:
         return out
 
     def _apply_color(self, everywhere: bool) -> None:
-        try:
+        el_i = self.w_el.value
+        if not everywhere and el_i is None:
+            self._say("**no electrode selected**")
+            return
+
+        def _edit():
             if everywhere:
                 self.session.set_color_all(self.w_color.value)
             else:
-                el_i = self.w_el.value
-                if el_i is None:
-                    self._say("**no electrode selected**")
-                    return
                 self.session.set_color(el_i, self.w_color.value)
-            rep = self.session.verify_commit()
+        try:
+            rep = self.session.verified(_edit)
         except EditRefusal as e:
             self._refuse(e)
             return
@@ -695,12 +714,23 @@ class EditorApp:
 
     def _on_save(self, _event) -> None:
         if not self.w_save_path.value.strip():
+            why = ("this document is a shipped example (read-only)"
+                   if self.path is not None
+                   and is_shipped_example(self.path) else
+                   "this document was loaded from a browser upload "
+                   "(bytes only, the dialog gives no disk path)")
             self._refuse(EditRefusal(
-                "no save path — this document was loaded from a browser "
-                "upload (bytes only, the dialog gives no disk path); "
-                "type a destination in the save-path box"))
+                f"no save path — {why}; type a destination in the "
+                f"save-path box"))
             return
         target = Path(self.w_save_path.value)
+        if is_shipped_example(target):
+            self._refuse(EditRefusal(
+                f"save refused: {target} is inside the shipped "
+                f"examples folder ({examples_dir()}), which is "
+                f"read-only. Save a copy under a path outside "
+                f"examples/."))
+            return
         try:
             self.session.verify_commit()
             data = self.session.to_document_bytes()

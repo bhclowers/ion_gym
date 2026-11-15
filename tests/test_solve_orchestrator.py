@@ -45,7 +45,7 @@ class FakeState:
         # in_server probe (pn.state.curdoc is not None) AFTER this gate
         # was written; without a curdoc the fake silently steered every
         # solve down the non-server path and polls stayed empty
-        # (polls[0] IndexError, red since v275). The fake must present
+        # (polls[0] IndexError, the gate went red). The fake must present
         # the interface it fakes.
         self.curdoc = object()
 

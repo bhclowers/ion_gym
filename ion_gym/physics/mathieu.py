@@ -34,7 +34,7 @@ def hill_half_trace_njit(a, q, square=False):
     figures color by. The loop is V02's validated `hill_beta` algorithm
     verbatim (two fundamental solutions, classic RK4, fixed 4001-node
     grid); hill_beta_njit clips and arccos-es this value, refactored
-    2026-10-21 with a 60-point bit-identity probe across both drives.
+    with a 60-point bit-identity probe across both drives.
     `square` selects the Meissner (square-wave) drive.
     """
     dtau = np.pi / (_N_TAU - 1)
@@ -96,7 +96,7 @@ def rf_amplitude_for_q(q, mz, r0_mm, freq_hz, charge=1):
     (4 z e). The standard mass-filter relation; geometry-agnostic (any r0,
     any frequency, any charge).
 
-    Moved here from build_stl._q_to_rf_amp (D6b, 2026-10-16): it is
+    Moved here from build_stl._q_to_rf_amp: it is
     quadrupole physics, not part of the STL quad demo that used it."""
     from ion_gym.physics.constants import E_CHG, KG_AMU
     if not (r0_mm > 0 and freq_hz > 0 and charge):

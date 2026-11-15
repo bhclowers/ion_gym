@@ -1,13 +1,15 @@
 """
 stats_card.py — the Impact-statistics Card (Panel) for the app.
 
-MOVED HERE from physics/stats.py (L-548, D6a, 2026-10-15): a Panel widget
+MOVED HERE from physics/stats.py: a Panel widget
 does not belong in a physics module. The reductions it renders stay in
 physics/stats.py — compute_stats, stats_markdown, stations_markdown,
 delivered_spread_text — so the card, the gate scripts and the notebooks
 still read ONE authority and cannot disagree. This module only lays them
 out; it computes nothing. The code below moved verbatim.
 """
+from ion_gym.physics.ion_envelope import (DEFAULT_ION_LABEL,
+                                         ION_LABEL_MODES, ion_label)
 from ion_gym.physics.stats import (
     ALL_PLANES, FATE_NAME, auto_transmitted_fate, compute_stats,
     delivered_spread_text, enabled_planes, mz_of_results, stations_markdown,
@@ -69,6 +71,9 @@ def stats_card(*, title="Impact statistics", collapsed=False):
                                 title=title, collapsed=collapsed,
                                 sizing_mode="stretch_width")
             self._last = None    # (results, spec, stations) for re-render
+            # ion-label display mode (mass | m/z), set by the workbench's
+            # session selector through set_label_mode
+            self.label_mode = DEFAULT_ION_LABEL
             self.sel.param.watch(lambda e: self._rerender(), "value")
             self.plane_sel.param.watch(lambda e: self._rerender(), "value")
             self.source_sel.param.watch(lambda e: self._rerender(), "value")
@@ -93,6 +98,7 @@ def stats_card(*, title="Impact statistics", collapsed=False):
             if not self._last:
                 return
             results, spec, stations = self._last
+            _z = int(spec.source.charge) if spec is not None else 1
             # DELIVERED SPREAD: one authority line above whichever
             # table renders; failures REPORT rather than blank the card.
             self._spread_line = ""
@@ -149,7 +155,9 @@ def stats_card(*, title="Impact statistics", collapsed=False):
                 st = compute_stats(results, transmitted_fate=fate, mz=mz,
                                    planes=planes)
                 self.md.object = (self._spread_line
-                                  + stats_markdown(st, plane_filter=pf))
+                                  + stats_markdown(st, plane_filter=pf,
+                                                   charge=_z,
+                                                   label_mode=self.label_mode))
                 self._set_body(self.md)
                 return
 
@@ -157,14 +165,17 @@ def stats_card(*, title="Impact statistics", collapsed=False):
             st_all = compute_stats(results, transmitted_fate=fate, mz=mz,
                                    planes=planes)
             tabs.append(("all", pn.pane.Markdown(
-                stats_markdown(st_all, plane_filter=pf),
+                stats_markdown(st_all, plane_filter=pf, charge=_z,
+                               label_mode=self.label_mode),
                 sizing_mode="stretch_width")))
             for m in sorted(groups):
                 rows = groups[m]
                 st_m = compute_stats(rows, transmitted_fate=fate,
                                      mz=[m] * len(rows), planes=planes)
-                tabs.append((f"m/z {m:g}", pn.pane.Markdown(
-                    stats_markdown(st_m, plane_filter=pf),
+                tabs.append((ion_label(m, _z, self.label_mode),
+                             pn.pane.Markdown(
+                    stats_markdown(st_m, plane_filter=pf, charge=_z,
+                                   label_mode=self.label_mode),
                     sizing_mode="stretch_width")))
             self._set_body(pn.Column(
                 pn.pane.Markdown(self._spread_line,
@@ -173,13 +184,23 @@ def stats_card(*, title="Impact statistics", collapsed=False):
                 sizing_mode="stretch_width"))
 
         def _set_body(self, obj):
-            """Swap ONLY the body slot (table <-> per-m/z tabs). Never the
+            """Swap ONLY the body slot (table <-> per-mass tabs). Never the
             card itself: the selectors and the figure are permanent
             structure, and replacing card.objects wholesale is what made
             the impacts graph disappear on the first post-flight update."""
             if len(self._body.objects) and self._body.objects[0] is obj:
                 return
             self._body.objects = [obj]
+
+        def set_label_mode(self, mode):
+            """Relabel species as mass or m/z and re-render (numbers
+            unchanged)."""
+            if mode not in ION_LABEL_MODES:
+                raise ValueError(f"label mode {mode!r}; one of "
+                                 f"{ION_LABEL_MODES}")
+            self.label_mode = mode
+            if self._last is not None:
+                self._rerender()
 
         def clear(self):
             self._last = None

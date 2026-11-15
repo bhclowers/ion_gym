@@ -1,25 +1,32 @@
 """
 Gate: field_io — field portability.
 
+A saved field is the deck's solve-cache entry exported as one file (with
+the deck beside it), the same on every route; the dashboard and notebooks
+call these same functions.
+
 Covers:
-  F1  save -> RENAME -> load round-trip (filename is cosmetic; bases and
-      ele come back bit-identical; bases reinstated as a cache hit)
-  F2  wrong-geometry load HARD-REFUSES, and the diagnostic NAMES the
-      diverging geometry field (width_mm here)
+  F1  a solved field saves, survives a RENAME, and loads into an empty
+      cache: bases and labels come back bit-identical, and the geometry
+      is a cache hit
+  F2  a field loaded for a different geometry HARD-REFUSES, naming both
+      cache entries
   F3  fingerprint anchors an identical solve; a perturbed basis DIVERGES
       with the offending basis/node named
   F4  trajectory save/load: matching spec -> no warning; different
       geometry -> warning string (overlay allowed, never a refusal)
-  F5  bake_label rewrites _meta.label in place (the one rewriting path);
-      registry precedence: local registry > embedded label
-  F6  registry locality: saving into a custom directory writes
-      fields_registry.json THERE, not into the global fields dir
-      (mutation guard on the save_field registry fix)
+  F5  an older array-level field file is refused by name, and the
+      saved-fields list shows why rather than dropping it
+  F6  a label is kept in the registry beside a custom save folder; the
+      list matches the deck and shows the label
+  F7  r-z: save -> open from the file alone (the deck it was solved for,
+      then the field) round-trip; a file that does not record its deck
+      refuses
+  F8  provenance: many-to-one recorded, never keyed
 
-No solver run: validation/fingerprint are functions of geometry key +
-array structure, so synthetic bases on a real GeometrySpec exercise every
-contract deterministically in <1 s. All files under a tempdir; the repo
-fields/ directory is never touched.
+No solver run: a solve is stood in for by storing synthetic bases the way
+the solver stores them (basis_cache.store). All files under a tempdir;
+the repo fields/ directory is never touched.
 
 Run: python tests/test_field_io.py     (PASS/FAIL lines, exit code)
 """
@@ -86,35 +93,46 @@ def main():
 
     # ---------------------------------------------------------------- F1
     def f1():
-        p = field_io.save_field(spec, bases, ele,
-                                path=os.path.join(tmp, "as_saved.npz"))
+        basis_cache.store(spec, bases, ele, root=cache_root)
+        p, deck = field_io.save_field(spec, directory=tmp, root=cache_root)
+        assert deck and os.path.exists(deck), "deck JSON not beside it"
         renamed = os.path.join(tmp, "totally arbitrary name (sent).npz")
         os.replace(p, renamed)
-        b2, e2 = field_io.load_field(renamed, spec, root=cache_root)
+        fresh = os.path.join(tmp, "fresh_cache")
+        assert field_io.load_field(renamed, spec, root=fresh) == \
+            field_io.field_key(spec)
+        b2, e2 = basis_cache.load(spec, root=fresh)
+        assert b2 is not None, "no cache hit after load_field"
         assert sorted(b2) == sorted(int(k) for k in bases), "basis keys"
         for k in bases:
             assert np.array_equal(b2[int(k)], bases[k]), f"basis {k} bits"
         assert np.array_equal(e2, ele), "ele bits"
-        # reinstated: the disk cache now HITS this geometry
-        arrs, meta = fa_cache.load(basis_cache.geometry_key_dict(spec),
-                                   root=cache_root)
-        assert arrs is not None, "no cache hit after load_field"
-    check("F1 save -> rename -> load round-trip + cache reinstate", f1)
+        # the file read directly, without the cache: per-volt bases (the
+        # solver's V_BASIS divided out)
+        from ion_gym.physics.build_planar import V_BASIS
+        fb, fl, fm = field_io.read_field_arrays(renamed)
+        assert sorted(fb) == sorted(int(k) for k in bases)
+        for k in bases:
+            assert np.array_equal(fb[int(k)], bases[k] / V_BASIS), \
+                f"file basis {k}"
+        assert np.array_equal(fl, ele) and fm["spec_name"] == spec.name
+    check("F1 save -> rename -> load into an empty cache, bit-identical", f1)
 
     # ---------------------------------------------------------------- F2
     def f2():
-        p = os.path.join(tmp, "for_refuse.npz")
-        field_io.save_field(spec, bases, ele, path=p)
+        basis_cache.store(spec, bases, ele, root=cache_root)
+        p, _ = field_io.save_field(spec, directory=os.path.join(tmp, "f2"),
+                                   root=cache_root)
         other = _spec(width=25.0)          # ONE geometry field differs
         try:
             field_io.load_field(p, other, root=cache_root)
         except field_io.FieldMismatch as e:
             msg = str(e)
-            assert "width_mm" in msg, f"divergence not named: {msg!r}"
-            assert "Refusing" in msg or "refus" in msg.lower(), msg
+            assert "different geometry" in msg, msg
+            assert field_io.field_key(other)[:8] in msg, msg
             return
         raise AssertionError("wrong-geometry load did NOT refuse")
-    check("F2 wrong-geometry load hard-refuses, names width_mm", f2)
+    check("F2 wrong-geometry load hard-refuses, names both entries", f2)
 
     # ---------------------------------------------------------------- F3
     def f3():
@@ -141,7 +159,8 @@ def main():
                R(1, None, {"kind": 2}),     # unrecorded -> skipped+counted
                R(2, np.ones((2, 3)), {"kind": 1})]
         p = field_io.save_trajectories(res, spec,
-                                       path=os.path.join(tmp, "t.traj.npz"))
+                                       path=os.path.join(tmp, "t.traj.npz"),
+                                       columns=["t", "x", "y"])
         trajs, meta, warn = field_io.load_trajectories(p, spec)
         assert warn is None, f"matching spec warned: {warn}"
         assert sorted(trajs) == [0, 2] and meta["n_skipped"] == 1
@@ -151,36 +170,41 @@ def main():
 
     # ---------------------------------------------------------------- F5
     def f5():
-        p = os.path.join(tmp, "label.npz")
-        field_io.save_field(spec, bases, ele, path=p, label="original")
-        field_io.bake_label(p, "baked-for-send")
-        meta = field_io.read_field_meta(p)
-        assert meta["label"] == "baked-for-send", meta["label"]
-        field_io.load_field(p, spec, root=cache_root)   # bake kept validity
-        field_io.set_label(meta["key"], "local-wins", directory=tmp)
-        assert field_io.display_label(meta, directory=tmp) == "local-wins"
-    check("F5 bake_label rewrites in place; registry > embedded", f5)
+        old_dir = os.path.join(tmp, "older")
+        os.makedirs(old_dir)
+        old = os.path.join(old_dir, "older_format.npz")
+        field_io._atomic_savez(
+            old, b1=bases[1], ele=ele,
+            **{field_io._META: field_io._meta_to_member(
+                {"kind": "ion_gym_field", "field_format": 1})})
+        try:
+            field_io.load_field(old, spec, root=cache_root)
+        except field_io.FieldMismatch as e:
+            assert "older field format" in str(e), str(e)
+        else:
+            raise AssertionError("an older-format field loaded")
+        rows = field_io.scan_fields(directory=old_dir, spec=spec)
+        assert len(rows) == 1 and "older field format" in rows[0]["problem"]
+    check("F5 an older-format field is refused by name and listed", f5)
 
     # ---------------------------------------------------------------- F6
     def f6():
         sub = os.path.join(tmp, "custom_dir")
-        field_io.save_field(spec, bases, ele,
-                            path=os.path.join(sub, "x.npz"), label="here")
+        basis_cache.store(spec, bases, ele, root=cache_root)
+        field_io.save_field(spec, directory=sub, label="here",
+                            root=cache_root)
         assert os.path.exists(os.path.join(sub, "fields_registry.json")), \
             "registry not written beside the saved file"
         rows = field_io.scan_fields(directory=sub, spec=spec)
-        assert len(rows) == 1 and rows[0]["matches"] is True
+        assert len(rows) == 1 and rows[0]["matches"] is True, rows
         assert rows[0]["label"] == "here", rows[0]["label"]
-    check("F6 registry lives beside a custom save dir; scan matches", f6)
+    check("F6 label kept beside a custom save dir; scan matches", f6)
 
     # ---------------------------------------------------------------- F7
     def f7():
-        # r-z round-trip + one-file bootstrap (the cache-backed
-        # r-z path): an rz-coords spec keys through the SAME canonical
-        # machinery (symmetry.coords distinguishes it — no rz-special
-        # branch), saves, and reopens from the file alone: spec
-        # reconstructed from the embedded _meta, every integrity check
-        # still firing, bases reinstated into the given cache root.
+        # r-z keys through the same canonical machinery (symmetry.coords
+        # distinguishes it -- no r-z branch) and reopens from the file
+        # alone: the deck it was solved for, then the field.
         from ion_gym.io.sim_spec import SymmetrySpec
         g = GeometrySpec(
             width_mm=20.0, height_mm=8.0, mm_per_gu=0.5,
@@ -195,36 +219,32 @@ def main():
         rbases, rele = _solved(rspec, seed=7)
         assert basis_cache.key(rspec) != basis_cache.key(spec), \
             "rz spec must key differently from the planar fixture"
-        p = os.path.join(tmp, "rz_session.npz")
-        field_io.save_field(rspec, rbases, rele, path=p, label="rz gate")
-        rt = os.path.join(tmp, "rz_boot_cache")
-        s2, b2, e2 = field_io.load_field_bootstrap(p, root=rt)
+        basis_cache.store(rspec, rbases, rele, root=cache_root)
+        p, _ = field_io.save_field(rspec, directory=os.path.join(tmp, "rz"),
+                                   root=cache_root)
+        s2, meta = field_io.read_spec_from_field(p)
         assert basis_cache.key(s2) == basis_cache.key(rspec), \
             "reconstructed spec keys differently from the original"
-        assert s2.geometry.symmetry.coords == "rz", "coords lost in round-trip"
-        assert s2.geometry.electrodes[1].is_grid is True, \
-            "is_grid lost in round-trip (stale-hit hazard)"
+        assert s2.geometry.symmetry.coords == "rz", "coords lost"
+        assert s2.geometry.electrodes[1].is_grid is True, "is_grid lost"
+        rt = os.path.join(tmp, "rz_boot_cache")
+        field_io.load_field(p, s2, root=rt)
+        b2, e2 = basis_cache.load(s2, root=rt)
         for k in rbases:
             assert np.array_equal(b2[k], rbases[k]), f"basis {k} differs"
-        assert np.array_equal(e2, rele), "ele differs after bootstrap"
-        db, de = basis_cache.load(s2, root=rt)
-        assert db is not None, "bootstrap did not reinstate the cache root"
-        # pre-bootstrap file (spec=None in _meta) must REFUSE with a reason
-        import numpy as _np
-        with _np.load(p, allow_pickle=False) as z:
-            members = {n: z[n] for n in z.files}
-        m = field_io._member_to_meta(members[field_io._META])
-        m["spec"] = None
-        members[field_io._META] = field_io._meta_to_member(m)
-        p_old = os.path.join(tmp, "rz_prebootstrap.npz")
-        field_io._atomic_savez(p_old, **members)
+        assert np.array_equal(e2, rele), "ele differs after open"
+        # a file that does not record its deck refuses to open
+        with np.load(p, allow_pickle=False) as z:
+            members = {n: z[n] for n in z.files if n != "json__provenance"}
+        p_bare = os.path.join(tmp, "rz", "no_deck.npz")
+        field_io._atomic_savez(p_bare, **members)
         try:
-            field_io.read_spec_from_field(p_old)
-            assert False, "pre-bootstrap save did not refuse"
+            field_io.read_spec_from_field(p_bare)
+            assert False, "a field without its deck opened"
         except field_io.FieldMismatch as e:
-            assert "no embedded spec" in str(e), str(e)
-    check("F7 r-z save -> one-file bootstrap round-trip; pre-bootstrap "
-          "saves refuse", f7)
+            assert "does not record the deck" in str(e), str(e)
+    check("F7 r-z save -> open from the file alone; a file without its "
+          "deck refuses", f7)
 
     # ---------------------------------------------------------------- F8
     def f8():

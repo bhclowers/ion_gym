@@ -59,8 +59,15 @@ def test_gate1_backward_bit_exact():
                   ele=ele, h_mm=h, rf_V=7.3, dc_V=-1.2, om_rad_us=2.5)
 
     kw = dict(dt_ns=1.0, t_max_us=8.0, record_every=3, max_records=20000)
-    new = fly3d(fields, 40.0, (0.4, -0.3, 0.1), (0.5, -0.2, 0.05), 1.234, **kw)
-    old = fly3d_v61(fields, 40.0, (0.4, -0.3, 0.1), (0.5, -0.2, 0.05), 1.234, **kw)
+    # positions are in the kernel's frame, node (0,0,0) at the grid corner
+    # (0 .. 10 mm here): (5.4, 4.7, 5.1) is the point 0.4, -0.3, 0.1 mm from
+    # the centre. The birth used to be written as (0.4, -0.3, 0.1), which
+    # is OUTSIDE the grid: both kernels ended it at the first step, so the
+    # bit-exact comparison covered a two-record flight.
+    r0 = (5.4, 4.7, 5.1)
+    new = fly3d(fields, 40.0, r0, (0.5, -0.2, 0.05), 1.234, **kw)
+    old = fly3d_v61(fields, 40.0, r0, (0.5, -0.2, 0.05), 1.234, **kw)
+    assert len(old["x"]) > 1000         # a real flight is compared
 
     assert new["kind"] == old["kind"]
     assert new["x"].shape == old["x"].shape

@@ -1,0 +1,224 @@
+{
+ "schema_version": 1,
+ "name": "quadrupole digital drive, zone 3,1 (3-D STL rods)",
+ "notes": "Digital (two-level square) drive variant of quadrupole_stl_rods_full_3-d.json: geometry, STL rods, lattice and source inherited unchanged. Drive per Hu and Gundlach-Graham, RCM 38 (2024) e9753: duty 83.50/16.50 on the x pair (DIGX, phase 0) with the inverted waveform on the y pair (DIGY, duty 0.165, phase 59.4 deg), amplitude 200 V zero-to-peak, no DC between pairs (a = 0). Zone 3,1: q = 4.59, published R_BL = 556. Frequency 512.265 kHz places m/z 100 at that q via the SOLVED field's measured axis curvature 24.6417 V/mm^2 at 200 V (q = 2eA/(m Omega^2)); the ideal-quad figure at the design r0 = 3.84 mm would be 537.475 kHz, off by 4.7% -- far more than the zone's ~0.2% band, which is why the calibration reads the field, not the drawing. dt 0.0717689 ns = T/27200 is COMMENSURATE with the drive (every switch edge lands on an integration step; an incommensurate step jitters the duty per period, and the flown band died from that jitter even at dt/T = 7e-5) and sits inside the zone's measured static duty tolerance (the error that shifts the band center by half its width) at dt/T = 3.7e-05. Stability-zone numbers validated against the exact Meissner monodromy (physics.mathieu.meissner_half_trace) before cutting.",
+ "geometry": {
+  "width_mm": 20.5,
+  "height_mm": 20.5,
+  "depth_mm": 120.5,
+  "axial_extent_mm": [
+   0.0,
+   117.9
+  ],
+  "mm_per_gu": 0.5,
+  "symmetry": {
+   "coords": "xyz",
+   "planes": {
+    "x": "none",
+    "y": "none",
+    "z": "none"
+   }
+  },
+  "stl_dir": "../../../../examples/quad_assembly",
+  "electrodes": [
+   {
+    "name": "rod_1",
+    "shapes": [],
+    "stl": "Quad_Assembly_-_Rod_A-1.STL",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "DIGX"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "rod_2",
+    "shapes": [],
+    "stl": "Quad_Assembly_-_Rod_B-2.STL",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "DIGY"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "rod_3",
+    "shapes": [],
+    "stl": "Quad_Assembly_-_Rod_C-3.STL",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "DIGX"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   },
+   {
+    "name": "rod_4",
+    "shapes": [],
+    "stl": "Quad_Assembly_-_Rod_D-4.STL",
+    "is_grid": false,
+    "dc": 0.0,
+    "rf_groups": [
+     "DIGY"
+    ],
+    "dc_group": null,
+    "dc_index": null,
+    "dc_weight": null,
+    "color": [
+     200,
+     60,
+     60
+    ],
+    "basis": null
+   }
+  ],
+  "rf_groups": [
+   {
+    "name": "DIGX",
+    "frequency_hz": 512265.2442892238,
+    "amplitude_v": 200.0,
+    "phase_deg": 0.0,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null,
+    "duty": 0.835
+   },
+   {
+    "name": "DIGY",
+    "frequency_hz": 512265.2442892238,
+    "amplitude_v": 200.0,
+    "phase_deg": 59.40000000000001,
+    "waveform": "square",
+    "table_t_us": [],
+    "table_v": [],
+    "interp": "hold",
+    "pe_mode": null,
+    "duty": 0.16500000000000004
+   }
+  ],
+  "dc_groups": [],
+  "stl_manifest": {
+   "Quad_Assembly_-_Rod_A-1.STL": "b3d8ed70387fb737bd66858f69ec6b0c8bec8ff1e700f75251b1cc22bc82e26e",
+   "Quad_Assembly_-_Rod_B-2.STL": "2483ac1688fe571e351f1d7caca8c93b45abe378b3500ec848a405357fb79bd0",
+   "Quad_Assembly_-_Rod_C-3.STL": "d90812816bcaddab8e6c9de1990eff8811876b4df596d1ff4030220ad52b0e4a",
+   "Quad_Assembly_-_Rod_D-4.STL": "3f226b552a3655a60b6ef7fd8cb37881a02319c0beaa62e9f0f40e4d6de5985a"
+  }
+ },
+ "source": {
+  "n_ions": 24,
+  "distribution": "box",
+  "x0_mm": 10.25,
+  "y0_mm": 10.15,
+  "z0_mm": 1.0,
+  "r_mm": 4.0,
+  "len_mm": 0.0,
+  "box_mm": [
+   1.0,
+   1.0,
+   1.0
+  ],
+  "axis": "z",
+  "direction": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "ke_lo": 8.0,
+  "ke_hi": 8.0,
+  "temperature_k": 0.0,
+  "mz_list": [
+   100.0
+  ],
+  "charge": 1,
+  "tob_span_us": 0.0,
+  "births_file": null,
+  "seed": null
+ },
+ "collisions": {
+  "enabled": false,
+  "gas": "N2",
+  "T_k": 273.0,
+  "P_torr": 1.0,
+  "sigma_m2": 2.27e-18,
+  "model": "hs",
+  "gas_diam_nm": 0.366,
+  "flow_mm_us": [
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "integration": {
+  "max_records": 100000,
+  "dt_ns": 0.07176888592815732,
+  "t_max_us": 60.0,
+  "rec_every": 9,
+  "record_channels": [
+   "speed",
+   "radius"
+  ]
+ },
+ "optic_axis": {
+  "axis": "z",
+  "through_mm": [
+   10.2489,
+   10.1454
+  ]
+ },
+ "bounds": {
+  "x_min": 0.0,
+  "x_min_on": false,
+  "x_max": 20.5,
+  "x_max_on": false,
+  "y_min": 0.0,
+  "y_min_on": false,
+  "y_max": 20.5,
+  "y_max_on": false,
+  "z_min": 0.0,
+  "z_min_on": false,
+  "z_max": 119.0,
+  "z_max_on": true
+ },
+ "view": {
+  "mode": "2d",
+  "planes": [
+   "xz"
+  ],
+  "equipotential_lines": 16,
+  "show_field": false,
+  "color_by": "fate",
+  "decimate": 4
+ },
+ "builder": "",
+ "import_path": "",
+ "scene": null,
+ "_display_name": "Quadrupole (3D, STL)"
+}

@@ -66,9 +66,11 @@ def rasterize(scene: GeomScene) -> np.ndarray:
         clash = m & (lab != 0) & (lab != e.index)
         if clash.any():
             i, j, k = [int(v[0]) for v in np.where(clash)]
+            from ion_gym.physics.raster2d import SHARED_NODE_HINT
             raise ValueError(f"electrode {e.index} ({e.name}) overlaps "
                              f"electrode {int(lab[i, j, k])} at node "
-                             f"({i},{j},{k}) (+{int(clash.sum())} more)")
+                             f"({i},{j},{k}) (+{int(clash.sum())} more). "
+                             f"{SHARED_NODE_HINT}")
         # An authored electrode owning ZERO stored-frame nodes is a dangling
         # Dirichlet basis: the solve proceeds, the electrode simply is not
         # there, and the field is silently wrong.  This is the "rasterise

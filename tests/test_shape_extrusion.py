@@ -50,7 +50,7 @@ def _tiny_spec(*, width=4.0, height=3.0, depth=3.0, pitch=0.25,
         "name": "tiny_extrude_synthetic",
         # DECLARED seed: build_run draws births even when a
         # gate never flies; seed 0 = the historical deterministic draws.
-        # R2 (2026-10-15): physics keys stated, at the values this
+        # R2: physics keys stated, at the values this
         # fixture flew with as defaults before missing ones refused
         "source": {"seed": 0, "distribution": "disc", "n_ions": 100,
                    "x0_mm": 1.0, "y0_mm": 0.0, "z0_mm": 0.0, "r_mm": 4.0,
@@ -178,10 +178,10 @@ def test_gate2_axis_generality():
 
 # ----------------------------------------- Gate 3: default unchanged (2-D)
 # Reference sha256 of the concatenated electrode-mask bytes, recorded with
-# PRE-CHANGE code (v266, this session, before any edit) on the shipped
+# PRE-CHANGE code (before the extrusion feature) on the shipped
 # examples below at their own grids. Byte-identity here proves the 2-D
 # rasterization path is untouched for every spec with no extrude
-# descriptor. Mutation-verified: see the session decisions entry.
+# descriptor. Mutation-verified.
 _REF_MASK_SHA = {
     "examples/slim_tetramer_confinement_2-d_acrossxgap.json":
         "06b43ba293aa96c6d978b6ab1f2380342015ee29b49400b5107608223dadbb84",

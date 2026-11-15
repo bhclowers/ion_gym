@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "name": "hexapole \u2014 native 3-D (6 round rods, extruded, no STL)",
- "notes": "NATIVE ion_gym 3-D hexapole (the PI 2026-09-03): 6 round rods, radius 1.498 mm, rod-centre radius 4.29 mm at 30+k*60 deg; inscribed field radius r0 = 2.792 mm; length 50 mm. AUTHORED IN SIGNED WORLD COORDINATES, centred on the origin: rods at +-R about (0,0), domain [-7.8,+7.8] mm in x,y via origin_mm=[-7.8,-7.8], z in [0,50]. Native shapes3d route: each ellipse carries an extrude descriptor (axis z, full length) rasterized to voxel masks -> real 3-D Laplace solve (no imported geometry). RF: adjacent rods 180 deg out of phase (RFA/RFB), 100 V at 1 MHz. Pitch 0.15 mm. Signed authoring verified 2026-09-04 (L-291-hexapole fix): rasterizes, solves, flies and records centred on world (0,0); the old positive-frame workaround note is retired.",
+ "notes": "NATIVE ion_gym 3-D hexapole: 6 round rods, radius 1.498 mm, rod-centre radius 4.29 mm at 30+k*60 deg; inscribed field radius r0 = 2.792 mm; length 50 mm. AUTHORED IN SIGNED WORLD COORDINATES, centred on the origin: rods at +-R about (0,0), domain [-7.8,+7.8] mm in x,y via origin_mm=[-7.8,-7.8], z in [0,50]. Native shapes3d route: each ellipse carries an extrude descriptor (axis z, full length) rasterized to voxel masks -> real 3-D Laplace solve (no imported geometry). RF: adjacent rods 180 deg out of phase (RFA/RFB), 100 V at 1 MHz. Pitch 0.15 mm. Signed authoring verified: rasterizes, solves, flies and records centred on world (0,0). Detector station (transparent, on_hit pass) on z at 48.45 mm, ten grid pitches inside the terminal bound so recorded steps bracket the crossing; it feeds the Impact Analysis tab and changes no flight. Detector window: window x, y = +/-2.792 mm: the inscribed radius r0 of the rod set (rod-centre distance minus rod radius), as a square about the axis because station windows are rectangles.",
  "geometry": {
   "width_mm": 15.6,
   "height_mm": 15.6,
@@ -308,7 +308,6 @@
   "gas": "N2",
   "T_k": 300.0,
   "P_torr": 0.0,
-  "sigma_m2": 2.27e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,
   "flow_mm_us": [
@@ -342,7 +341,25 @@
   "z_min": 0.0,
   "z_max": 49.95
  },
- "stations": [],
+ "stations": [
+  {
+   "name": "detector",
+   "kind": "detect",
+   "on_hit": "pass",
+   "axis": "z",
+   "pos_mm": 48.45,
+   "window": {
+    "x": [
+     -2.792,
+     2.792
+    ],
+    "y": [
+     -2.792,
+     2.792
+    ]
+   }
+  }
+ ],
  "view": {
   "mode": "3d",
   "planes": [

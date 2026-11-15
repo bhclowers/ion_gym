@@ -29,8 +29,9 @@ produces cached per-electrode basis fields so that a voltage change is
 a re-weight rather than a re-solve — the property its optimization and
 interactive-workbench workflows are built on. ion_gym's SDS collision
 model implements the algorithm of Appelhans & Dahl as published (see
-"Physics provenance" in the README); its data tables are independently
-regenerated ion_gym artifacts.
+"Physics provenance" in the README and `docs/SDS_MODEL.md`); its one
+data table, the diffusion-jump statistics, is an ion_gym artifact
+regenerated from the paper's procedure by `tools/regen_sds_tables.py`.
 
 ### IDSimF
 

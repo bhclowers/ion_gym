@@ -1,10 +1,10 @@
-"""test_edit_frame.py — the edit viewer's extrude-axis frame (L-432).
+"""test_edit_frame.py — the edit viewer's extrude-axis frame.
 
-COMMISSIONED by Brian 2026-09-12 (the session that landed the fix):
+Written with the fix it guards:
 the standing convention "every refusal or guard gets an adversarial
 test in the same change" applied to the payload-frame permutation.
 Before this file the edit subsystem had ZERO standing pytest coverage;
-every L-432 property lived in session drives that die with their
+every frame property lived in session drives that die with their
 container.
 
 What it pins (all headless, ZERO field solves — sessions and payloads
@@ -25,8 +25,8 @@ only walk shapes):
       and the world-z mirror clamp binds the stored in-plane 'y'.
   F5  shipped-deck identity: every editor-accepted examples/ deck
       resolves the identity frame and unchanged z-mirror clamp form —
-      the property that replaced the one-time byte-diff against the
-      pristine v516 extract.
+      the property that replaced the one-time byte-diff against a
+      pristine pre-fix extract.
   F6  ortho label composition (the ESM's wlab, replicated): identity
       frame reproduces the pre-fix label strings character for
       character; the x frame names the world planes. The JS itself
@@ -36,8 +36,8 @@ only walk shapes):
       permute world -> viewer on an x-deck and pass through
       byte-equal on a z-deck (the identity path is skipped, not
       applied).
-  F8  StepWave cross-check (LOUD SKIP when internal/ is absent, per
-      the cleanup-contract Q3 rule): 140 electrodes, frame (y,z,x),
+  F8  StepWave cross-check (LOUD SKIP when the development tree is
+      absent): 140 electrodes, frame (y,z,x),
       28 subtracted bores + 112 reported open-sided ghosts — the
       split recomputed from the raw deck, not hardcoded trust.
 """
@@ -129,7 +129,7 @@ def _xdeck() -> dict:
                          "extrude": dict(ex)}]},
                 ]},
             ]},
-        # R2 (2026-10-15): physics keys stated, at the values this
+        # R2: physics keys stated, at the values this
         # fixture flew with as defaults before missing ones refused
         "source": {"x0_mm": 0.5, "y0_mm": 0.5, "z0_mm": 0.5,
                    "mz_list": [100.0], "n_ions": 1, "distribution": "disc",
@@ -279,7 +279,7 @@ def test_F4_xdeck_renders_hosts_clips_and_reports():
 
     openb = els["OPENBORE"]
     # boundary-crossing bore: SUBTRACTED at the outline level (the
-    # 2026-09-12 browser-pass fix) — one concave simply-connected
+    # browser-pass fix) — one concave simply-connected
     # solid, no ghost, no warning. The bore mouth is genuinely open:
     # points inside the old bore-∩-plate region are OUTSIDE the metal.
     assert len(openb["solids"]) == 1
@@ -404,10 +404,10 @@ def test_F8_stepwave_all_140_bores_render_as_metal_absence():
     deck = (REPO / "internal" / "studies" / "stepwave" / "decks"
             / "conjoined_stepwave.json")
     if not deck.is_file():
-        pytest.skip("internal/ fixture absent on this checkout: "
-                    "internal/studies/stepwave/decks/"
+        pytest.skip("development-tree fixture absent on this checkout: "
+                    "the StepWave deck "
                     "conjoined_stepwave.json — the StepWave cross-check "
-                    "needs the dev tree (Q3 loud-skip rule)")
+                    "needs the dev tree")
     sess = EditSession.load(deck)
     prims = render_primitives(sess)
     assert prims["frame"] == {"extrude_axis": "x",
@@ -416,7 +416,7 @@ def test_F8_stepwave_all_140_bores_render_as_metal_absence():
     assert len(els) == 140
     # EVERY bore is metal absence now: 28 fully-contained bores as
     # holes, 112 open-sided bores as boundary subtractions — zero
-    # ghosts, zero warnings (the 2026-09-12 browser-pass finding:
+    # ghosts, zero warnings (the browser-pass finding:
     # 112 ghosted bores drew a solid wall).
     n_holes = sum(len(s["holes"]) for e in els for s in e["solids"])
     n_sub = sum(1 for e in els for s in e["solids"]

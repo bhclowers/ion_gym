@@ -2,7 +2,7 @@
  "schema_version": 1,
  "_display_name": "RF Drift Cell",
  "name": "rf-confining drift cell (Allen & Bush 2016) id 5 mm",
- "notes": "Allen & Bush 2016 geometry: 56 rings x 0.5 mm, pitch 1.5 mm, i.d. 5 mm, r_out 6 mm (ours); RF 200 Vpp @ 2.8 MHz alternating; E/P 0.507 V/cm/Torr -> 0.17745 V/mm, ladder 14.640 V over 82.5 mm; 3.5 Torr He 298 K; ion 490.5 Da z=+2, sigma 1.55e-18 m^2 (PLACEHOLDER, unconfirmed). INTEGRATION TUNED (2026-09-07, measured on a 400 us / 6-ion seed-7 probe): dt 0.5->1.0 ns \u2014 drift velocity 0.0287\u00b10.0022 vs 0.0278\u00b10.0020 mm/us (equivalent within the seed spread; dt 2 ns REJECTED at +21%); rec_every 25->2000 \u2014 the uploaded 0.5/25 pair wanted 320k records against the 100k cap and silently clipped recorded paths at ~1.25 ms of a ~2.7 ms drift. Radial confinement sd 0.23 mm unchanged across dt. ~2x faster per ion, full-fidelity recording.",
+ "notes": "Allen & Bush 2016 geometry: 56 rings x 0.5 mm, pitch 1.5 mm, i.d. 5 mm, r_out 6 mm (ours); RF 200 Vpp @ 2.8 MHz alternating; E/P 0.507 V/cm/Torr -> 0.17745 V/mm, ladder 14.640 V over 82.5 mm; 3.5 Torr He 298 K. ION: GRGDS [M+2H]2+, mass 492.5 Da (mz_list holds the ion MASS in Da on this route; m/z 246.3), z=+2, after Allen, Giles, Gilbert, Bush, Analyst 141 (2016) 884. Hard-sphere cross section 1.41e-18 m^2 (141 A^2 in He, measured in this RF-confining cell, ESI Tables S3/S4 of that reference). INTEGRATION: dt 0.2 ns, from the hard-sphere step advisory (dt <= tau_c/20; tau_c ~ 5.5 ns for this ion at rest); at 1.0 ns the kernel applies ~91% of the true collision rate. rec_every 10000 keeps ~2000 records per ion over t_max 4000 us, inside the 100k record cap. About 5x slower per ion than a 1.0 ns step. The cell has 56 rings so a detector plane at x = 78 mm stays inside it. Detector station (transparent, on_hit pass) on x at 77.25 mm, ten grid pitches inside the terminal bound so recorded steps bracket the crossing; it feeds the Impact Analysis tab and changes no flight. Detector window: window y, z = +/-2.5 mm: the bore radius of the electrode nearest the plane (ring_051), as a square about the axis because station windows are rectangles.",
  "geometry": {
   "width_mm": 86.5,
   "height_mm": 6.5,
@@ -1663,7 +1663,7 @@
    0.0
   ],
   "mz_list": [
-   490.5
+   492.5
   ],
   "charge": 2,
   "tob_span_us": 0.35714285714285715,
@@ -1675,7 +1675,7 @@
   "gas": "He",
   "T_k": 298.0,
   "P_torr": 3.5,
-  "sigma_m2": 1.55e-18,
+  "sigma_m2": 1.41e-18,
   "sigma_model": "fixed",
   "model": "hs",
   "gas_diam_nm": 0.366,
@@ -1686,9 +1686,9 @@
   ]
  },
  "integration": {
-  "dt_ns": 1.0,
+  "dt_ns": 0.2,
   "t_max_us": 4000,
-  "rec_every": 2000,
+  "rec_every": 10000,
   "max_records": 100000,
   "record_channels": [
    "radius",
@@ -1712,7 +1712,25 @@
   "z_min": -50.0,
   "z_max": 50.0
  },
- "stations": [],
+ "stations": [
+  {
+   "name": "detector",
+   "kind": "detect",
+   "on_hit": "pass",
+   "axis": "x",
+   "pos_mm": 77.25,
+   "window": {
+    "y": [
+     -2.5,
+     2.5
+    ],
+    "z": [
+     -2.5,
+     2.5
+    ]
+   }
+  }
+ ],
  "view": {
   "mode": "2d",
   "planes": [

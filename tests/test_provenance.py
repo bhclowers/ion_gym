@@ -1,6 +1,6 @@
 """test_provenance.py -- gate P: origin is recorded, and never invented.
 
-Charter P1-P5 (v144).  A number is worth what its origin is worth.  A formula
+Rules P1-P5.  A number is worth what its origin is worth.  A formula
 from a paper, a geometry read off a figure, a constant tuned by hand, and a
 value an external tool happened to print are four different kinds of claim; once they are
 all just floats in a module they are indistinguishable, and that is how a fitted
@@ -27,8 +27,8 @@ from pathlib import Path
 # merged below when that tree is present; on a public checkout the
 # shipped list is complete and the merge is a stated no-op.
 NEEDS_PROVENANCE = [
-    # q3r_geom.py REMOVED 2026-09-08: the Q3 study moved to
-    # internal/projects/q3/ with its gate. This list is SHIPPED
+    # q3r_geom.py REMOVED: the Q3 study moved to
+    # the development tree with its gate. This list is SHIPPED
     # modules only, so a module that no longer ships must not be
     # required here -- it failed as "module missing", which reads
     # as a lost provenance duty rather than a deliberate move. Its
@@ -40,8 +40,8 @@ NEEDS_PROVENANCE = [
     # provenance cannot name files the package no longer ships.
     # The five recovered legacy modules, provenance backfilled at
     # reconciliation (the list grows by adding provenance, never shrinks)
-    # tracer_gas.py REMOVED 2026-10-16 (D13, L-545, PI: "Delete dead
-    # modules"): no live importer -- only the retired
+    # tracer_gas.py REMOVED as a dead
+    # module: no live importer -- only the retired
     # validate_collisions_c2 -- so it no longer ships, and a list of
     # shipped modules cannot require it (same reasoning as q3r_geom above).
     "tracer_tdep.py",

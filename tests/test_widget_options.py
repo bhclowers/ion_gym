@@ -4,7 +4,7 @@ test_widget_options.py -- a selector's value is always one of its options.
 WHY THIS EXISTS. `pn.widgets.Select` does not re-point `value` when
 `options` is reassigned; a value that is no longer in the list simply
 stays there while the browser renders the first real option as though it
-were chosen. Measured on v523, three controls were dead in exactly that
+were chosen. Measured once, three controls were dead in exactly that
 way -- Cache-tab export ("nothing selected" after its own refresh),
 Cache-tab remove ("nothing to remove (refresh first)"), and Fields-tab
 Load field ("no field selected -- pick one") with a matching field
@@ -169,7 +169,7 @@ def test_every_refresh_leaves_every_selector_valid():
 
 def test_the_detector_fires_on_the_defect_it_is_written_for():
     """MUTATION CHECK. A green invariant test proves nothing unless the
-    detector fails on the broken case. Reproduce the v523 defect exactly
+    detector fails on the broken case. Reproduce that defect exactly
     -- a raw `.options =` assignment, no re-point -- and assert
     _violations reports it."""
     app = _app()

@@ -4,7 +4,7 @@ build_stl3d.py — FULL 3-D solve + flight for imported STL electrodes.
 This is the SimSpec->3D wiring milestone: it composes three individually
 validated legs with no new physics —
   * voxelize.voxelize_meshes  (Rung-2 voxelizer, reference-matched ±5.5 µm)
-  * solver3d.solve_bases      (native 3-D Laplace, gate-validated)
+  * multigrid3d.solve_bases_mg (native 3-D Laplace, gate-validated)
   * tracer3d.fly3d            (field-aware 3-D tracer from the
                                quad_monolithic validation, absolute clock)
 
@@ -28,22 +28,20 @@ import numpy as np
 from ion_gym.io.sim_spec import SimSpec, BASE_CHANNELS, OPTIONAL_CHANNELS
 from ion_gym.physics.sim_build import generate_births
 from ion_gym.physics.collision3d import KG_AMU, E_CHG
-from ion_gym.physics.solver3d import solve_bases
 from ion_gym.physics.tracer3d import fly3d
 from ion_gym.physics.raster2d import BirthInMetal
 # THE basis excitation (one definition, build_planar): solved at V_BASIS,
-# divided out to unit bases (L-552: this module retyped it locally).
+# divided out to unit bases (this module once retyped it locally).
 from ion_gym.physics.build_planar import V_BASIS
 
-# 3-D basis-solve settings, named rather than written into the calls
-# (L-552). Not in the cache key: they set the convergence target, and
+# 3-D basis-solve settings, named rather than written into the calls.
+# Not in the cache key: they set the convergence target, and
 # changing them must not silently invalidate every user's banked bases.
-STL3D_SOLVE_TOL = 1e-4      # relative residual target, multigrid and SOR
-STL3D_SOR_OMEGA = 1.9       # SOR over-relaxation (fallback solver only)
+STL3D_SOLVE_TOL = 1e-4      # relative residual target of the multigrid solve
 # The cache-key TEXT for the basis excitation. It must stay these exact
 # bytes ("1e4", not f"{V_BASIS:g}" = "10000"): every basis banked by a
 # user is keyed on them, and a re-key would re-solve every 3-D geometry
-# once for no physical change (PI ruling 2026-10-15). Tied to V_BASIS
+# once for no physical change. Tied to V_BASIS
 # by the check in _bases_cache_key, so the two cannot drift apart.
 _KEY_V_BASIS_TEXT = "1e4"
 
@@ -100,8 +98,8 @@ class Stl3DModel:
 
     def has_drive(self):
         """True if this model carries any time-dependent drive. Declared
-        by the model, read by pe_view.model_has_rf -- never sniffed
-        (2026-09-18). The authority is `chan_groups`, the channel-aligned
+        by the model, read by pe_view.model_has_rf -- never sniffed.
+        The authority is `chan_groups`, the channel-aligned
         group list build_stl3d_run attaches: every flown drive channel
         appears there, so it subsumes the display pair's rf_V (a nonzero
         rf_V needs an amplitude-bearing sin group, which is a channel).
@@ -210,7 +208,7 @@ class Stl3DModel:
         (default: the electrode-dense slice via _plane_slice).
 
         Per channel, by its resolved pe_mode (same reduction as the
-        planar and r-z models, L-456):
+        planar and r-z models):
           'pseudo' sin    : Dehmelt from the pack's OWN E stacks (the
                             fields the tracer flies, so field_method is
                             honoured here too), quadrature-composed per
@@ -224,7 +222,7 @@ class Stl3DModel:
                             t_us to watch the wave march.
         A channel's offset_v is a static shift and is ALWAYS included
         (charge * off * phi_k), matching the 2-D routes where it folds
-        into A. Pseudo terms need an m/z; with mz=None the surface is
+        into A. Pseudo terms need the ion (mass and charge); with mz=None the surface is
         the mass-independent part (static + offsets + instant drives).
 
         SUPERSEDED here: the single representative RF pair (rf_V * B)
@@ -310,7 +308,7 @@ class Stl3DModel:
             else:
                 # tables (kinds 3/4) and anything unnamed: no adiabatic
                 # envelope. This else once caught tables as sinusoids
-                # (fac 1.0) and drew a wrong surface silently (L-520);
+                # (fac 1.0) and drew a wrong surface silently;
                 # refused exactly as build_planar's pe_surface does.
                 raise ValueError(
                     f"pe_surface: drive group {gr.name!r} (waveform kind "
@@ -373,7 +371,15 @@ def stl_masks_3d(spec: SimSpec, verbose=False):
         if verbose:
             print(f"  loaded {el.stl} -> {len(m.faces)} faces")
     lab = voxelize_meshes(meshes, grid)
-    return {i: (lab == i) for i in meshes}
+    from ion_gym.physics.raster2d import refuse_empty_mask
+    masks = {i: (lab == i) for i in meshes}
+    # the same zero-node rule as the shapes routes: a mesh thinner than
+    # the pitch, outside the domain, or entirely inside another
+    # electrode's mesh leaves this electrode out of the solve
+    for i, m in masks.items():
+        refuse_empty_mask(g.electrodes[i - 1], m, route="3-D STL builder",
+                          pitch_mm=h)
+    return masks
 
 
 _WAVE_KIND = {"sin": 0, "cos": 1, "square": 2, "table": 3}
@@ -474,7 +480,7 @@ def clear_memory_cache():
 
 def unsupported_drive_features(spec):
     """Declared drive features the 3-D channel pack does NOT apply:
-    NONE, as of 2026-09-16 (L-455). A group with amplitude_v == 0 but a
+    NONE. A group with amplitude_v == 0 but a
     non-zero offset_v is packed (the offset is its drive), and a table
     group's interp is packed as declared (hold -> kind 3, linear ->
     kind 4). Kept as the route's contract statement for the field
@@ -490,7 +496,7 @@ def compose_drive_channels(spec, bases, ele, verbose=False):
     `ele` is the RASTERED LABEL GRID (electrode index per voxel, 0 =
     vacuum; same shape as every basis) -- the one geometry the solve used.
     The electrode-aware gradient applies its one-sided rule at voxels
-    next to it, so it is REQUIRED (L-518): the builder used to hand it
+    next to it, so it is REQUIRED: the builder used to hand it
     over by setting an attribute on the bases dict, which always failed
     silently, and the composer then GUESSED metal as basis > 0.5 -- the
     real electrode plus a shell of vacuum around it.
@@ -586,7 +592,7 @@ def compose_drive_channels(spec, bases, ele, verbose=False):
     # visible.
     # a group with amplitude 0 but a non-zero offset_v still drives its
     # members at that DC shift (w = amp*base + off), so it stays a live
-    # channel — dropping it dropped the offset (L-455)
+    # channel — dropping it dropped the offset
     _active = [(nm, gr) for nm, gr in groups.items()
                if nm in used and (gr.amplitude_v
                                   or getattr(gr, "offset_v", 0.0))]
@@ -619,7 +625,7 @@ def compose_drive_channels(spec, bases, ele, verbose=False):
                 f"group {name!r} waveform {gr.waveform!r} unsupported; "
                 f"one of {sorted(_WAVE_KIND)}")
         if kind == 3 and getattr(gr, "interp", "hold") != "hold":
-            kind = 4          # table-linear: interp as DECLARED (L-455)
+            kind = 4          # table-linear: interp as DECLARED
         _cg = _rw["grads"].get(name)
         if _cg is None:
             Ex, Ey, Ez = build_field_aware_3d(group_phi[name], ele, h,
@@ -668,7 +674,7 @@ def compose_drive_channels(spec, bases, ele, verbose=False):
     if verbose:
         print(f"[compose] channel {_ntot}/{_ntot} (static DC): "
               f"gradient {_t.time() - _t0:.1f}s", flush=True)
-    # PER-GROUP POTENTIALS retained for the instant PE view (L-456): one
+    # PER-GROUP POTENTIALS retained for the instant PE view: one
     # float32 volume per driven group, in channel order — the same arrays
     # this compose already allocated. The runner POPS them onto the
     # display model; they never enter the staged-flight pack.
@@ -741,6 +747,11 @@ def _bases_cache_key(spec, geom_bytes=None, tag="stl3d-v1"):
     # every stale entry.
     h.update(b"mirror-bc-fix-2026-07-19")
     h.update(repr(_declared_mirror_axes(spec)).encode())
+    # THE SOLVE CODE (physics.solve_code): a change to the 3-D solver, the
+    # voxelizer or the rasterizers gives every cached 3-D field a new key,
+    # so a fix reaches cached geometries without a hand-bumped marker
+    from ion_gym.physics.solve_code import solve_code_key
+    h.update(f"solve-code|{solve_code_key()}".encode())
     if geom_bytes is None:
         from ion_gym.io.stl_resolve import resolve_stl_dir
         sdir = resolve_stl_dir(spec)
@@ -777,6 +788,65 @@ def _bases_cache_key(spec, geom_bytes=None, tag="stl3d-v1"):
     h.update(f"{pitch:.9g}|{nx}|{ny}|{nz}|{tag}|ghost_linear|"
              f"{_KEY_V_BASIS_TEXT}".encode())
     return {f"{tag}_bases": h.hexdigest()}
+
+
+# More than this fraction of an electrode's metal outside every all-metal
+# cell is announced: ions pass through that part. A named default, not a
+# derived number: staircase surfaces of curved shapes leave a few percent
+# (0-2.2 % across the stored 3-D decks), and thin wires a quarter.
+THIN_METAL_WARN_FRACTION = 0.05
+
+
+def _refuse_thin_metal_3d(spec, masks, metal, grid_idx, h):
+    """The 3-D hit test counts a point as in metal only inside a cell whose
+    eight corners are all metal, so metal one node thick never stops an ion
+    (a plate of 225 Dirichlet nodes once let an ion cross it, where planar
+    and r-z stop it). REFUSE a non-grid electrode none of whose metal the
+    hit test can see; WARN when more than THIN_METAL_WARN_FRACTION of an
+    electrode's metal is invisible to it. is_grid electrodes are exempt:
+    they are transparent by declaration."""
+    from ion_gym.physics.tracer3d import nodes_the_hit_rule_sees
+    seen = nodes_the_hit_rule_sees(metal)
+    for idx in sorted(masks):
+        if idx in grid_idx:
+            continue
+        el = spec.geometry.electrodes[idx - 1]
+        m = np.asarray(masks[idx], bool)
+        n = int(m.sum())
+        if n == 0:
+            continue                    # the zero-node refusal names it
+        n_unseen = int((m & ~seen).sum())
+        if n_unseen == n:
+            raise ValueError(
+                f"3-D builder: electrode {idx} ({el.name!r}) has {n} metal "
+                f"node(s) and NONE lies in a cell whose eight corners are "
+                f"all metal, so ions fly straight through it (a layer one "
+                f"node thick at {h:g} mm/gu). Make it at least two nodes "
+                f"({2 * h:g} mm) thick, use a finer pitch, or declare "
+                f"is_grid: true if it is meant to be transparent.")
+        if n_unseen > THIN_METAL_WARN_FRACTION * n:
+            print(f"[stl3d] WARNING: electrode {idx} ({el.name!r}): "
+                  f"{n_unseen} of {n} metal nodes ({n_unseen / n:.1%}) lie in "
+                  f"no all-metal cell, so ions pass through those parts "
+                  f"(metal thinner than two nodes at {h:g} mm/gu). Refine "
+                  f"the pitch or thicken the metal where ions must stop.")
+
+
+def _solve_stl3d_bases(masks, mirror_axes, verbose):
+    """The 3-D basis solve: {electrode index: unit basis, float32}. Its
+    own function so physics.solve_code can key cached fields on exactly
+    this code (and not on the flight set-up around it)."""
+    # Multigrid (full-cycle convergence + verified symmetric-subspace
+    # projection). A full 3-D user STL scene is exactly the large, open
+    # problem SOR crawls on (the einzel needed ~16k SOR sweeps); multigrid
+    # solves it in ~100. Imported unguarded: multigrid3d is part of this
+    # package, so failing to import it is a broken install, and solving by
+    # another solver instead would make the field depend on that accident.
+    from ion_gym.physics.multigrid3d import solve_bases_mg
+    bases = solve_bases_mg(masks, mirror=mirror_axes,
+                           v_basis=V_BASIS, tol=STL3D_SOLVE_TOL,
+                           stencil="ghost_linear", verbose=verbose)
+    return {i: (b / V_BASIS).astype(np.float32) for i, b in bases.items()}
 
 
 def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
@@ -817,6 +887,16 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
                  if k.startswith("basis_")}
         lab = cached["labels"]
         masks = {i: (lab == i) for i in bases}
+        # ZERO-NODE RULE ON A CACHE HIT, as on the planar and r-z routes:
+        # no rasterization runs here, so it is checked on the solved bases
+        # (an electrode with no nodes has an identically zero basis), and
+        # the refusal does not depend on what the cache happens to hold.
+        from ion_gym.physics.raster2d import refuse_empty_mask
+        for _i, _b in bases.items():
+            refuse_empty_mask(spec.geometry.electrodes[_i - 1],
+                              np.asarray(_b) != 0,
+                              route="3-D builder (cache hit)",
+                              pitch_mm=spec.geometry.mm_per_gu)
         t_vox = t_solve = 0.0
         # UNCONDITIONAL (an unexplained re-solve is a diagnosis nobody
         # should have to guess at):
@@ -833,28 +913,7 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
         t_vox = time.time() - t0
 
         t0 = time.time()
-        # Corrected multigrid (this session's fix: honest full-cycle
-        # convergence + verified symmetric-subspace projection). A full 3-D
-        # user STL scene is exactly the large, open problem SOR crawls on
-        # (the einzel needed ~16k SOR sweeps); multigrid solves it in ~100.
-        # Falls back to SOR if unavailable.
-        try:
-            from ion_gym.physics.multigrid3d import solve_bases_mg
-        except ImportError as e:
-            # ImportError ONLY -- the SAME silent solver swap as build_planar.
-            # `except Exception` also caught multigrid THROWING and recomputed
-            # the field with a DIFFERENT SOLVER, unannounced.
-            print(f"[stl3d] multigrid unavailable ({e}); solving by SOR")
-            bases = solve_bases(masks, mirror=mirror_axes,
-                                v_basis=V_BASIS, tol=STL3D_SOLVE_TOL,
-                                stencil="ghost_linear", verbose=verbose,
-                                omega=STL3D_SOR_OMEGA)
-        else:
-            bases = solve_bases_mg(masks, mirror=mirror_axes,
-                                   v_basis=V_BASIS, tol=STL3D_SOLVE_TOL,
-                                   stencil="ghost_linear", verbose=verbose)
-        bases = {i: (b / V_BASIS).astype(np.float32)
-                 for i, b in bases.items()}
+        bases = _solve_stl3d_bases(masks, mirror_axes, verbose)
         t_solve = time.time() - t0
         try:
             lab = np.zeros(next(iter(masks.values())).shape, np.uint8)
@@ -915,13 +974,19 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
     ele = np.zeros(next(iter(bases.values())).shape, np.int16)
     for idx in sorted(masks):
         ele[masks[idx]] = int(idx)
-    metal = ele > 0
     h = spec.geometry.mm_per_gu
+    # THE HIT MASK. is_grid electrodes are Dirichlet in the solve and
+    # TRANSPARENT to the flight, as on planar and r-z (they were opaque
+    # walls here); every other electrode is metal the kernel can hit.
+    _grid_idx = {i for i in masks
+                 if getattr(spec.geometry.electrodes[i - 1], "is_grid", False)}
+    metal = np.isin(ele, [i for i in masks if i not in _grid_idx])
+    _refuse_thin_metal_3d(spec, masks, metal, _grid_idx, h)
 
     # MULTIDRIVE: one channel per declared group; an electrode may join
     # several (ElectrodeSpec.group_names) plus DC. Supersedes the single
     # A/B sin pair. The tracer sums channels with per-channel waveforms.
-    # The label grid goes in EXPLICITLY (L-518; it was stashed as an
+    # The label grid goes in EXPLICITLY (it was stashed as an
     # attribute on a plain dict, which always failed silently).
     channels = compose_drive_channels(spec, bases, ele, verbose=verbose)
     # A7 SYMMETRY GATE: after EVERY mirrored build, prove —
@@ -1025,7 +1090,7 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
 
         Delegates to physics.stations.kernel_planes — the ONE
         implementation of the station contract, shared with every other
-        route (extracted from this closure 2026-09-12; it had been
+        route (extracted from this closure; it had been
         stl3d-private, which is why planar/r-z/stl2d silently ignored
         stations). This route unfolds mirrored axes, so it passes its
         world offset: the deck is authored in the canonical [-H,+H]
@@ -1094,11 +1159,11 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
 
     # seed policy resolved ONCE per run (random/fixed per source.seed)
     from ion_gym.physics.ion_envelope import run_seed_base
-    _seed_base = run_seed_base(spec)
+    _seed_base = run_seed_base(spec, verbose=verbose)
     # LOUD capacity check (the old silent 100k cap hid mid-flight
     # truncation): announce BEFORE flying if the recording cannot cover
     # t_max, with the numbers and the levers.
-    _mrec = int(integ.max_records)    # the spec's field, no local default (L-557)
+    _mrec = int(integ.max_records)    # the spec's field, no local default
     _need = int(integ.t_max_us * 1e3 / (integ.dt_ns * max(int(integ.rec_every), 1))) + 2
     if _need > _mrec:
         _t_cover = _mrec * integ.dt_ns * max(int(integ.rec_every), 1) * 1e-3
@@ -1228,8 +1293,8 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
             "e_x": _ex_a, "e_y": _ey_a, "e_z": _ez_a,
             "radius": np.sqrt(out["x"][:n] ** 2 + out["y"][:n] ** 2),
             # KERNEL-DEPENDENT channels. n_col follows THE collision-count
-            # rule every route applies (sds.SDS_NO_COLLISION_COUNT, PI
-            # 2026-10-14): NaN under SDS (no discrete collisions exist --
+            # rule every route applies (sds.SDS_NO_COLLISION_COUNT):
+            # NaN under SDS (no discrete collisions exist --
             # never a 0, which would read as a collisionless flight), and
             # for HS the kernel's own count, read directly so a kernel
             # that omits it raises rather than defaults. wrap_passes: None
@@ -1280,7 +1345,7 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
         _ey = float(_fy) + _off[1]
         _ez = float(_fz) + _off[2]
         _kind, _tof = int(out["kind"]), float(out["tof_us"])
-        # DRIFT EXTENSION (L-286): an ion that left the solved box toward
+        # DRIFT EXTENSION: an ion that left the solved box toward
         # a declared station or bound beyond it gets ONE analytically
         # exact ballistic record (physics.drift_extension -- the same
         # function the planar and r-z routes call), ending on a
@@ -1338,7 +1403,7 @@ def build_stl3d_run(spec: SimSpec, verbose=False, masks_fn=None,
         f"3-D column desync: {col_names} != {spec.column_names()}")
     assert _ncol_3d == len(col_names), "3-D row width != column count"
     model.fly_fields = _fly_fields
-    # channel-aligned display surfaces for the instant PE view (L-456):
+    # channel-aligned display surfaces for the instant PE view:
     # potentials per group plus the RFGroupSpec each channel came from
     # (pe_mode/waveform resolution needs the group object, and the model
     # deliberately does not hold the whole spec)

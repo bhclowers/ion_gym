@@ -4,7 +4,7 @@ ion_gym.tracer3d
 Full-3D ion tracer for node-centred grids, validated on the
 quad_monolithic article (see internal validation record).
 
-Field model (v63, MULTI-DRIVE CHANNEL KERNEL):
+Field model (MULTI-DRIVE CHANNEL KERNEL):
 
     E(x, t) = E_A(x) + sum_k  w_k(t) * E_k(x)                    (V/mm)
 
@@ -19,7 +19,7 @@ Waveform kinds (ch_kind): 0 sin, 1 cos, 2 sign(sin) [square], 3 table-hold,
 4 table-linear. Each channel carries an AFFINE envelope w_k = amp*base + off:
 the legacy single-sinusoid model s(t)=sin(w t)*rf_V+dc_V is one
 sin channel with amp=rf_V, off=dc_V over the single B basis, reproducing the
-v61 arithmetic BIT-FOR-BIT (see test_multidrive3d Gate 1). Tables carry volts
+legacy arithmetic BIT-FOR-BIT (see test_multidrive3d Gate 1). Tables carry volts
 directly (amp=1, off=0) and bake to breakpoint arrays before the fly.
 
 Conventions carried from the validated 2-D work:
@@ -40,10 +40,11 @@ from numba import njit
 from ion_gym.physics.collision3d import (hs_collision_step, gas_flow,
                                          gas_kernel_scalars, resolve_collisions)
 import ion_gym.physics.sds as _sds  # module ref without the package-root edge
-from ion_gym.physics.sds import (_diff_dist_steps, _sphere_rand,
+from ion_gym.physics.sds import (icdf_jump_steps, isotropic_vector,
                                  N_DIST_COLLISIONS as _NDC)
 
 from ion_gym.physics.constants import E_CHG, KG_AMU as AMU  # noqa: E402
+from ion_gym.physics.numba_rng import call_rng_preserved
 
 # waveform-kind codes (shared with build_planar semantics)
 K_SIN, K_COS, K_SQUARE, K_TAB_HOLD, K_TAB_LIN = 0, 1, 2, 3, 4
@@ -150,6 +151,26 @@ def _tri(F, x, y, z, nx, ny, nz):
     return c0 * (1 - tz) + c1 * tz
 
 
+def nodes_the_hit_rule_sees(hit):
+    """Metal nodes (bool (nx,ny,nz)) that are a corner of at least one cell
+    whose eight corners are all metal -- the only metal _in_metal_3d can
+    ever report. Metal outside it (a layer one node thick, a lone node) is
+    a Dirichlet boundary in the solve that ions fly straight through."""
+    hit = np.asarray(hit, bool)
+    if min(hit.shape) < 2:
+        return np.zeros_like(hit)
+    c = (hit[:-1, :-1, :-1] & hit[1:, :-1, :-1] & hit[:-1, 1:, :-1]
+         & hit[1:, 1:, :-1] & hit[:-1, :-1, 1:] & hit[1:, :-1, 1:]
+         & hit[:-1, 1:, 1:] & hit[1:, 1:, 1:])
+    seen = np.zeros_like(hit)
+    for di in (0, 1):
+        for dj in (0, 1):
+            for dk in (0, 1):
+                seen[di:di + c.shape[0], dj:dj + c.shape[1],
+                     dk:dk + c.shape[2]] |= c
+    return seen
+
+
 @njit(cache=True, fastmath=False, inline="always", nogil=True)
 def _in_metal_3d(ele, x, y, z, nx, ny, nz):
     """ALL-EIGHT-corners voxel rule at grid-unit coords. Outside box: False."""
@@ -185,17 +206,22 @@ def refuse_birth_in_metal_3d(ele, h_mm, x_mm, y_mm, z_mm, ion_label="",
     ele = np.ascontiguousarray(ele)
     nx, ny, nz = ele.shape
     inv_h = 1.0 / float(h_mm)
+    who = f"{ion_label} " if ion_label else ""
+    # Report in the DECK frame the author writes in (a
+    # signed-origin deck once got stored-frame numbers it could not
+    # recognize). world_off_mm composes mirror + declared origin;
+    # zeros on legacy decks, where both readings coincide.
+    ox, oy, oz = (float(v) for v in world_off_mm)
+    wx, wy, wz = x_mm + ox, y_mm + oy, z_mm + oz
+    stored = ("" if not (ox or oy or oz) else
+              f" [stored frame ({x_mm:.3f}, {y_mm:.3f}, {z_mm:.3f})]")
+    from ion_gym.physics.birth_domain import refuse_birth_outside
+    refuse_birth_outside(
+        (nx, ny, nz), (x_mm * inv_h, y_mm * inv_h, z_mm * inv_h),
+        ("x", "y", "z"), h_mm, who,
+        f"(x={wx:.3f}, y={wy:.3f}, z={wz:.3f}) mm (deck frame){stored}")
     if _in_metal_3d(ele, x_mm * inv_h, y_mm * inv_h, z_mm * inv_h,
                     nx, ny, nz):
-        who = f"{ion_label} " if ion_label else ""
-        # Report in the DECK frame the author writes in (a
-        # signed-origin deck once got stored-frame numbers it could not
-        # recognize). world_off_mm composes mirror + declared origin;
-        # zeros on legacy decks, where both readings coincide.
-        ox, oy, oz = (float(v) for v in world_off_mm)
-        wx, wy, wz = x_mm + ox, y_mm + oy, z_mm + oz
-        stored = ("" if not (ox or oy or oz) else
-                  f" [stored frame ({x_mm:.3f}, {y_mm:.3f}, {z_mm:.3f})]")
         from ion_gym.physics.raster2d import BirthInMetal
         raise BirthInMetal(
             f"{who}birth at (x={wx:.3f}, y={wy:.3f}, z={wz:.3f}) mm "
@@ -293,7 +319,7 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
     cycles apart and the transverse motion between them is not smooth.
 
     Bit-exactness note: for a single sin channel (amp=rf_V, off=dc_V) the
-    per-substep scalar amp*sin(om*t+ph)+off equals the v61 fused scalar
+    per-substep scalar amp*sin(om*t+ph)+off equals the legacy fused scalar
     sin(om*t)*rf_V+dc_V (IEEE mul is commutative, +0.0 phase is identity), and
     the field is assembled as A + w*B in the same association -> array_equal
     with tracer3d_v61_frozen (test_multidrive3d Gate 1)."""
@@ -303,7 +329,7 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
     # m_ion_amu (true ion mass, Da) is a PARAMETER: it was formerly
     # back-derived as (E_CHG/qm)/AMU, which equals mass/charge and is
     # only correct for charge=1 — at z=2 the collision partner
-    # kinematics ran at HALF the ion mass (issues.md 2026-09-09).
+    # kinematics ran at HALF the ion mass.
     ncol = 0
     if collide_on:
         np.random.seed(seed)
@@ -316,7 +342,7 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
     nrec = 1
     step = 0
     kind = 2
-    hit_ip = -1      # index of the terminating plane, -1 if none (L-165)
+    hit_ip = -1      # index of the terminating plane, -1 if none
     tp_d = tp_emit - tp_accept
     tp_pass = 0
     wrs[0] = 0
@@ -392,7 +418,7 @@ def _fly3d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
 
         # HS buffer-gas collision (full 3-D; the shared gas-frame step,
         # collision3d.hs_collision_step, against the declared flow
-        # (gfx, gfy, gfz) mm/us -- L-563). Velocities are carried in m/s
+        # (gfx, gfy, gfz) mm/us). Velocities are carried in m/s
         # here, converted to mm/us for collision3d; the step is dt_s with
         # 1e6 to us, in the (sp * dt_s) * 1e6 order this kernel used.
         if collide_on:
@@ -563,7 +589,7 @@ def _empty_channels(shape):
 
 def single_sin_channels(EBx, EBy, EBz, rf_V, dc_V, om_rad_us, ph_rad=0.0):
     """Pack the legacy single-sinusoid model s(t)=sin(w t)*rf_V+dc_V as ONE
-    affine sin channel over the B basis. Reproduces v61 arithmetic
+    affine sin channel over the B basis. Reproduces the legacy arithmetic
     bit-for-bit in _fly3d."""
     return dict(
         ExK=np.ascontiguousarray(EBx[None]),
@@ -614,11 +640,29 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
     values) -> HS buffer-gas scattering (same model as the 2-D kernel),
     reproducible per-ion via `seed`. A declared flow_mm_us is MODELLED:
     each collision is drawn in the moving gas's frame
-    (collision3d.hs_collision_step; L-563, PI ruling 2026-10-16 -- it was
-    refused here, and ignored on the other HS routes).
+    (collision3d.hs_collision_step), as on every hard-sphere route.
 
     `ion_label` (e.g. "ion 7"): names the ion in the birth-in-metal
-    refusal; empty -> position-only diagnostic."""
+    refusal; empty -> position-only diagnostic.
+
+    Arguments (units in brackets; [-] is dimensionless):
+      fields        [-]      solved fields as above (V/mm on a grid of
+                             pitch h_mm)
+      mz_Da         [Da]     ion MASS (mz_list holds masses)
+      r0_mm         [mm]     birth position (3,), local frame
+      v0_mm_us      [mm/us]  birth velocity (3,)
+      tob_us        [us]     time of birth
+      dt_ns         [ns]     step
+      t_max_us      [us]     time limit
+      record_every  [-]      steps between recorded points
+      max_records   [-]      size of the record buffers
+      collisions    [-]      None, a CollisionSpec or a dict (as above)
+      seed          [-]      per-ion seed of the gas draws
+      planes        [mm]     bounding/station planes, (axis, value_mm,
+                             sign[, window_mm, kind]) entries
+      ion_label     [-]      name used in refusals
+      transporter   [-]      transporter plane pair, or None
+      charge        [e]      signed charge state"""
     ch = _resolve_channels(fields)
     refuse_birth_in_metal_3d(
         fields["ele"], fields["h_mm"],
@@ -640,7 +684,7 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
 
     def _get(o, k, d=None):
         return getattr(o, k, d) if not isinstance(o, dict) else o.get(k, d)
-    # The one gas authority (L-531, R3): missing fields take the spec's
+    # The one gas authority: missing fields take the spec's
     # values; vacuum resolves nothing (the scalars are then inert --
     # every use in the kernel sits under `collide_on`).
     _col = resolve_collisions(collisions)
@@ -672,7 +716,7 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
     # crossing directions. Window SENSE depends on kind: kind 5
     # (impact plane) is a PLATE — inside passes, outside splats;
     # kind 6 (detect) is a DETECTOR PATCH — inside ABSORBS (fate 6,
-    # the detection event), outside passes (ruled 2026-09-12:
+    # the detection event), outside passes (the rule:
     # record = pass+log, detect = splat+log).
     pl_col, pl_val, pl_sgn, pl_w, pl_kind = pack_planes(planes, "fly3d")
     # TRANSPORTER contract: dict/namespace with axis ('x'|'y'|
@@ -692,7 +736,7 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
         tp_col, tp_accept, tp_emit, tp_sgn, tp_maxp = -1, 0.0, 0.0, -1.0, 1
     wrs = np.zeros(max_records, np.int64)
 
-    nrec, x, y, z, vx, vy, vz, t, kind, ncol, hit_ip = _fly3d(
+    nrec, x, y, z, vx, vy, vz, t, kind, ncol, hit_ip = call_rng_preserved(_fly3d,
         qm, float(mz_Da), float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         v0_mm_us[0] * 1e3, v0_mm_us[1] * 1e3, v0_mm_us[2] * 1e3,
         float(tob_us), dt_ns * 1e-9, t_max_us * 1e-6,
@@ -734,7 +778,7 @@ def fly3d(fields, mz_Da, r0_mm, v0_mm_us, tob_us, dt_ns=1.0, t_max_us=50.0,
                 v_mm_us=np.array([vx, vy, vz]) * 1e-3, kind=kind, ncol=ncol,
                 # index into `planes` of the plane that terminated the
                 # flight, -1 if none: FACE IDENTITY, so a caller can tell a
-                # seam from a bound without a position test (L-165)
+                # seam from a bound without a position test
                 plane_hit=int(hit_ip),
                 truncated=truncated,
                 final_xyz_mm=(float(x), float(y), float(z)),
@@ -752,7 +796,7 @@ def _sds_field(EAx, EAy, EAz, ExK, EyK, EzK, ch_kind, ch_om, ch_ph,
     """Total E (V/mm) at grid coords (gx,gy,gz), time tt — the ONE
     field authority for the SDS kernel: the motion loop and the
     record buffer both call this, so a recorded field is exactly the
-    field the ion felt (2026-09-12 extension: SDS records ex/ey/ez
+    field the ion felt (SDS records ex/ey/ez
     like the base kernel, so field channels are available under
     model='sds' instead of refusing)."""
     ex = _tri(EAx, gx, gy, gz, nx, ny, nz)
@@ -813,8 +857,8 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
                xs, ys, zs, ts, vxs, vys, vzs, exs, eys, ezs,
                record_every, pl_col, pl_val, pl_sgn, pl_w, pl_kind):
     """SDS dynamics in mm/us: field acceleration damped toward the mobility
-    drift (Stokes, apply_stokes_damping) + ICDF random-walk diffusion
-    (apply_diffusion). Faithful to the published SDS formulation. Gas P,T,velocity are
+    drift (viscous relaxation) + a random-walk diffusion jump each step
+    (physics.sds). Gas P,T,velocity are
     uniform here, so damping/mfp/V are per-ion scalars. Returns
     (nrec, x,y,z, vx,vy,vz, t_us, kind)."""
     np.random.seed(seed)
@@ -831,7 +875,7 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
         ch_off, ch_duty, tab_t, tab_v, tab_off,
         x * inv_h, y * inv_h, z * inv_h, tob_us, nx, ny, nz, K)
     nrec = 1; step = 0; kind = 2
-    hit_ip = -1      # index of the terminating plane, -1 if none (L-165)
+    hit_ip = -1      # index of the terminating plane, -1 if none
 
     while t < t_max_us:
         tt = tob_us + t
@@ -843,7 +887,7 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
         # field acceleration in mm/us^2  (a[m/s2]*1e-9; qm*E[V/mm]*1e-6)
         afx = qm * 1e-6 * ex; afy = qm * 1e-6 * ey; afz = qm * 1e-6 * ez
 
-        # Stokes' law viscous mobility (apply_stokes_damping)
+        # viscous mobility: relax toward K*E (exact over the step)
         if damping > 0.0:
             tterm = damping * dt_us
             factor = (1.0 - math.exp(-tterm)) / tterm
@@ -862,12 +906,12 @@ def _fly3d_sds(qm, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_us, t_max_us,
         to = t
         x = x + vx * dt_us; y = y + vy * dt_us; z = z + vz * dt_us
 
-        # random-walk diffusion (apply_diffusion)
+        # random-walk diffusion: a jump drawn from the jump statistics
         if diffusion_on and mfp_mm > 0.0:
-            dist_steps = _diff_dist_steps(stats, log_mr)
+            dist_steps = icdf_jump_steps(stats, log_mr)
             ncoll = V_mm_us / mfp_mm * dt_us
             r = math.sqrt(ncoll / _N_DIST_COLLISIONS) * dist_steps * mfp_mm
-            jx, jy, jz = _sphere_rand(r)
+            jx, jy, jz = isotropic_vector(r)
             x = x + jx; y = y + jy; z = z + jz
 
         t += dt_us; step += 1
@@ -994,8 +1038,27 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
     `charge` is the signed integer charge state and enters the FORCE,
     q/m = charge*e/(mass*amu), exactly as on the planar SDS route: with
     the Stokes damping q/(m*K) the drift is then sign(z)*K*E. This
-    wrapper once used q/m = e/m (L-427), so a z = 2 ion drifted at half
-    its mobility and a negative ion drifted the wrong way."""
+    wrapper once used q/m = e/m, so a z = 2 ion drifted at half its
+    mobility and a negative ion drifted the wrong way.
+
+    Arguments (units in brackets; [-] is dimensionless):
+      fields        [-]      solved fields, as fly3d
+      mz_Da         [Da]     ion MASS
+      charge        [e]      signed charge state
+      r0_mm         [mm]     birth position (3,), local frame
+      v0_mm_us      [mm/us]  birth velocity (3,)
+      tob_us        [us]     time of birth
+      collisions    [-]      CollisionSpec or dict; pressure is read as
+                             P_torr [Torr], flow_mm_us [mm/us],
+                             gas_diam_nm [nm], T_k [K]
+      dt_ns         [ns]     step
+      t_max_us      [us]     time limit
+      record_every  [-]      steps between recorded points
+      max_records   [-]      size of the record buffers
+      seed          [-]      per-ion seed of the SDS draws
+      diffusion     [-]      False turns the diffusion jumps off
+      ion_label     [-]      name used in refusals
+      planes        [mm]     bounding/station planes, as fly3d"""
     refuse_birth_in_metal_3d(
         fields["ele"], fields["h_mm"],
         float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
@@ -1017,8 +1080,8 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
             f"fly3d_sds: collisions.flow_mm_us must be 3 values (mm/us), "
             f"got {list(col.flow_mm_us)}")
     # the shared SDS door (every route): the deck's gas by name (N2 is
-    # N2, PI 2026-10-14), its diameter, T, P, this ion's mass and charge
-    stats = _sds.load_tables()[0]
+    # N2), its diameter, T, P, this ion's mass and charge
+    stats = _sds.jump_statistics()
     P = _sds.sds_ion_params(col, mz_Da, charge)
 
     ch = _resolve_channels(fields)
@@ -1030,11 +1093,11 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
     vzs = np.empty(max_records)
     exs = np.empty(max_records); eys = np.empty(max_records)
     ezs = np.empty(max_records)
-    # Gas flow, from the spec's field (L-517: this read 'flow_m_s', a key
+    # Gas flow, from the spec's field (this once read 'flow_m_s', a key
     # that exists nowhere, so every declared flow was flown as still gas).
     # flow_mm_us is already in the kernel's mm/us.
     vg = flow
-    nrec, x, y, z, vx, vy, vz, t, kind, hit_ip = _fly3d_sds(
+    nrec, x, y, z, vx, vy, vz, t, kind, hit_ip = call_rng_preserved(_fly3d_sds,
         qm, float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         float(v0_mm_us[0]), float(v0_mm_us[1]), float(v0_mm_us[2]),
         float(tob_us), dt_ns * 1e-3, float(t_max_us),
@@ -1065,6 +1128,6 @@ def fly3d_sds(fields, mz_Da, charge, r0_mm, v0_mm_us, tob_us, collisions,
                 ex=exs[:nrec].copy(), ey=eys[:nrec].copy(),
                 ez=ezs[:nrec].copy(),
                 v_mm_us=np.array([vx, vy, vz]), kind=kind, sds=P,
-                plane_hit=int(hit_ip),    # as fly3d (L-165)
+                plane_hit=int(hit_ip),    # as fly3d
                 final_xyz_mm=(float(x), float(y), float(z)),
                 t_end_us=_t_end, truncated=bool(nrec >= len(xs)))

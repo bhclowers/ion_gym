@@ -18,20 +18,30 @@ from typing import List, Optional, Sequence
 
 import panel as pn
 
-from ion_gym.io.paths import repo_root   # THE repo root (L-551)
+from ion_gym.io.paths import examples_dir
+
+
+def deck_root() -> Path:
+    """The folder deck paths in the browser are written relative to: the
+    parent of examples_dir(). In a checkout that is the repo root, so the
+    picker shows `examples/<deck>.json` and a typed relative path resolves
+    from the repo root; in an installed package it is the package folder
+    that holds the packaged examples/, so the same `examples/<deck>.json`
+    strings resolve there."""
+    return examples_dir().parent
 
 
 def available_decks() -> List[str]:
-    """Repo-relative deck paths the browser offers NATIVELY: `examples/`
-    ONLY (internal example folders are not
+    """Deck paths, relative to deck_root(), the browser offers NATIVELY:
+    `examples/` ONLY (internal example folders are not
     exposed in the picker; internal decks load via the path/folder box
     like any other external document).  A missing directory is REPORTED
-    via the page (installed-without-repo layouts), never silently empty;
+    via the page, never silently empty;
     loading a deck the editor cannot edit refuses by name in-page, which
     is the designed behavior for e.g. the STL quads."""
-    root = repo_root()
+    root = deck_root()
     out: List[str] = []
-    p = root / "examples"
+    p = examples_dir()
     if p.is_dir():
         out.extend(sorted(str(f.relative_to(root))
                           for f in p.glob("*.json")))
@@ -53,7 +63,7 @@ def editor_page(title: str = "ion_gym geometry editor",
     from ion_gym.edit.editor_panel import EditorApp
     from ion_gym.edit.policy import EditRefusal
 
-    root = repo_root()
+    root = deck_root()
     options = list(deck_options) if deck_options else available_decks()
     missing_note = ""
     if not options:

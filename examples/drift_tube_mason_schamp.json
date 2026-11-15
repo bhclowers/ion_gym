@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "name": "drift_tube_mason_schamp",
- "notes": "Certified example: Mason-Schamp absolute-rate referee (nb16, 2026-08-13, all four gates PASS). Stacked-ring DC guide, NO RF: 28 rings w 0.5 / pitch 3 / r_in 8 / depth 6 mm (Bohnhorst-2016 ratios w/p 0.167, d/p 2.0), ladder 16.2->0 V = 0.2 V/mm (6.9 Td). Gas: C60 m/z 720 in He, 1.000 Torr, 298 K, sigma 1.25e-18 m^2 from measured Gillig K0 4.310. Smoothness certified pre-flight: on-axis max dev 8.6e-4, Eq.(7) delay bias <=7.9e-5 to Gamma 0.75, window x=[26,59] (>=3 R_ap from ends). CERTIFIED at dt=0.25 ns (plateau shown: 75.54/73.96/73.01/72.80 m/s at 2/1/0.5/0.25 ns): v_d 72.80+-0.32 m/s (n=413 window-complete of 500; walls 87 == diffusion prediction), K0 4.356 (+1.07% of anchor), Omega 123.4 A^2 (-1.30% of authored sigma), transit spread 40.4 vs Einstein 40.3 us. Verdict fn = ccs_reftool v0.11.0 core.py (drift_pack copy). dt >= 1 ns is fast-biased O(dt) even DC-only \u2014 quote at plateau.",
+ "notes": "Certified example: Mason-Schamp absolute-rate referee (all four gates PASS). Stacked-ring DC guide, NO RF: 28 rings w 0.5 / pitch 3 / r_in 8 / depth 6 mm (Bohnhorst-2016 ratios w/p 0.167, d/p 2.0), ladder 16.2->0 V = 0.2 V/mm (6.9 Td). Gas: C60 m/z 720 in He, 1.000 Torr, 298 K, sigma 1.25e-18 m^2 from measured Gillig K0 4.310. Smoothness certified pre-flight: on-axis max dev 8.6e-4, Eq.(7) delay bias <=7.9e-5 to Gamma 0.75, window x=[26,59] (>=3 R_ap from ends). CERTIFIED at dt=0.25 ns (plateau shown: 75.54/73.96/73.01/72.80 m/s at 2/1/0.5/0.25 ns): v_d 72.80+-0.32 m/s (n=413 window-complete of 500; walls 87 == diffusion prediction), K0 4.356 (+1.07% of anchor), Omega 123.4 A^2 (-1.30% of authored sigma), transit spread 40.4 vs Einstein 40.3 us. dt >= 1 ns is fast-biased O(dt) even DC-only \u2014 quote at plateau. Detector station (transparent, on_hit pass) on x at 81 mm, ten grid pitches upstream of the last ring's downstream face (83.5 mm): past the stack the drift field decays and ions stall before the domain edge, so the plane sits inside the stack where arrivals are guaranteed; it feeds the Impact Analysis tab and changes no flight. Detector window: window y, z = +/-8 mm: the bore radius of the electrode nearest the plane (ring_27), as a square about the axis because station windows are rectangles.",
  "geometry": {
   "width_mm": 85.5,
   "height_mm": 14.5,
@@ -839,5 +839,24 @@
  "builder": "",
  "import_path": "",
  "scene": null,
- "_display_name": "Drift Tube (Mason-Schamp)"
+ "_display_name": "Drift Tube (Mason-Schamp)",
+ "stations": [
+  {
+   "name": "detector",
+   "kind": "detect",
+   "on_hit": "pass",
+   "axis": "x",
+   "pos_mm": 81.0,
+   "window": {
+    "y": [
+     -8.0,
+     8.0
+    ],
+    "z": [
+     -8.0,
+     8.0
+    ]
+   }
+  }
+ ]
 }

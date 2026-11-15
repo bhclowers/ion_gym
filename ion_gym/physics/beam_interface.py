@@ -73,7 +73,7 @@ class Ledger:
                  rows=[asdict(r) for r in self.rows])
         s = json.dumps(d, indent=1, sort_keys=True)
         if path:
-            with open(path, "w") as fh:
+            with open(path, "w", encoding="utf-8") as fh:
                 fh.write(s)
         return s
 
@@ -88,7 +88,7 @@ class Ledger:
 
     def __str__(self):
         w = max(len(r.name) for r in self.rows) + 2
-        out = [f"BEAM_INTERFACE ledger '{self.name}'  (m/z {self.mz:g}, "
+        out = [f"BEAM_INTERFACE ledger '{self.name}'  (mass {self.mz:g} Da, "
                f"pot_ref {self.pot_ref:g} V)",
                f"  plane: {self.plane_def}"]
         for r in self.rows:

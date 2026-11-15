@@ -1,15 +1,52 @@
 [
  {
-  "family": "quadrupole",
-  "path": "/home/claude/ion_gym_541_dev/notebooks/panels/panel_quadrupole.png",
+  "family": "einzel",
+  "path": "notebooks/panels/panel_einzel.png",
   "route": "2d",
-  "seconds": 5.2,
+  "seconds": 9.1,
   "fates": [
-   2,
-   2,
-   2,
-   2,
-   2
+   3,
+   3,
+   3,
+   3,
+   3
+  ]
+ },
+ {
+  "family": "funnel",
+  "path": "notebooks/panels/panel_funnel.png",
+  "route": "2d",
+  "seconds": 3.5,
+  "fates": [
+   3,
+   3,
+   3,
+   3,
+   3
+  ]
+ },
+ {
+  "family": "drift_tube",
+  "path": "notebooks/panels/panel_drift_tube.png",
+  "route": "2d",
+  "seconds": 1.7,
+  "fates": [
+   0,
+   0,
+   0,
+   1,
+   0
+  ]
+ },
+ {
+  "family": "tof",
+  "path": "notebooks/panels/panel_tof.png",
+  "route": "2d",
+  "seconds": 4.9,
+  "fates": [
+   0,
+   0,
+   0
   ]
  }
 ]

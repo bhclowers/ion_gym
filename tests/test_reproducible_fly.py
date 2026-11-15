@@ -24,7 +24,7 @@ from ion_gym.io import sim_spec as S
 from ion_gym.physics import sim_build as SB
 
 # The reproducibility gate flies a SHIPPED example deck (
-# external review): the old v103 certified spec lived only on the
+# external review): the old certified spec lived only on the
 # certifying machine, so a public checkout turned this gate into a
 # reported no-op — a gate an outsider cannot run is not evidence. The
 # gate now asserts GENERIC reproducibility properties that hold for any

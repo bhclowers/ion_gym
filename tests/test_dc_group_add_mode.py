@@ -1,6 +1,6 @@
-"""DC-group ADD mode (float rails) — chartered by the PI 2026-09-29.
+"""DC-group ADD mode (float rails).
 
-The ruling: "I want groups to be additive" — a float group raises every
+The rule: groups are additive — a float group raises every
 member by the group's value while each member's own DC stays authored
 and editable. 'set' keeps the ladder semantics every shipped deck uses.
 

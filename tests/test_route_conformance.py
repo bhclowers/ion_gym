@@ -24,7 +24,7 @@ Contract cases, per covered route:
   R1  summary: every ion's summary carries kind/tof/mz/x_end/y_end/z_end,
       and summary["mz"] EQUALS sim_build.mz_of(spec, i) — the flown mass,
       from the single authority.
-  R2  birth in metal (PI ruling 2026-10-15): an ion born inside metal
+  R2  birth in metal: an ion born inside metal
       SPLATS AT BIRTH -- fate 0, one record row at the birth point,
       summary born_in_metal=True with a diagnostic naming the birth, and a
       printed warning -- and the run continues for every other ion. Never
@@ -174,7 +174,7 @@ def main():
         raise AssertionError("tw2d: in-metal birth flew")
     check("R2 tw2d (partial route): in-metal birth refuses loudly", t1)
 
-    # tw2d — R1-authority via the spec adapter (2026-09-09): the flown
+    # tw2d — R1-authority via the spec adapter: the flown
     # mass and charge COME FROM the spec, and charge genuinely reaches
     # the kernel (a 2+ ion gains twice the velocity of a 1+ ion of the
     # same mass in the same uniform field over the same time).

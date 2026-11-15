@@ -162,7 +162,7 @@ class GeomScene:
                         phi = np.array([p.cx + p.r, p.cy + p.r, p.z], float)
                     else:
                         # the else used to BE the cylinder, so any new
-                        # primitive would have been measured as one (L-554)
+                        # primitive would have been measured as one
                         raise _unknown_primitive(p, "extent_mm")
                     lo = np.minimum(lo, plo)
                     hi = np.maximum(hi, phi)
@@ -309,7 +309,7 @@ class GeomScene:
     def to_json(self, path=None) -> str:
         txt = json.dumps(self.to_dict(), indent=2)
         if path:
-            open(path, "w").write(txt)
+            open(path, "w", encoding="utf-8").write(txt)
         return txt
 
     @staticmethod
@@ -321,7 +321,7 @@ class GeomScene:
         if isinstance(src, dict):
             d = src
         else:
-            d = json.loads(open(src).read()
+            d = json.loads(open(src, encoding="utf-8").read()
                            if not src.lstrip().startswith("{") else src)
         def prim(p):
             return _PRIM_KINDS[p["kind"]](**{k: v for k, v in p.items()
@@ -338,7 +338,7 @@ class GeomScene:
 
 
 def _unknown_primitive(p, what):
-    """The refusing catch-all for the primitive kinds (L-554): each of the
+    """The refusing catch-all for the primitive kinds: each of the
     functions below used to let its fall-through BE the last known kind,
     so a new primitive would have been scaled or moved as a box or a
     cylinder without a word."""

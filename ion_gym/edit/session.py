@@ -219,7 +219,7 @@ class EditSession:
         # committed-state cache: every read of the document as it
         # WOULD SAVE goes through committed_doc(); _rev bumps on
         # every queue/undo/redo so the cache can never be stale.
-        # (v420 defect: pickers/fields read the ORIGINAL doc, so
+        # (An earlier defect: pickers/fields read the ORIGINAL doc, so
         # added shapes/electrodes were invisible to editing.)
         self._rev = 0
         self._committed_cache = (-1, None)
@@ -262,7 +262,7 @@ class EditSession:
         if el.get("stl"):
             return False, (f"electrode {el.get('name')!r} is STL-backed "
                            f"({el.get('stl')!r}): meshes are owned by "
-                           f"CAD (L-193 ruling); parametric shapes only")
+                           f"CAD; parametric shapes only")
         return True, None
 
     def _require_editable(self, i: int) -> str:
@@ -419,7 +419,7 @@ class EditSession:
                     "note": "planar with neither depth_mm nor "
                             "axial_extent_mm declared: this extent is a "
                             "DISPLAY placeholder (10% of the smaller "
-                            "in-plane dimension, PI 2026-08-25). It is "
+                            "in-plane dimension). It is "
                             "never written to the spec, never editable, "
                             "and never a dimension readout"}
         raise EditRefusal(
@@ -475,6 +475,22 @@ class EditSession:
         self._queue({"op": "set_color_all",
                      "color": normalize_color(color)})
 
+    def verified(self, edit) -> dict:
+        """Apply `edit` (a callable that queues ops) and verify the result
+        as ONE step. A refusal -- by the edit itself or by verify_commit --
+        removes every op the edit queued and restores the redo stack, so
+        'refused' means 'not applied' and a later save cannot write it.
+        Returns verify_commit's report."""
+        n_ops, redo = len(self._ops), list(self._redo)
+        try:
+            edit()
+            return self.verify_commit()
+        except EditRefusal:
+            del self._ops[n_ops:]
+            self._redo = redo
+            self._rev += 1
+            raise
+
     def undo_last(self) -> dict:
         """Pop and return the most recent edit op; refuses when there is
         nothing to undo (a no-op undo hides a user mistake)."""
@@ -501,7 +517,7 @@ class EditSession:
         """The document AS IT WOULD SAVE (original + queued ops),
         parsed.  THE read surface for pickers, fields, and drag
         bases — reading the original instead made added geometry
-        invisible (v420)."""
+        invisible."""
         if self._committed_cache[0] == self._rev:
             return self._committed_cache[1]
         doc = json.loads(self.to_document_bytes())
@@ -545,7 +561,7 @@ class EditSession:
                                f"(standing ruling)")
         h = float(self.spec.geometry.mm_per_gu)
         tol = h * PITCH_TOL_FRACTION
-        # every shape type has a rule (L-553: polygon vertices were never
+        # every shape type has a rule (polygon vertices were once never
         # checked against the pitch, and an unknown type got no warnings
         # at all, which reads as "checked, nothing wrong")
         num_keys = {"rect": ("x_mm", "y_mm", "width_mm", "height_mm"),

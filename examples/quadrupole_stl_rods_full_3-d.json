@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "name": "quadrupole \u2014 STL rods, full 3-D (120 mm)",
- "notes": "The four-rod quadrupole as built: 8.67 mm rods, 120 mm long, solved in full 3-D so the axial transport is real rather than assumed. STL files live in examples/quad_assembly/ (resolved relative to this spec); stl_manifest carries their sha256 so a run verifies the meshes are unchanged. Ions are injected at the entrance and drift along z under the RF confinement only. | L-218 SUB-CELL FIX (2026-09-03): source box [0.6, 0.6, 0.3] -> [1.0, 1.0, 1.0] mm (geometry and 0.5 mm pitch unchanged; no re-solve) so the declared source spans the 2.0-cell advisory line (was 1.20 cells); the prior numbers were exposed to the unresolved-packet-derivative failure mode L-216 measured (5x aberration inflation at 0.19 cells). The advisory line is not proof of convergence; quote packet derivatives from a pitch ladder.",
+ "notes": "The four-rod quadrupole as built: 8.67 mm rods, 120 mm long, solved in full 3-D so the axial transport is real rather than assumed. STL files live in examples/quad_assembly/ (resolved relative to this spec); stl_manifest carries their sha256 so a run verifies the meshes are unchanged. Ions are injected at the entrance and drift along z under the RF confinement only. SOURCE SIZE: the source box is [1.0, 1.0, 1.0] mm at the 0.5 mm pitch, so the declared source spans the 2.0-cell advisory line; a [0.6, 0.6, 0.3] mm box (1.20 cells) is exposed to the unresolved-packet-derivative failure mode (about 5x aberration inflation measured at 0.19 cells). The advisory line is not proof of convergence; quote packet derivatives from a pitch ladder. Detector station (transparent, on_hit pass) on z at 114 mm, ten grid pitches inside the terminal bound so recorded steps bracket the crossing; it feeds the Impact Analysis tab and changes no flight. Detector window: window x, y = centre (10.2489, 10.1454) mm +/-3.8147 mm: the inscribed radius r0 of the rod set read from the STL bounding boxes, as a square because station windows are rectangles.",
  "geometry": {
   "width_mm": 20.5,
   "height_mm": 20.5,
@@ -165,7 +165,6 @@
   "gas": "N2",
   "T_k": 273.0,
   "P_torr": 1.0,
-  "sigma_m2": 2.27e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,
   "flow_mm_us": [
@@ -218,5 +217,24 @@
  "builder": "",
  "import_path": "",
  "scene": null,
- "_display_name": "Quadrupole (3D, STL)"
+ "_display_name": "Quadrupole (3D, STL)",
+ "stations": [
+  {
+   "name": "detector",
+   "kind": "detect",
+   "on_hit": "pass",
+   "axis": "z",
+   "pos_mm": 114.0,
+   "window": {
+    "x": [
+     6.4342,
+     14.0636
+    ],
+    "y": [
+     6.3307,
+     13.9601
+    ]
+   }
+  }
+ ]
 }

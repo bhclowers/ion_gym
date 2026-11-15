@@ -38,20 +38,20 @@ import time
 
 BYTES_PER_NODE = 4                     # float32 basis
 # MULTIGRID throughput: SOLVED nodes per second, to tolerance, end-to-end
-# (V-cycles make "sweeps" meaningless as a unit). Since L-439 this is
+# (V-cycles make "sweeps" meaningless as a unit). This is now
 # only the PRIOR for the multigrid routes, used until this machine has
 # a recorded multigrid solve (see "per-machine solve rates" below); the
 # 2-D LU routes never use it.
 MG_NODES_PER_S = 2.2e5   # [measured, then re-measured
                          #  across three grids: 236k @1M nodes,
                          #  256k @2.7M, ~O(N) linear/plateauing. Toy
-                         #  plates on the PI's machine 2026-10-15 ran
+                         #  plates on a second machine ran
                          #  ~0.8e5 at 885k nodes, so this prior can be
                          #  short -- the quote says it is uncalibrated.]
 
 # ------------------------------------------------ per-machine solve rates
-# L-439. One multigrid rate priced every route, and each solver costs
-# differently (toy grids, 4 electrodes, 2026-10-15):
+# One multigrid rate once priced every route, and each solver costs
+# differently (toy grids, 4 electrodes):
 #   2-D LU (planar, r-z): ONE factorisation per geometry + one cheap
 #       back-solve (~2-3% of the factor) per electrode. Pricing every
 #       electrode as a full solve quoted planar 7.5-10.5x long.
@@ -59,7 +59,7 @@ MG_NODES_PER_S = 2.2e5   # [measured, then re-measured
 #       electrode whose per-node speed RISES with N (1.4 s at 14k nodes,
 #       11.6 s at 885k) and is not monotone in grid shape.
 # A fixed constant is right on one machine at best, so the rates are
-# MEASURED ON THIS MACHINE (PI ruling 2026-10-15):
+# MEASURED ON THIS MACHINE:
 #   * every LU factorisation (solver2d.laplace_factor) and every
 #     multigrid basis (multigrid3d.solve_bases_mg) records its node
 #     count and seconds -- the solves the user runs anyway;
@@ -79,7 +79,7 @@ SOLVE_RATES_MIN_NODES = 10_000  # smaller solves are timer noise
 # Scaling exponents (up, down) from the nearest record to the quoted N:
 # t = t_rec * (N / N_rec) ** exp, `up` when N > N_rec. Each pair rounds
 # toward LONG: up uses the steepest local slope measured, down the
-# shallowest (toy grids 2026-10-15: LU factor slope 1.07 below 122k
+# shallowest (toy grids: LU factor slope 1.07 below 122k
 # nodes, 1.37 from 360k to 1M; back-solve ~1.0-1.2; multigrid 0.5
 # overall, ~1.0 at the large end).
 LU_FACTOR_EXP = (1.35, 1.0)
@@ -111,7 +111,7 @@ def _load_rates():
         path = _rates_path()
         if os.path.exists(path):
             try:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     mine = json.load(f).get(_machine_key(), {})
                 for s in _RATES:
                     _RATES[s] = list(mine.get(s, []))
@@ -131,16 +131,22 @@ def _store_rates():
         allm = {}
         if os.path.exists(path):
             try:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     allm = json.load(f)
-            except (OSError, ValueError):
+            except (OSError, ValueError) as e:
+                print(f"[sizing] solve-rate records at {path} unreadable "
+                      f"({type(e).__name__}: {e}); rewriting it with this "
+                      f"machine's records only (other machines' are lost)")
                 allm = {}
         if not isinstance(allm, dict):
+            print(f"[sizing] solve-rate records at {path} are not a "
+                  f"mapping ({type(allm).__name__}); rewriting it with this "
+                  f"machine's records only")
             allm = {}
         allm[_machine_key()] = _RATES
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(allm, f, indent=1)
         os.replace(tmp, path)
     except OSError as e:
@@ -241,8 +247,8 @@ def solve_seconds(solver, n_solved, n_electrodes):
 # Per-node compose rates [measured on a 3.5M-node array].
 # The compose runs np.gradient once per drive channel; float32 is ~4x the
 # throughput of float64 at half the memory. The electrode-aware surface
-# correction (njit _fa3d_correct) adds ~1 ns/node — negligible since the
-# v198 compile, but stated so the two field methods price honestly.
+# correction (njit _fa3d_correct) adds ~1 ns/node — negligible once
+# compiled, but stated so the two field methods price honestly.
 COMPOSE_NS_PER_NODE = {"float64": 22.5, "float32": 5.0}
 EAWARE_CORRECTION_NS_PER_NODE = 1.2
 
@@ -262,7 +268,7 @@ class SizingProposal:
     fold: str = ""                    # mirror axes the SOLVE halves (planar)
     min_feature_mm: float | None = None   # smallest gap the user told us about
     # mirror axes declared on a deck that IS already the reduced domain
-    # (3-D routes, scenes): reported, never divided out again (L-565)
+    # (3-D routes, scenes): reported, never divided out again
     mirror_stored: str = ""
     solver: str = "mg"                # "lu" (planar, r-z) | "mg" (the rest)
     rate_note: str = ""               # where est_solve_s's rate came from
@@ -398,7 +404,7 @@ def propose_sizing_from_aabbs(aabb_min: Sequence, aabb_max: Sequence,
     mem_b = int(nvox * BYTES_PER_NODE * n_electrodes)
     mem_s = int(nsolved * BYTES_PER_NODE * 4)
     # SOLVE-TIME ESTIMATE: priced by THE SOLVER THAT RUNS, at this
-    # machine's measured rate (solve_seconds; L-439). It was one
+    # machine's measured rate (solve_seconds). It was one
     # multigrid constant for every route, which priced the 2-D LU
     # routes' cheap per-electrode back-solves as full solves.
     est_s, rate_note = solve_seconds(solver, nsolved, n_electrodes)
@@ -445,7 +451,7 @@ def propose_sizing_scene(scene, *, pitch: float, margin_mm: float = 0.0,
 
     It priced the METAL box (extent_mm) instead, so a scene's vacuum margin
     was never quoted: fixture A at 0.25 mm/gu with a 1 mm margin stores
-    49x49x41 = 98,441 nodes and was quoted 41x41x33 = 55,473 (L-567). A
+    49x49x41 = 98,441 nodes and was quoted 41x41x33 = 55,473. A
     scene whose grid spans nothing REFUSES rather than quoting zero."""
     sc = scene.in_mm()
     lo, hi = sc.grid_extent_mm()
@@ -456,8 +462,7 @@ def propose_sizing_scene(scene, *, pitch: float, margin_mm: float = 0.0,
             f"volume; grid it (GeomScene.at_resolution) before pricing it")
     # A scene's grid is the STORED/FOLDED array frame (scene3d), so its
     # mirror axes are already cut away: reported, never divided out again.
-    # Passing them as `fold` under-quoted a mirrored scene 2x per axis
-    # (L-565).
+    # Passing them as `fold` under-quoted a mirrored scene 2x per axis.
     return propose_sizing_from_aabbs([lo], [hi], len(sc.electrodes),
                                      pitch=pitch, margin_mm=margin_mm,
                                      mirror_stored=sc.grid.mirror,
@@ -488,7 +493,7 @@ def propose_sizing_simspec(spec, *, pitch: float | None = None,
     mirror_stored = ""
     # THE ROUTE comes from the one authority build_run dispatches on
     # (sim_build.build_route), and each route asks ITS OWN builder's fold
-    # truth (L-522). This was a hand-built planar test with an `else` that
+    # truth. This was a hand-built planar test with an `else` that
     # priced r-z and stl2d by the 3-D mirror rule -- so a declared mirror
     # halved their quote although neither builder folds.
     from ion_gym.physics.sim_build import build_route
@@ -514,7 +519,7 @@ def propose_sizing_simspec(spec, *, pitch: float | None = None,
         # the solve by 2x per declared plane.
         fold = ""
     elif route in ("stl3d", "shapes3d", "scene3d"):
-        # 3-D ROUTES SOLVE THE DECLARED GRID AS STORED (L-565). A declared
+        # 3-D ROUTES SOLVE THE DECLARED GRID AS STORED. A declared
         # mirror on these routes means the deck IS the reduced domain:
         # build_stl3d_run solves _grid_from_spec (the declared extent)
         # and multigrid applies the mirror as a boundary at the face. So
@@ -601,6 +606,49 @@ def system_memory_gb():
                 * os.sysconf("SC_PAGE_SIZE")) / (1024.0 ** 3)
     except (ValueError, OSError, AttributeError):
         return None
+
+
+def default_record_budget_gb():
+    """The trajectory-record budget (GB) the workbench offers by default:
+    RECORD_REFUSE_FRACTION of total RAM, rounded to whole GB. None when
+    the platform will not report its RAM; build_run and record_volume
+    then fall back to the fixed limits, and say so in their quote.
+
+    Notebooks and the workbench both take their default from here, so a
+    notebook flight and a click on the same machine start from the same
+    declared budget."""
+    ram = system_memory_gb()
+    if not ram:
+        return None
+    return int(round(ram * RECORD_REFUSE_FRACTION))
+
+
+def resources_line(n_workers, budget_gb):
+    """One printable line naming the throughput choices of a session:
+    the worker-thread count against the machine's logical cores, and the
+    trajectory-record budget against its RAM, with the warn and refuse
+    levels build_run will apply to that budget. budget_gb None states the
+    machine-derived (or fixed fallback) levels instead. n_workers None
+    omits the worker clause, for a session that flies no ensemble."""
+    import os
+    budget, ram, warn_gb, refuse_gb = _record_ceiling(budget_gb)
+    if n_workers is None:
+        cpu = "no ensemble flights (no worker count)"
+    else:
+        n_workers = int(n_workers)
+        if n_workers < 1:
+            raise ValueError(f"resources_line: n_workers must be >= 1, "
+                             f"got {n_workers}")
+        cores = os.cpu_count()
+        cpu = (f"{n_workers} worker thread(s) of {cores} logical cores"
+               if cores else f"{n_workers} worker thread(s), core count "
+                             f"unavailable")
+    mem = (f"record budget {budget:.0f} GB declared" if budget is not None
+           else "record budget derived from the machine")
+    mem += (f" of {ram:.0f} GB RAM" if ram else
+            " (RAM unavailable, fixed fallback limits)")
+    return (f"{cpu}; {mem}, warn at {warn_gb:.1f} GB, refuse at "
+            f"{refuse_gb:.1f} GB")
 
 
 def _record_ceiling(budget_gb):

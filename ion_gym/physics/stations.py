@@ -35,7 +35,7 @@ def _reaches_kernel(st):
     post-hoc bookkeeping only (detect with on_hit='pass'). Anything else
     REFUSES by name -- both callers below used to `continue` past an
     unknown kind, or a detect with a missing on_hit, as if it were
-    post-hoc (L-554), so a station the deck declared could do nothing
+    post-hoc, so a station the deck declared could do nothing
     with no word."""
     kind = getattr(st, "kind", "")
     name = getattr(st, "name", "<unnamed>")
@@ -139,7 +139,7 @@ def station_terminates(st, point):
     FATE_DETECT, or None when the ion passes. The same window senses the
     kernels apply to station_planes' output, for callers that meet a
     station OUTSIDE a kernel -- the analytic drift beyond the solved
-    domain (L-286), where a wall downstream must still stop the ion."""
+    domain, where a wall downstream must still stop the ion."""
     if not _reaches_kernel(st):
         return None                       # pass-detect: never terminates
     wd = st.window or {}
@@ -173,7 +173,7 @@ def unsupported_stations_notice(spec, route, fix):
 
     Never a silent skip: a station that changes a flight everywhere else
     but does nothing here is exactly the failure that made a working
-    splat look broken for a week (L-435). The message names each
+    splat look broken for a week. The message names each
     station, says what it would have done, and states the fix — it does
     not merely announce that something was ignored.
     """
@@ -250,7 +250,13 @@ def station_hits(traj, cols, station, *, t_min_us=1.0e-3):
     q = traj[:, ix[ax]] - float(station.pos_mm)
     hits = []
     k = 0
-    for j in np.nonzero(np.diff(np.sign(q)) != 0)[0]:
+    # HALF-OPEN crossing test: between samples j and j+1 when sample j is
+    # strictly on one side and j+1 is on the plane or past it. A sample
+    # exactly ON the plane belongs to one interval only -- a sign-change
+    # test counted -, 0, + as two crossings at the same instant.
+    a, b = q[:-1], q[1:]
+    crossing = ((a < 0) & (b >= 0)) | ((a > 0) & (b <= 0))
+    for j in np.nonzero(crossing)[0]:
         if t[j] <= t_min_us:
             continue
         f = q[j] / (q[j] - q[j + 1])
@@ -316,3 +322,94 @@ def first_detection(traj, cols, spec, *, name=None, t_min_us=1.0e-3):
                 f"station (name={name!r}); detection planes live in the "
                 "DECK, not in analysis kwargs") from e
         raise
+
+
+
+def impact_hits(spec, cols, results):
+    """Per-ion arrivals on every impact surface of one flight: declared
+    stations and enabled boundary faces, as dicts with keys station, x,
+    y, z, t_us, and mz. The Impact Analysis tab and the publication run
+    figure both read this list, so the two cannot disagree.
+
+    spec : the SimSpec that flew. cols : the record column names of the
+    flight's trajectories. results : the flight's per-ion results, each
+    with .traj (record array) and .summary (the kernel summary dict).
+
+    Stations use station_hits, the crossing convention the Stats card
+    uses. A 'detect' station with on_hit='splat' logs an ion's first
+    in-window crossing; other stations log every in-window crossing.
+    An ion that ended on an enabled bound (fate 1 or 3) is an impact on
+    the face its terminal coordinate sits at or beyond (moved here from
+    SimApp._impact_from_results, unchanged in behaviour).
+    """
+    stns = list(getattr(spec, "stations", None) or [])
+    if not cols:
+        raise ValueError("impact_hits: no record columns; pass the column "
+                         "names the flight's record arrays carry")
+    # NO early return on "no stations" any more: boundary faces
+    # feed this tab too (unified surfaces).
+    hits = []
+    for r in results:
+        traj = getattr(r, "traj", None)
+        if traj is None or not len(traj):
+            continue
+        for st in stns:
+            hs = [h for h in station_hits(traj, cols, st)
+                  if h.get("in_window")]
+            if not hs:
+                continue
+            take = (hs[:1] if (st.kind == "detect" and
+                               getattr(st, "on_hit", None)
+                               == "splat") else hs)
+            for h in take:
+                hits.append(dict(station=st.name, x=h.get("x"),
+                                 y=h.get("y"), z=h.get("z"),
+                                 t_us=h.get("t_us"),
+                                 mz=r.summary.get("mz")))
+    # BOUNDARY FACES JOIN THE SAME STREAM:
+    # an ion that terminated on an enabled bound is an impact on
+    # that face, in exactly the shape the plot consumes. The
+    # summary carries the EXACT terminal state (x/y/z_end, tof),
+    # so no decimation slop; the face an ion belongs to is the
+    # enabled plane its pinned coordinate sits on (half-pitch
+    # tolerance), labeled by enabled_planes() -- the stats
+    # table's own naming authority.
+    from ion_gym.physics.stats import enabled_planes
+    # SIDE-AWARE face assignment. Termination happens ON
+    # CROSSING, so the terminal coordinate sits AT OR PAST the
+    # bound by up to a step -- a symmetric half-pitch window
+    # dropped most ejected ions (measured: 1 of 6 assigned on the
+    # quad deck). A face claims an ion when the pinned coordinate
+    # is at-or-beyond it (small inward tolerance for exact
+    # landings); with several candidates the LARGEST penetration
+    # wins -- that is the face that ended the flight.
+    _h = float(getattr(spec.geometry, "mm_per_gu", 0.0) or 0.0)
+    _tol = max(_h / 2.0, 1e-6)
+    _b = getattr(spec, "bounds", None)
+    _axi = {"x": "x_end", "y": "y_end", "z": "z_end"}
+    _faces = []
+    for lbl, ax, val in enabled_planes(spec):
+        side = ("min" if (_b is not None and
+                          getattr(_b, f"{ax}_min_on", False) and
+                          float(getattr(_b, f"{ax}_min")) ==
+                          float(val)) else "max")
+        _faces.append((lbl, str(ax), float(val), side))
+    for r in results:
+        sm = getattr(r, "summary", {}) or {}
+        if sm.get("kind") not in (1, 3):
+            continue
+        best = None   # (penetration, label)
+        for lbl, ax, val, side in _faces:
+            key = _axi.get(ax)
+            if key is None or sm.get(key) is None:
+                continue
+            c = float(sm[key])
+            pen = (c - val) if side == "max" else (val - c)
+            if pen >= -_tol and (best is None or pen > best[0]):
+                best = (pen, lbl)
+        if best is not None:
+            hits.append(dict(
+                station=best[1], x=sm.get("x_end"),
+                y=sm.get("y_end"), z=sm.get("z_end"),
+                t_us=sm.get("tof"), mz=sm.get("mz")))
+    return hits

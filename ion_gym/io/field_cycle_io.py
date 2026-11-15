@@ -7,7 +7,7 @@ sequence of instants over a window the caller chooses, with EVERY drive the
 flight applies (RF, travelling-wave squares, tables, offsets, gates), exactly
 as the route's kernel composes it.
 
-WHAT "APPLIED" MEANS (PI ruling 2026-09-16). Each frame is the field an ion
+WHAT "APPLIED" MEANS. Each frame is the field an ion
 would feel at that instant. Exporting one RF period of a SLIM therefore
 exports the RF swinging with the travelling wave HELD at its state over that
 window — not removed. The window start is a real parameter: which TW state is
@@ -88,7 +88,7 @@ def _pack_3d(model):
     if not isinstance(f, dict) or f.get("route") != "3d":
         raise ValueError("3-D field export needs the built model's fly_fields "
                          "channel pack (route '3d'); this model has none")
-    # L-540: the duty and the world offset are READ, never defaulted -- a
+    # The duty and the world offset are READ, never defaulted -- a
     # pack without them exported 50% duty and stored-frame coordinates
     # (world_off (0,0,0)) with no sign anything was assumed
     missing = [k for k in ("ch_duty", "world_off_mm") if k not in f]
@@ -215,7 +215,7 @@ def _switch_count(kind, om, ph, duty, t0, t1, tab_t=None):
     if kind in (3, 4):                      # table_hold / table_linear
         tt = np.asarray(tab_t if tab_t is not None else [], float)
         return int(np.count_nonzero((tt > t0) & (tt < t1)))
-    # L-540: every other kind used to be counted as a table
+    # every other kind used to be counted as a table
     raise ValueError(f"field export: waveform kind {kind!r} is not known "
                      f"(known: {_WAVE_NAMES})")
 

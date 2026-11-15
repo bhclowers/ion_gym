@@ -5,8 +5,7 @@ from ion_gym.io.sim_spec import SimSpec
 from ion_gym.physics.optimize import OptimizeSpec, optimize, _evaluate
 
 # THE einzel fixture: three apertured STL plates + their deck, generated
-# once from the retired examples/stl_demos generator (2026-08-18 pattern,
-# D6c). The deck's lens plate (electrodes[1]) is at -800 V; each test
+# once from the retired examples/stl_demos generator. The deck's lens plate (electrodes[1]) is at -800 V; each test
 # starts it at 0 V, the unfocused reference.
 EINZEL = Path(__file__).parent / "fixtures" / "stl_einzel3d" / \
     "einzel3d_stl.json"

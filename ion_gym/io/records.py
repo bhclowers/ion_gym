@@ -154,7 +154,7 @@ def record(traj, columns):
     return None if traj is None else TrajRecord(traj, columns)
 
 
-# constants for derived-channel physics: the ONE authority (L-532; these
+# constants for derived-channel physics: the ONE authority (these
 # were retyped here)
 from ion_gym.physics.constants import KG_AMU as _AMU_KG   # noqa: E402
 from ion_gym.physics.constants import E_CHG as _E_CHG     # noqa: E402
@@ -167,7 +167,7 @@ def radial_values(name, rec, frame):
     about `frame` (an OpticAxisSpec: SimSpec.radial_frame()), or None when
     the record lacks the columns it needs (positions for radius; e_x,
     e_y, e_z for the field channels). THE one derivation, used after
-    flight by every route and by the app's plots (L-539: each route and
+    flight by every route and by the app's plots (each route and
     the app had its own axis -- x, z through the origin, or the domain
     centre).
 
@@ -229,7 +229,7 @@ def assemble_record(o, columns, mz_da, frame=None):
     columns : sequence of str
         The record schema — normally ``spec.column_names()``.
     mz_da : float
-        This ion's m/z in Da (for the KE channels).
+        This ion's mass in Da (for the KE channels).
     frame : OpticAxisSpec or None
         The axis the radial channels are measured about
         (SimSpec.radial_frame()); required when one is requested.
@@ -262,7 +262,7 @@ def assemble_record(o, columns, mz_da, frame=None):
         elif c == "ke_z":
             rec[c][:] = _ke * vz * vz
         elif c == "radius":
-            # about the declared/route axis (L-539; this assumed z
+            # about the declared/route axis (this assumed z
             # through the origin while e_axial below assumed x)
             rec[c][:] = radial_values("radius", base, frame)
         elif c == "n_col":

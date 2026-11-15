@@ -36,7 +36,7 @@ CACHE_KIND = "planar_bases_v1"
 
 # Fields on an ElectrodeSpec that CANNOT change the solved bases.
 _VOLTAGE_FIELDS = ("dc", "rf_groups", "color", "name")
-# DC-ladder placement (L-453, PI 2026-10-16): these only place a member's
+# DC-ladder placement: these only place a member's
 # tap -- resolve_dc_groups writes dc = v_in + (v_out - v_in) * w, a
 # voltage -- and no builder reads them. Keying their VALUES made a ladder
 # re-weight re-solve every basis (and set_flight_conditions refuse it).
@@ -79,8 +79,13 @@ def geometry_key_dict(spec):
         return {k: v for k, v in d.items() if not ex or k not in ex} \
             if isinstance(d, dict) else d
     g = _sans_extras(spec.geometry, g)
-    if isinstance(g.get("symmetry"), dict):
-        g["symmetry"] = _sans_extras(spec.geometry.symmetry, g["symmetry"])
+    # THE SYMMETRY AS THE SOLVER READS IT, not as the deck spells it:
+    # `planes: {}` and `planes: {x: none, y: none, z: none}` are the same
+    # deck, and keyed apart, a field solved from a deck as written (a
+    # notebook, a script) was not found by the app, whose synced copy
+    # spells every plane out. normalized() fills absent axes with 'none'
+    # (and z for r-z); its dict carries no annotation extras.
+    g["symmetry"] = spec.geometry.symmetry.normalized().to_dict()
     els = []
     _el_objs = list(spec.geometry.electrodes)
     for i, e in enumerate(g.get("electrodes", [])):
@@ -127,6 +132,17 @@ def geometry_key_dict(spec):
     # precedent), so every undeclaring spec's key is byte-identical.
     if g.get("frame_offset_mm") is not None:
         d["frame_offset_mm"] = g["frame_offset_mm"]
+    # SIGNED FRAME: origin_mm places the node lattice relative to the
+    # shapes (raster2d.anchored_grid), so two decks with the same shapes
+    # and different origins rasterize different metal. Unkeyed, the
+    # second deck was served the first one's bases -- 369 of 1,025 label
+    # nodes wrong, depending only on which deck had been built first.
+    # Keyed ONLY when declared and not [0, 0] (the unshifted lattice), so
+    # every other spec's key is byte-identical; every basis banked for a
+    # shifted deck under the old key is never served again.
+    _org = g.get("origin_mm")
+    if _org is not None and any(float(v) != 0.0 for v in _org):
+        d["origin_mm"] = [float(v) for v in _org]
     sym = d.get("symmetry") or {}
     if isinstance(sym, dict) and sym.get("plane_mm"):
         d["anchor_raster"] = 1
@@ -142,11 +158,51 @@ def geometry_key_dict(spec):
     if isinstance(sym, dict) and any(
             k != "none" for k in (sym.get("planes") or {}).values()):
         d["fold_bc_rev"] = 2
+    # STL CONTENT: an STL electrode IS its file's bytes, not its name. The
+    # key named the file only, so moving a rod in the STL left a saved
+    # field matching the new geometry. Keyed only when the deck has STL
+    # electrodes, so every other key is byte-identical. A file that cannot
+    # be found is recorded as "missing" (which matches no real bytes), so
+    # the key can still be computed for display; the build refuses it.
+    stl = [e.stl for e in spec.geometry.electrodes if getattr(e, "stl", None)]
+    if stl:
+        from ion_gym.io.stl_resolve import resolve_stl_dir
+        sdir = resolve_stl_dir(spec)
+        d["stl_content"] = {name: _file_digest(sdir / name) for name in stl}
     return d
 
 
+# (path, size, mtime_ns) -> sha256; a cache key is computed often and an
+# STL can be large, so a file is hashed again only when it changes
+_DIGESTS = {}
+
+
+def _file_digest(path):
+    """sha256 of the file's bytes, or "missing"."""
+    import hashlib
+    import os
+    if not os.path.isfile(path):
+        return "missing"
+    st = os.stat(path)
+    sig = (str(path), st.st_size, st.st_mtime_ns)
+    if sig not in _DIGESTS:
+        with open(path, "rb") as fh:
+            _DIGESTS[sig] = hashlib.sha256(fh.read()).hexdigest()
+    return _DIGESTS[sig]
+
+
+def cache_key_dict(spec):
+    """What a cached basis is stored under: the geometry AND the code that
+    solves it (physics.solve_code). The geometry alone (geometry_key_dict)
+    stays a field's identity -- field files and the editor compare it --
+    while the cache must also miss when the solver or a rasterizer
+    changes, or a fix reaches new geometries and never the cached ones."""
+    from ion_gym.physics.solve_code import solve_code_key
+    return dict(geometry_key_dict(spec), _solve_code=solve_code_key())
+
+
 def key(spec):
-    return fa_cache.spec_key(geometry_key_dict(spec))
+    return fa_cache.spec_key(cache_key_dict(spec))
 
 
 def load(spec, root=None):
@@ -158,7 +214,7 @@ def load(spec, root=None):
     excluded it, but if one reaches here it is treated as a MISS and said out
     loud -- serving it would collapse every electrode label to #1 and the
     display would lie while looking perfectly healthy."""
-    arrs, meta = fa_cache.load(geometry_key_dict(spec), root=root)
+    arrs, meta = fa_cache.load(cache_key_dict(spec), root=root)
     if arrs is None:
         return None, None
     bases = {int(k[1:]): np.ascontiguousarray(v, float)
@@ -177,7 +233,7 @@ def load(spec, root=None):
         return None, None
     # a HIT is provenance too: a differently-named spec resolving this
     # geometry belongs in the many-to-one "produced by" record.
-    fa_cache.annotate(geometry_key_dict(spec), getattr(spec, "name", ""),
+    fa_cache.annotate(cache_key_dict(spec), getattr(spec, "name", ""),
                       root=root)
     return bases, ele.astype(np.int16)
 
@@ -202,16 +258,16 @@ def store(spec, bases, ele, root=None):
     """Atomic publish of the solved bases + the electrode mask."""
     arrays = {f"b{int(k)}": np.ascontiguousarray(v, float)
               for k, v in bases.items()}
-    # labels are stored in 8 bits (the format is kept by PI ruling
-    # 2026-10-15); a label past the limit would WRAP silently, so it is
-    # refused here at the data level too (L-538)
+    # labels are stored in 8 bits (the format is kept as is); a label
+    # past the limit would WRAP silently, so it is
+    # refused here at the data level too
     from ion_gym.io.sim_spec import electrode_limit_error
     ele_a = np.ascontiguousarray(ele)
     _lim = electrode_limit_error(int(ele_a.max()) if ele_a.size else 0)
     if _lim:
         raise ValueError(f"basis_cache.store: {_lim}")
     arrays["ele"] = ele_a.astype(np.uint8)
-    key = fa_cache.store(geometry_key_dict(spec), arrays, root=root)
+    key = fa_cache.store(cache_key_dict(spec), arrays, root=root)
     # descriptive provenance: the key dict is rightly
     # name-free, so the "which json produced this" record is written here,
     # the last layer that still knows the spec's name.

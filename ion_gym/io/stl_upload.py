@@ -1,7 +1,7 @@
 """
 stl_upload.py — user-facing STL import for ion_gym.
 
-Charter decisions implemented (CHARTER, "decided this cycle v52"):
+Design decisions implemented:
 
 (a) The user sets the voxel pitch. ion_gym makes NO assumption about the
     shape or type of optic imported — no feature detection, no pitch
@@ -38,10 +38,19 @@ from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
-SOLVER_VERSION = "solver3d/nz1-v51"      # bump on any solver change
+SOLVER_VERSION = "solver3d/nz1-v51"      # the hand tag; see below
 
 
-# mesh ingest has ONE owner (L-546): STL bytes are parsed through
+def bundle_solver_version() -> str:
+    """The solver identity a bundle's bases are certified against: the
+    hand tag plus physics.solve_code's key of the solve-path code, so a
+    bundle solved by other code reads as stale (re-solve) without anyone
+    having to remember to bump the tag."""
+    from ion_gym.physics.solve_code import solve_code_key
+    return f"{SOLVER_VERSION}+{solve_code_key()}"
+
+
+# mesh ingest has ONE owner: STL bytes are parsed through
 # stl_resolve.parse_stl_bytes, a deck's files with their declared placement
 # through stl_resolve.load_mesh, and trimesh's import through
 # stl_resolve._require_trimesh. This module used to call trimesh.load
@@ -65,7 +74,7 @@ class MeshInfo:
 
 
 def load_mesh_bytes(filename: str, data: bytes) -> MeshInfo:
-    m = parse_stl_bytes(data)
+    m = parse_stl_bytes(data, name=f"uploaded STL {filename!r}")
     lo, hi = np.asarray(m.bounds[0], float), np.asarray(m.bounds[1], float)
     return MeshInfo(name=Path(filename).stem, filename=filename, data=data,
                     n_faces=len(m.faces), aabb_min=lo, aabb_max=hi)
@@ -103,9 +112,12 @@ def propose_sizing(meshes: List[MeshInfo], *, pitch: float = 0.5,
 # --------------------------------------------------------------- manifest
 def manifest_hash(meshes: List[MeshInfo], pitch: float,
                   domain_min, domain_max, symmetry: Optional[dict] = None,
-                  solver_version: str = SOLVER_VERSION) -> str:
+                  solver_version: Optional[str] = None) -> str:
     """sha256 over everything that invalidates a solved basis set.
-    Meshes are sorted by name so upload order never changes the key."""
+    Meshes are sorted by name so upload order never changes the key.
+    solver_version None = this installation's bundle_solver_version()."""
+    if solver_version is None:
+        solver_version = bundle_solver_version()
     h = hashlib.sha256()
     for m in sorted(meshes, key=lambda m: m.name):
         h.update(m.name.encode())
@@ -123,26 +135,30 @@ def save_bundle(dirpath, spec_json: str, meshes: List[MeshInfo],
                 symmetry: Optional[dict] = None) -> Path:
     """Write the portable unit: sim.json + geometry/ + bases/ + manifest.
     Move the folder (or zip it) and ion_gym elsewhere reproduces the run
-    without re-solving — the manifest hash certifies the bases match."""
+    without re-solving — the manifest hash certifies the bases were solved
+    from these meshes, this grid and this solver code. The bases are
+    stored at full precision (float64), so the round trip is exact; they
+    were float32, which the certification did not say."""
     d = Path(dirpath)
     (d / "geometry").mkdir(parents=True, exist_ok=True)
     (d / "bases").mkdir(exist_ok=True)
-    (d / "sim.json").write_text(spec_json)
+    (d / "sim.json").write_text(spec_json, encoding="utf-8")
     for m in meshes:
         (d / "geometry" / m.filename).write_bytes(m.data)
     for name, arr in bases.items():
         np.savez_compressed(d / "bases" / f"{name}.npz",
-                            basis=arr.astype(np.float32))
+                            basis=np.asarray(arr, np.float64))
+    version = bundle_solver_version()
     man = dict(
         hash=manifest_hash(meshes, sizing.pitch, sizing.domain_min,
-                           sizing.domain_max, symmetry),
-        solver_version=SOLVER_VERSION, pitch=sizing.pitch,
+                           sizing.domain_max, symmetry, version),
+        solver_version=version, basis_dtype="float64", pitch=sizing.pitch,
         domain_min=list(map(float, sizing.domain_min)),
         domain_max=list(map(float, sizing.domain_max)),
         dims=list(sizing.dims), symmetry=symmetry or {},
         electrodes=[m.name for m in sorted(meshes, key=lambda m: m.name)],
         created=time.strftime("%Y-%m-%d %H:%M:%S"))
-    (d / "manifest.json").write_text(json.dumps(man, indent=2))
+    (d / "manifest.json").write_text(json.dumps(man, indent=2), encoding="utf-8")
     return d
 
 
@@ -151,16 +167,20 @@ def load_bundle(dirpath):
     fresh=False (hash mismatch — geometry/pitch/domain/symmetry/solver
     version changed) means the bases are STALE: re-solve, never reuse."""
     d = Path(dirpath)
-    man = json.loads((d / "manifest.json").read_text())
+    man = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+    # .stl and .STL alike: a case-sensitive glob dropped the shipped
+    # upper-case meshes on Linux and macOS, so the hash missed them and
+    # the bundle read as stale
     meshes = [load_mesh_bytes(p.name, p.read_bytes())
-              for p in sorted((d / "geometry").glob("*.stl"))]
+              for p in sorted((d / "geometry").iterdir())
+              if p.suffix.lower() == ".stl"]
     bases = {p.stem: np.load(p)["basis"]
              for p in sorted((d / "bases").glob("*.npz"))}
     now = manifest_hash(meshes, man["pitch"], man["domain_min"],
                         man["domain_max"], man.get("symmetry") or {},
                         man.get("solver_version", ""))
     fresh = (now == man["hash"]
-             and man.get("solver_version") == SOLVER_VERSION)
+             and man.get("solver_version") == bundle_solver_version())
     return man, meshes, bases, fresh
 
 
@@ -173,7 +193,7 @@ def check_mask_overlaps(spec):
     [(message,)] describing the collision. The classic cause: CAD parts
     exported to STL individually land in PART frames, not the assembly
     frame. Any OTHER failure of the check propagates: a check that did
-    not run is not a clean result (L-529). The overlap is recognised by
+    not run is not a clean result. The overlap is recognised by
     its TYPE, voxelize.ElectrodeOverlap -- this matched the word
     'overlaps' in the message."""
     from ion_gym.physics.build_stl import stl_masks_2d
@@ -247,7 +267,7 @@ def spec_from_upload(meshes: List[MeshInfo], voltages: Dict[str, float],
         # draw path reads only the declaration): the bodies' BUILD-frame
         # z-span, so 2-D transport views draw finite electrodes; the user
         # can edit it like any other config value. Read through THE mesh
-        # ingest point, which applies the declared placement (L-546: the
+        # ingest point, which applies the declared placement (the
         # offset used to be re-added to native bounds by hand here).
         zs = [load_mesh(spec, el, stl_dir=wd).bounds[:, 2]
               for el in electrodes]
@@ -284,7 +304,7 @@ class StlUploadPanel:
         self.sizing: Optional[SizingProposal] = None
         # dropped files that did not parse as STL, kept until the next
         # drop: every resize shows them and Commit refuses while any
-        # remain, so a deck cannot commit with an electrode missing (L-529)
+        # remain, so a deck cannot commit with an electrode missing
         self.skipped: List[str] = []
 
         # the drop area sits in its own container so Clear can replace it
@@ -361,7 +381,7 @@ class StlUploadPanel:
         self.table.value = self._df([])
         self.preview_pane.object = None
         self.commit_btn.disabled = True
-        # every failure is collected and SHOWN (L-543): this was
+        # every failure is collected and SHOWN: this was
         # rmtree(ignore_errors=True) plus "except Exception: 0 purged",
         # so a purge that failed said it succeeded
         failed = [f"{p} ({why})"
@@ -428,7 +448,7 @@ class StlUploadPanel:
                 self.sizing_md.object = self._skipped_md()
             return
         self.sizing = propose_sizing(self.meshes, pitch=self.pitch.value)
-        # the parse-failure list SURVIVES every resize (L-529: the sizing
+        # the parse-failure list SURVIVES every resize (the sizing
         # readout overwrote it as soon as one mesh had loaded)
         self.sizing_md.object = "\n\n".join(
             s for s in (self._skipped_md(), self.sizing.markdown()) if s)
@@ -447,7 +467,7 @@ class StlUploadPanel:
         you should see your assembly, correctly arranged in 3-D."""
         if not self.meshes:
             return
-        # the figure is drawn by THE viz_core mesh preview (L-548)
+        # the figure is drawn by THE viz_core mesh preview
         from ion_gym.viz.viz_core import mesh_preview_figure
         self.preview_pane.object = mesh_preview_figure(
             [(m.name, parse_stl_bytes(m.data), i)
@@ -457,7 +477,7 @@ class StlUploadPanel:
                   "units & placement")
 
     def _on_commit(self, _=None):
-        """Commit only a deck that is whole and checked (L-529): every
+        """Commit only a deck that is whole and checked: every
         dropped file parsed, and the overlap check RAN and found nothing.
         It used to commit after 'except Exception: overlaps = []' -- a
         check that failed read as a clean one -- and committed even when

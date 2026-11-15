@@ -45,7 +45,7 @@ class InfeasibleCandidate(ValueError):
     through, an empty cell). The optimizer records it at the declared
     penalty. Every other exception from a factory is a defect and RAISES:
     a broad ValueError catch once turned bugs in spec construction into
-    "infeasible" points that steered the search (L-536).
+    "infeasible" points that steered the search.
     cell_board.CellBoardInfeasible subclasses this."""
 
 
@@ -154,8 +154,14 @@ def metric_spot_size(results, cols, spec):
 
 
 def metric_loss_fraction(results, cols, spec):
+    # spec MUST reach _transmitted: without it the fate-1 literal is
+    # used, and on a deck whose transmission is another fate (the
+    # bounding-plane funnels are fate 3) every candidate scores 1.0,
+    # CMA sees flat fitness and stops on an arbitrary point (defect
+    # found by the audit/flown-check contradiction; the
+    # other three metrics already passed spec)
     n = max(len(results), 1)
-    return 1.0 - len(_transmitted(results)) / n
+    return 1.0 - len(_transmitted(results, spec)) / n
 
 
 def metric_tof_spread(results, cols, spec):
@@ -211,6 +217,13 @@ class OptimizeSpec:
     time_budget_s: float = 0  # >0: return (complete=False) before
                               # STARTING a generation that would exceed
                               # this wall budget. Requires checkpoint_path.
+    n_workers: int = 1        # ion-flight threads per candidate ensemble
+                              # (throughput, not physics): a seeded
+                              # candidate scores the same at any count,
+                              # so 1 keeps every existing search as it was
+    record_budget_gb: object = None   # GB the trajectory record of one
+                              # candidate may use; None = derive from RAM
+                              # (build_run's default)
     spec_factory: object = None   # optional callable(values)->SimSpec.
                               # GEOMETRY MODE: replaces the dotted-path
                               # apply entirely; `params` then only names
@@ -245,7 +258,7 @@ def _bank_write(path, row):
     """Append one JSON line. Crash-safe (open/write/close per line); an
     unwritable bank is a real failure, not a warning."""
     row = dict(row, ts=time.strftime("%Y-%m-%dT%H:%M:%S"))
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(row) + "\n")
 
 
@@ -262,6 +275,7 @@ def _evaluate(base_spec, ospec, values, seed_base=None, n_repeats=None):
     (births + collision RNG, every builder derives from source.seed);
     n_repeats > 1 averages seed-strided repeats."""
     from ion_gym.physics.sim_build import build_run
+    from ion_gym.physics.ensemble_driver import fly_all
     reps = n_repeats if n_repeats is not None else max(ospec.n_repeats, 1)
     fn = ospec.metric if callable(ospec.metric) else METRICS[ospec.metric]
     vals = []
@@ -288,11 +302,10 @@ def _evaluate(base_spec, ospec, values, seed_base=None, n_repeats=None):
             sp.source.n_ions = int(ospec.n_ions)
         if seed_base is not None:
             sp.source.seed = int(seed_base + r * 10007)   # prime stride
-        model, fly, cols, births = build_run(sp)
-        results = []
-        for i in range(len(births)):
-            t, s = fly(i)
-            results.append(_R(t, s))
+        model, fly, cols, births = build_run(
+            sp, record_budget_gb=ospec.record_budget_gb)
+        results = [_R(t, s) for t, s in
+                   fly_all(len(births), fly, n_workers=ospec.n_workers)]
         vals.append(float(fn(results, cols, sp)))
     return float(np.mean(vals)), float(np.std(vals))
 
@@ -300,6 +313,14 @@ def _evaluate(base_spec, ospec, values, seed_base=None, n_repeats=None):
 def optimize(base_spec, ospec: OptimizeSpec) -> OptimizeResult:
     """CMA-ES over the named SimSpec parameters (normalized to [0,1] per
     bound pair). Returns the best parameter dict and the search history."""
+    # max_evals is the loop's bound (CMA's maxfevals); without a finite one
+    # the search below would stop only on CMA's convergence tests
+    if (isinstance(ospec.max_evals, bool)
+            or not isinstance(ospec.max_evals, (int, np.integer))
+            or ospec.max_evals < 1):
+        raise ValueError(
+            f"OptimizeSpec.max_evals must be a positive whole number of "
+            f"evaluations (it bounds the search), got {ospec.max_evals!r}")
     try:
         import cma
     except ImportError as e:      # refuse with the remedy, not a stack trace

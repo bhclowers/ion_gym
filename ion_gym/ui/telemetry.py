@@ -38,7 +38,7 @@ REFERRER_TARGET = [None]
 #   telemetry.REFERRER_TARGET[0] = "Stl3DModel"   # or "dict:res"
 VERBOSE = [False]
 
-# THRESHOLD-TRIGGERED HOLDER DIAGNOSTICS (PI, 2026-09-29, after a 16 GB
+# THRESHOLD-TRIGGERED HOLDER DIAGNOSTICS (added after a 16 GB
 # footprint flying the split-float deck): when set to a number of MB,
 # any heartbeat whose reading crosses it prints the array-holder table
 # for THAT reading even with VERBOSE off — so the quiet default stays
@@ -58,7 +58,7 @@ def _macos_phys_footprint_mb():
     COMPRESSED PAGES: macOS compresses inactive pages instead of
     swapping, so a page you allocated and stopped touching leaves
     resident_size while still being held against physical memory.
-    Measured 2026-09-14: the heartbeat read 463 MB while Activity
+    Measured: the heartbeat read 463 MB while Activity
     Monitor showed the same process at 20 GB, and killing it returned
     20 GB. Three conclusions in this investigation were drawn from
     resident_size and two of them were wrong in opposite directions.
@@ -68,7 +68,7 @@ def _macos_phys_footprint_mb():
     eighth of those. Returns None when it cannot be read, never a
     substitute number — the caller labels which metric it got, so a
     fallback is never mistaken for the real thing. WHY it could not be
-    read is printed once per process (L-541: it was `except Exception`,
+    read is printed once per process (it was `except Exception`,
     silent, so a broken read and a non-mac host looked the same).
     """
     if sys.platform != "darwin":
@@ -113,24 +113,17 @@ def mem_reading() -> tuple:
     """(value_mb, label). Footprint where it is the right quantity.
 
     macOS  -> phys_footprint, labelled 'footprint'
-    else   -> psutil rss, labelled 'rss'
-    neither-> resource.ru_maxrss, labelled 'PEAK' because ru_maxrss is a
-              HIGH-WATER MARK that cannot fall; reporting it as current
-              is how a wrong number gets acted on.
+    else   -> psutil rss, labelled 'rss' (psutil is a core dependency;
+              the old resource.ru_maxrss fallback, a high-water mark that
+              cannot fall, is gone with its guarded import)
     """
     fp = _macos_phys_footprint_mb()
     if fp is not None:
         return fp, "footprint"
-    try:
-        import psutil
-    except ImportError:
-        # psutil is optional: the labelled PEAK fallback below is the
-        # documented outcome (it was `except Exception`, which also hid a
-        # failing psutil read behind the high-water mark -- L-541)
-        import resource
-        ru = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        ru = ru / (1024.0 ** 2) if sys.platform == "darwin" else ru / 1024.0
-        return ru, "PEAK"
+    # psutil is a core dependency (pyproject): imported, never guarded. A
+    # guarded import here once fell back to the high-water mark, a
+    # different number under the same readout.
+    import psutil
     return psutil.Process().memory_info().rss / (1024.0 ** 2), "rss"
 
 
@@ -164,13 +157,11 @@ def array_holders(top=8):
     access raised. The heap holds every kind of object -- weakref proxies
     (ReferenceError), lazy modules, objects whose __getattr__ raises
     anything -- so the per-object catch has to be broad, but it no longer
-    DROPS them silently (L-541: `except Exception: continue` undercounted
+    DROPS them silently (`except Exception: continue` undercounted
     with no sign); format_line prints the count.
     """
-    try:
-        import numpy as np
-    except ImportError:
-        return [], {}               # no numpy: no ndarray can be held
+    import numpy as np              # core: never guarded (an empty answer
+    #                                 here would read as "no arrays held")
     by_type, seen, skipped = {}, set(), {}
 
     def charge(holder, v):
@@ -213,7 +204,7 @@ def _live_figures() -> int:
     render leak (a replot that leaves the previous figure referenced).
     Zero when plotly was never imported: then no Figure can exist, and
     the count is exact without importing it here. (It returned -1 on any
-    failure, which reads like a count -- L-541.)"""
+    failure, which reads like a count.)"""
     go = sys.modules.get("plotly.graph_objects")
     if go is None:
         return 0
@@ -305,7 +296,7 @@ def snapshot(collect: bool = True, **context) -> dict:
     """One telemetry reading: RSS, live-figure count before AND after a
     cyclic collection, total GC object count, plus caller context.
 
-    WHY THE COLLECT (2026-09-14). Measured on a live session: RSS climbed
+    WHY THE COLLECT. Measured on a live session: RSS climbed
     ~365 MB per flight while `figures` rose by exactly 4 and never fell,
     `gc_objects` stayed flat at ~630k, and dropping every stored run
     freed 30 MB out of 10.4 GB. Four is the number of Plotly panes in the
@@ -422,7 +413,7 @@ class MemoryHeartbeat:
                     ctx = self._context_fn() or {}
                 except Exception as e:
                     # never let a context read kill the monitor; report it
-                    ctx = {"context_error": type(e).__name__}
+                    ctx = {"context_error": f"{type(e).__name__}: {e}"}
             snap = snapshot(**ctx)
             delta = (None if self._last_rss is None
                      else snap["rss_mb"] - self._last_rss)
@@ -480,7 +471,8 @@ class LoopStallWatchdog:
 
     def __init__(self, stall_s: float = 15.0, dump_path=None):
         """dump_path=None (default) resolves to
-        repo_root()/outputs/diagnostics/ion_gym_hang_dump.txt.
+        outputs_dir()/diagnostics/ion_gym_hang_dump.txt (the checkout's
+        outputs/ in a clone, the working folder's for an installed package).
 
         It used to default to the BARE filename "ion_gym_hang_dump.txt",
         so a hang dump landed in whatever directory the app happened to be
@@ -595,7 +587,7 @@ class LoopStallWatchdog:
         thread is identified by pulse() itself, and the idle test is on
         frame FUNCTION identity, not on paths or launch style.
 
-        THE IDLE TEST, CORRECTED 2026-09-29. It used to require the
+        THE IDLE TEST, CORRECTED. It used to require the
         INNERMOST frame to be named `select` with `_run_once` as its direct
         caller — two fixed levels. On Windows that misses, because
         `SelectorEventLoop` parks through `selectors.select` which calls the
@@ -692,7 +684,7 @@ class LoopStallWatchdog:
                 self._dumped_this_stall = True
                 benign, verdict = self._verdict(stale)
                 try:
-                    with open(self.dump_path, "a") as fh:
+                    with open(self.dump_path, "a", encoding="utf-8") as fh:
                         fh.write(
                             f"\n===== PULSE STALE {stale:.0f}s "
                             f"(threshold {self.stall_s:.0f}s) at "

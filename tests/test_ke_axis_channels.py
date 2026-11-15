@@ -18,7 +18,7 @@ Gates (per route):
   G-3 CLOSURE: ke_x + ke_y + ke_z == ke_ev at every recorded step.
   G-4 TOTAL: ke_ev == 1/2 m (speed*1e3)^2 / e (speed self-consistent).
 
-KE_RTOL = 1e-9 (PI, 2026-10-14) with m and e from physics/constants.py:
+KE_RTOL = 1e-9 with m and e from physics/constants.py:
 tight enough that a recorder on any other mass/charge constant fails
 (a 9-digit-rounded amu is off 2.05e-9; the old ported 1.6605402e-27,
 6.8e-7), loose enough that float/compiler noise (~1e-15) never does.

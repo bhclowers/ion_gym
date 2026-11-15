@@ -48,7 +48,7 @@ class EditRefusal(ValueError):
 
 
 # ---------------------------------------------------------------------
-# VIEWER FRAME (2026-09-12, the x-extrusion fix): the edit viewer's JS
+# VIEWER FRAME (the x-extrusion fix): the edit viewer's JS
 # extrudes resolved in-plane polygons along ITS z only. That is not a
 # limit of the builder (build_shapes3d accepts any axis) and it need
 # not limit the viewer either, because the ShapeSpec convention already
@@ -151,8 +151,8 @@ def inplane_domain_mm(geometry, deck_axis: str):
     """((u_lo, u_hi), (v_lo, v_hi)): the domain over a deck's STORED
     in-plane coordinates -- EXTRUDE_INPLANE_AXES[deck_axis], (x, y) for a
     z / extrude-less deck. The one place the editor turns "the deck's
-    domain" into the frame its shapes are stored in (L-553: new shapes
-    and the empty-deck view assumed (x, y) from a zero origin)."""
+    domain" into the frame its shapes are stored in (new shapes and
+    the empty-deck view once assumed (x, y) from a zero origin)."""
     if deck_axis not in _AXIS_INDEX:
         raise EditRefusal(f"inplane_domain_mm: extrude axis {deck_axis!r} "
                           f"is not one of 'x'|'y'|'z'")
@@ -248,7 +248,7 @@ def clamps_for(spec: SimSpec, policy: EditPolicy) -> List[dict]:
         })
         return out
     # WHICH STORED COORDINATE a declared WORLD mirror binds is set by
-    # the deck's extrude axis (2026-09-12, found via the StepWave: a
+    # the deck's extrude axis (found via the StepWave: a
     # world-z mirror on an x-extruded deck binds the stored in-plane
     # y_mm, not the extrude range — the previous code assumed
     # z-extrusion and emitted the extrude clamp for ANY z mirror).
@@ -287,8 +287,8 @@ def clamps_for(spec: SimSpec, policy: EditPolicy) -> List[dict]:
                           f"zero)",
             })
         else:
-            # DELIBERATE NO-CLAMP, stated (charter §8: every else has
-            # an outcome): the mirror axis is the extrude coordinate of
+            # DELIBERATE NO-CLAMP, stated (every else has an
+            # outcome): the mirror axis is the extrude coordinate of
             # a route that does not support extrudes (e.g. a planar
             # deck's z mirror — depth_mm is the stored half-domain).
             # There is no stored shape coordinate to clamp; the build
@@ -310,8 +310,8 @@ def policy_for_document(doc: object) -> Tuple[EditPolicy, SimSpec]:
     if "stages" in doc:
         raise EditRefusal(
             "multi-FA instrument document (has 'stages'): out of editor "
-            "scope by ruling (PI 2026-08-25). Edit a single-FA spec; "
-            "the stage export / re-inline path is L-195")
+            "scope. Edit a single-FA spec; the stage export / re-inline "
+            "path is not built yet")
     if "geometry" not in doc:
         raise EditRefusal(
             f"not a single-FA simulation spec: no 'geometry' block "
@@ -336,11 +336,11 @@ def policy_for_document(doc: object) -> Tuple[EditPolicy, SimSpec]:
     if b in ("stl2d", "stl3d"):
         raise EditRefusal(
             f"route {b!r}: geometry is STL-backed. Meshes are owned by "
-            f"the CAD tool that made them (L-193, PI 2026-08-25); this "
+            f"the CAD tool that made them; this "
             f"editor edits parametric shapes only")
     if b == "scene3d":
         raise EditRefusal(
-            "route 'scene3d': editing PARKED (L-194) — zero shipped decks "
+            "route 'scene3d': editing PARKED — zero shipped decks "
             "exercise this route, so an editing path here has no fixture "
             "that can falsify it. Re-opens when a scene3d deck exists")
     if b == "unwired":

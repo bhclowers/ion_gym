@@ -229,11 +229,12 @@ def shapes_masks_3d(spec: SimSpec, verbose=False):
         clash = m & (lab != 0)
         if clash.any():
             i, j, k = (int(v[0]) for v in np.where(clash))
+            from ion_gym.physics.raster2d import SHARED_NODE_HINT
             raise ValueError(
                 f"shapes3d: electrode {idx} ({el.name!r}) overlaps "
                 f"electrode {int(lab[i, j, k])} at node ({i},{j},{k}) "
                 f"(+{int(clash.sum()) - 1} more) — two conductors cannot "
-                f"own one voxel.")
+                f"own one voxel. {SHARED_NODE_HINT}")
         lab[m] = idx
         masks[idx] = m
         if verbose:

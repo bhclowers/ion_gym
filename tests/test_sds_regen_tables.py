@@ -1,21 +1,11 @@
-"""SDS regenerated-table gate.
+"""SDS shipped-table gate.
 
-Two halves:
-* SHIPPED half (always runs): the ion_gym-native artifacts
-  (sds_jump_icdf.dat, sds_mobility.dat) exist, parse, and are sane —
-  5 x 1002 monotone-nondecreasing quantile curves with the documented
-  provenance header; the mobility table parses with the declared-verbatim
-  rows.
-* HISTORICAL half (removed; retained here as record:
-  a skipped item is a reported item): the shipped table matches the
-  licensed reference original within the ACCEPTED ABSOLUTE TOLERANCE,
-  central (1-99%) max |dlog10| <= 0.09 per curve. The tolerance is the
-  measured residual of the published-procedure regeneration (full-N
-  fingerprint: ratio 1 +2.6% flat; ratios 10-1000 uniform
-  -5..-8%; ratio 1e4 tail compression), functionally certified by V06
-  re-executed on our tables: 4/4 ALL PASS (K_sds 0.0743+/-0.0043
-  mm^2/(V us) @ 1.143 V/mm; D_sds 0.00404 mm^2/us @ 5 ns; Einstein
-  2.10). This is a documented acceptance band, NOT an MC-noise band.
+The ion_gym-native jump statistics (sds_jump_icdf.dat, made by
+tools/regen_sds_tables.py) exist, parse, and are sane -- 5 x 1002
+monotone-nondecreasing quantile curves with the provenance header --
+and no mobility table ships. The tool itself is tested in
+test_regen_sds_tables_tool.py; the table's effect on flights is checked
+by test_sds_transport.py (Einstein diffusion on every route) and V06.
 """
 import pathlib
 
@@ -24,7 +14,6 @@ import numpy as np
 from ion_gym.physics import sds
 
 PHYS = pathlib.Path(sds.__file__).resolve().parent
-CENTRAL_TOL_DLOG10 = 0.09          # accepted (see docstring)
 
 
 def _load_curves(path):
@@ -54,15 +43,12 @@ def test_shipped_jump_icdf_sane():
     assert np.all(np.diff(med) > 0), f"median ordering broken: {med}"
 
 
-def test_shipped_mobility_table_sane():
-    p = PHYS / sds.MOBILITY_FILE
-    assert p.exists(), f"shipped mobility table missing: {p}"
-    md = sds.load_massdata(str(p))
-    # the declared-verbatim compilation: the tune ions must be present
-    masses = set(np.asarray(md["mass"]).astype(int)) if isinstance(
-        md, dict) else {int(r[0]) for r in md}
-    for m in (190, 130, 322, 622, 922):
-        assert m in masses, f"expected mass row {m} missing"
+def test_no_mobility_table_ships():
+    """No mobility table is shipped: K0 and the diameter come from the
+    published estimators (the old table's rows were another program's
+    distributed values)."""
+    assert not (PHYS / "sds_mobility.dat").exists()
+    assert not hasattr(sds, "MOBILITY_FILE")
 
 
 # test_matches_licensed_original_within_accepted_tolerance REMOVED

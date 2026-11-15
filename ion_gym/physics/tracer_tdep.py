@@ -9,7 +9,7 @@ weighted sum of per-electrode unit-voltage basis grids:
     phi(x, t) = phi_base(x) + sum_i  V_i(t)/V_unit * phi_i(x)          (V_unit=1e4)
 
 We port that. The basis fields are pre-differentiated to V/m ONCE (each
-mirror-extended exactly like FieldNumba), and the kernel forms the E field per
+mirror-extended by tracer_numba.build_field), and the kernel forms the E field per
 RK4 substep as E_base + sum_i (V_i(t)/1e4) E_i. For the buncher there is one
 driven electrode and a single step waveform, but the machinery is general.
 

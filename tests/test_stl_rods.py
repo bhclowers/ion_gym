@@ -24,6 +24,7 @@ import numpy as np
 import trimesh
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+from ion_gym.io.paths import outputs_dir  # noqa: E402  scratch under the configured outputs root
 from ion_gym.io.stl_upload import (load_mesh_bytes, propose_sizing, spec_from_upload,
                         check_mask_overlaps)
 
@@ -66,7 +67,7 @@ def test_part_frame_caught():
     raw = _raw()
     meshes = [load_mesh_bytes(f"Rod_{i}.STL", raw[i]) for i in (1, 2, 3, 4)]
     s = propose_sizing(meshes, pitch=0.25, margin_mm=1.5)
-    spec = spec_from_upload(meshes, DC, s, "/tmp/rods_gate_asis",
+    spec = spec_from_upload(meshes, DC, s, str(outputs_dir("tests", "rods_gate_asis")),
                             rf_groups=RF)
     ov = check_mask_overlaps(spec)
     assert ov and "overlaps" in ov[0][0], \
@@ -77,7 +78,7 @@ def test_part_frame_caught():
 def test_assembled_quad_field():
     assembled = assemble(_raw())
     s = propose_sizing(assembled, pitch=0.2, margin_mm=2.0)
-    spec = spec_from_upload(assembled, DC, s, "/tmp/rods_gate_asm",
+    spec = spec_from_upload(assembled, DC, s, str(outputs_dir("tests", "rods_gate_asm")),
                             rf_groups=RF)
     # DECLARED seed: this spec is built and flown; seed 0
     # = the historical draws its expectations were measured under.

@@ -92,7 +92,8 @@ class ProfileCurve:
 
 
 def render_profiles(curves, *, xlabel, ylabel, title, subtitle,
-                    vmarks=(), hmarks=(), logy=False, logx=False,
+                    vmarks=(), hmarks=(), hmark_legend=False,
+                    show_titles=True, logy=False, logx=False,
                     figsize=(7.0, 4.6), legend_loc="best", legend_ncol=1,
                     legend_fontsize=8, title_fontsize=9,
                     label_fontsize=None, tick_fontsize=None):
@@ -101,9 +102,16 @@ def render_profiles(curves, *, xlabel, ylabel, title, subtitle,
     curves : list[ProfileCurve]
     vmarks : [(x, label)] vertical reference lines (e.g. a wall position)
     hmarks : [(y, label)] horizontal reference lines (e.g. kT)
-    subtitle: the operating point, stated on the figure (required).
+    subtitle: the operating point (required). show_titles=False draws
+        no title block for a figure whose DOCUMENT CAPTION carries the
+        operating point; the subtitle is still required at the call
+        site so the tune is declared where the figure is made.
+    hmark_legend: True draws each hmark as an unannotated reference
+        line that enters the legend under its label (an empty label
+        adds no entry, so identical lines can share one); False keeps
+        the annotated line.
 
-    Publication styling (added 2026-10-22; every default reproduces the
+    Publication styling (every default reproduces the
     previous hardcoded value, so existing callers render identically --
     the change is additive and configuration-agnostic by construction):
     legend_loc / legend_ncol / legend_fontsize place and size the
@@ -133,17 +141,23 @@ def render_profiles(curves, *, xlabel, ylabel, title, subtitle,
                     ha="left", va="top", fontsize=8, rotation=90,
                     color="#333333")
     for yv, lbl in hmarks:
-        ax.axhline(float(yv), color="#888888", ls=":", lw=0.9)
-        ax.annotate(f" {lbl}", (ax.get_xlim()[0], float(yv)),
-                    ha="left", va="bottom", fontsize=8, color="#333333")
+        if hmark_legend:
+            ax.axhline(float(yv), color="#888888", ls=":", lw=0.9,
+                       label=(str(lbl) if str(lbl) else None))
+        else:
+            ax.axhline(float(yv), color="#888888", ls=":", lw=0.9)
+            ax.annotate(f" {lbl}", (ax.get_xlim()[0], float(yv)),
+                        ha="left", va="bottom", fontsize=8,
+                        color="#333333")
     if logy:
         ax.set_yscale("log")
     if logx:
         ax.set_xscale("log")
     ax.set_xlabel(xlabel, fontsize=label_fontsize)
     ax.set_ylabel(ylabel, fontsize=label_fontsize)
-    ax.set_title(f"{_wrap_title(title, ax.figure)}\n{_wrap_sub(subtitle)}",
-                 fontsize=title_fontsize)
+    if show_titles:
+        ax.set_title(f"{_wrap_title(title, ax.figure)}\n{_wrap_sub(subtitle)}",
+                     fontsize=title_fontsize)
     if tick_fontsize is not None:
         ax.tick_params(labelsize=tick_fontsize)
     ax.legend(fontsize=legend_fontsize, framealpha=0.9, loc=legend_loc,

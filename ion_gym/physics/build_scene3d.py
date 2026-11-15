@@ -54,7 +54,7 @@ def scene_of(spec: SimSpec):
         src = str(spec.import_path or "")
         p = Path(src) if (src and len(src) < 4096 and "\n" not in src) else None
         if p is not None and p.exists():
-            sc = GeomScene.from_json(p.read_text())          # legacy
+            sc = GeomScene.from_json(p.read_text(encoding="utf-8"))          # legacy
         elif src.lstrip().startswith("{"):
             sc = GeomScene.from_json(src)                    # legacy inline text
         else:
@@ -165,7 +165,7 @@ def simspec_from_scene(scene, *, json_path=None, name=None, dc_group=None,
         dc_groups=dc_groups)
 
     if json_path:                     # optional sidecar, for the record only
-        Path(json_path).write_text(sc.to_json())
+        Path(json_path).write_text(sc.to_json(), encoding="utf-8")
     return SimSpec(geometry=geo, source=SourceSpec(),
                    name=(name or sc.name or "scene3d"),
                    notes=sc.notes, builder="scene3d",

@@ -28,6 +28,11 @@ Design invariants (why it is shaped this way):
     concern) — the driver already avoids holding locks across a flight.
 """
 
+# The public names (docs/PUBLIC_API.md); everything else is internal.
+__all__ = ["run", "fly_all", "run_threaded", "default_workers",
+           "IonResult", "EnsembleProgress", "RunHandle", "StopToken",
+           "viability_transmission", "viability_beam_shrinks"]
+
 import threading
 import time
 from dataclasses import dataclass, field
@@ -63,6 +68,10 @@ class EnsembleProgress:
     # one shape for both paths.
     n_workers: int = 1
     in_flight: int = 0
+    # io.run_provenance.run_provenance of the build that flew this run (the
+    # deck as flown, the seed used, the code versions); set by the caller
+    # that built it, so a saved run can name exactly what flew
+    provenance: Optional[dict] = None
 
     @property
     def fraction(self) -> float:
@@ -249,10 +258,9 @@ def _iter_batches_parallel(
     halt = threading.Event()              # failure OR stop: start no ion
 
     def _worker_loop():
-        while True:
-            i = work.get()
-            if i is None:
-                return
+        # one queued item per pass, until the None sentinel the finally
+        # block below always sends (one per worker)
+        for i in iter(work.get, None):
             if halt.is_set() or (stop_token is not None
                                  and stop_token.stopped):
                 done_q.put((i, None, None, "skipped"))
@@ -293,7 +301,10 @@ def _iter_batches_parallel(
         next_i = 0
         outstanding = 0
         last_emit = 0
-        while True:
+        # each pass takes ONE finished ion off done_q, and at most n_ions
+        # are ever submitted, so n_ions + 1 passes (the last one breaks
+        # on outstanding == 0) always suffice
+        for _pass in range(n_ions + 1):
             want_stop = (halt.is_set()
                          or (stop_token is not None
                              and stop_token.stopped))
@@ -341,6 +352,11 @@ def _iter_batches_parallel(
                 return
             if failure is None:
                 yield prog
+        else:
+            raise RuntimeError(
+                f"ensemble driver: {n_ions + 1} completions taken for "
+                f"{n_ions} ions with {outstanding} still outstanding; the "
+                f"submit/complete bookkeeping is broken")
         if failure is not None:
             i, e = failure
             results.sort(key=lambda x: x.index)
@@ -369,18 +385,26 @@ def run(
     check_every: int = 25,
     decimate: int = 1,
     keep_full: bool = False,
+    keep_traj: bool = True,
     viability=None,
     stop_token: Optional[StopToken] = None,
     on_progress: Optional[Callable[[EnsembleProgress], None]] = None,
+    n_workers: int = 1,
 ):
     """Synchronous run. Drains the batch generator, invoking on_progress
     (e.g. a tqdm update or a FigureWidget refresh) each batch. Returns
-    the final EnsembleProgress (with .results, .stopped_early)."""
+    the final EnsembleProgress (with .results, .stopped_early).
+
+    n_workers > 1 flies ions on the thread pool of _iter_batches, the
+    path run_threaded (the workbench) already uses; a seeded run gives
+    results identical to n_workers = 1 (contract in _iter_batches).
+    It was not exposed here, so every synchronous caller (notebooks,
+    scripts) flew on one core regardless of the machine."""
     last = None
     for prog in _iter_batches(
             n_ions, fly_fn, check_every=check_every, decimate=decimate,
-            keep_full=keep_full, viability=viability,
-            stop_token=stop_token):
+            keep_full=keep_full, keep_traj=keep_traj, viability=viability,
+            stop_token=stop_token, n_workers=n_workers):
         last = prog
         if on_progress is not None:
             on_progress(prog)
@@ -430,6 +454,35 @@ class RunHandle:
         if self._thread is not None:
             self._thread.join(timeout)
         return self.final
+
+
+def fly_all(n_ions: int, fly_fn: Callable[[int], tuple], *,
+            n_workers: int, keep_traj: bool = True,
+            on_progress: Optional[Callable[[EnsembleProgress], None]] = None,
+            check_every: int = 25) -> list:
+    """[(traj, summary)] for ions 0..n_ions-1, in index order, flown on
+    n_workers threads. The drop-in for the sequential notebook idiom
+    [fly(i) for i in range(n)]: the same pairs come back in the same
+    order, and a seeded flight gives the same values at any worker count
+    (the _iter_batches contract). keep_traj=False returns traj None and
+    stores fates only. An ion that raises stops the run and re-raises
+    (the _iter_batches failure contract), so no ion is dropped silently.
+    on_progress, if given, receives each batch's EnsembleProgress (done,
+    total, elapsed_s), every check_every ions, so a long flight that used
+    to report per ion still reports.
+    """
+    n_ions = int(n_ions)
+    if n_ions < 0:
+        raise ValueError(f"fly_all: n_ions must be >= 0, got {n_ions}")
+    prog = run(n_ions, fly_fn, keep_traj=keep_traj, n_workers=n_workers,
+               on_progress=on_progress, check_every=check_every)
+    res = sorted(prog.results, key=lambda r: r.index)
+    if len(res) != n_ions or prog.stopped_early:
+        raise RuntimeError(
+            f"fly_all: {len(res)} of {n_ions} ions returned"
+            + (f" (stopped: {prog.stop_reason})" if prog.stopped_early
+               else ""))
+    return [(r.traj, r.summary) for r in res]
 
 
 def run_threaded(

@@ -41,7 +41,7 @@ class SolveInterrupted(Exception):
 
 _STOP = threading.Event()
 
-# PROCESS-WIDE SOLVE EXCLUSIVITY (2026-09-29, from a live crash). The
+# PROCESS-WIDE SOLVE EXCLUSIVITY (from a live crash). The
 # solve kernels here and in solver3d are @njit(parallel=True), and
 # numba's default `workqueue` threading layer TERMINATES the process if
 # two Python threads enter parallel regions concurrently ("Concurrent
@@ -280,8 +280,8 @@ def solve_bases_mg(masks, scene=None, mirror=(False, False, False),
                     f"{tol:.1e} without raising — convergence contract "
                     f"broken upstream; refusing to cache.")
             out[i] = phi
-            # THIS MACHINE'S MULTIGRID RATE for the solve-cost quote
-            # (L-439): the one multigrid door records every converged
+            # THIS MACHINE'S MULTIGRID RATE for the solve-cost quote:
+            # the one multigrid door records every converged
             # basis it solves.
             from ion_gym.physics.sizing import record_solve
             record_solve("mg", metal.size, basis_s=_time.time() - _t0)
@@ -717,8 +717,8 @@ def solve3d_vmg(fixed, val, theta=None, mirror=(False, False, False),
                 f"V-cycle STAGNATED at cycle {cyc}: delta {cycle_d:.3e} V "
                 f"stopped improving (previous {prev_cycle_d:.3e}) before "
                 f"reaching tol {tol:.1e}. A stalled iterate is not a "
-                f"converged field (2026-09-05: external review found this "
-                f"path returned silently, contradicting V01's never-silent "
+                f"converged field (this path once returned silently, "
+                f"contradicting the solver's never-silent "
                 f"contract). Loosen tol toward the achieved delta, refine "
                 f"the float32 transfer floor, or pass "
                 f"accept_stagnation=True to knowingly take the iterate.")

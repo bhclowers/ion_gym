@@ -72,7 +72,7 @@ def secular_micro(t_us, v_mmus, period_us: float):
     # (`for w in unique(win): sec[win == w] = ...`) rescanned the whole
     # record once per RF window -- O(N x W), ~1e10 comparisons on a
     # millisecond gas-phase trajectory -- and froze the UI from the
-    # thermal-assess button (hang dump 2026-10-21: both stale-pulse
+    # thermal-assess button (a hang dump had both stale-pulse
     # stacks parked on the masked assignment). Same numbers, same
     # dtype: sum/count per window, broadcast back by inverse index.
     _uniq, inv = np.unique(win, return_inverse=True)
@@ -198,8 +198,10 @@ def operating_point(spec) -> str:
     dcs = ", ".join("{0} {1:g}V".format(e.name, spec.dc_effective(e))
                     for e in spec.geometry.electrodes
                     if spec.dc_effective(e) not in (None, 0.0))
+    from ion_gym.physics.ion_envelope import charge_str
     mz = "/".join("{0:g}".format(m) for m in (spec.source.mz_list or []))
-    return ("RF[{gs}] DC[{dcs}] {p:g} Torr {gas} m/z {mz} "
+    mz = f"{mz} Da {charge_str(spec.source.charge)}"
+    return ("RF[{gs}] DC[{dcs}] {p:g} Torr {gas} mass {mz} "
             "n={n} t_max {tm:g}us dt {dt:g}ns").format(
         gs=gs, dcs=dcs or "-", p=spec.collisions.P_torr,
         gas=spec.collisions.gas, mz=mz or "-", n=spec.source.n_ions,
@@ -208,7 +210,7 @@ def operating_point(spec) -> str:
 
 def _species_block(sub, cols, spec, m_da, steady_frac, t_max, p_us,
                    confined_fate, axes, dist_lookup):
-    """All metrics for ONE species (the sub-list of results at m/z m_da).
+    """All metrics for ONE species (the sub-list of results at mass m_da).
     Thermal fields are None (with 'note') when the species left no
     steady-window samples — an infeasible candidate is REPORTED, not a
     crash and not a silent skip."""
@@ -375,7 +377,7 @@ def _mz_per_ion(spec, n: int):
     mzs = mz_of_results(spec, n)
     if any(m is None for m in mzs):
         raise ValueError("spec.source.mz_list is empty — temperatures need "
-                         "a mass; declare m/z in the spec.")
+                         "a mass; declare the ion masses (source.mz_list, Da).")
     return mzs
 
 
@@ -417,7 +419,7 @@ def make_confinement_objective(*, retention_min: float = 0.95,
 # THE KE display/fit clip: energies above this percentile of the positive
 # KE are left out of the T_slope histogram (and drawn beyond the axis by
 # viz_core.temperature_estimator_figure, which reads this same constant).
-# A declared 0.5% clip -- see slope_temperature for why (L-552: was a
+# A declared 0.5% clip -- see slope_temperature for why (it was a
 # literal here and retyped, with its "0.5%" label, in the figure).
 KE_TAIL_CLIP_PCTL = 99.5
 # fewer clipped positive-KE samples than this: no T_slope (NaN)

@@ -97,7 +97,7 @@ def test_synthetic():
     assert abs(g.resolving_power - R_expect) / R_expect < 1e-12
     assert st.impact_spread["x"][0] == 5.0        # fate-0 locations tracked
     md = stats_markdown(st)
-    assert "m/z" in md and "60.0%" in md
+    assert "mass (Da)" in md and "60.0%" in md
     print(f"  synthetic: fates {st.fate_counts}, T=60%, "
           f"R(mz100)={g.resolving_power:.1f} (expect {R_expect:.1f})  OK")
 
@@ -292,7 +292,7 @@ def test_stats_markdown_every_fate_code():
     re-exported by stats), so a fate added there is covered here without
     an edit. It flew a hard-coded (0, 1, 2, 3) while asserting every
     FATE_NAME entry, and failed once the table grew to the station fates
-    and the named unknown (L-569, PI ruling 2026-10-16: fix the test)."""
+    and the named unknown (the test was at fault, not the table)."""
     from ion_gym.physics.stats import FATE_NAME
     res, mz = [], []
     for code in sorted(FATE_NAME):

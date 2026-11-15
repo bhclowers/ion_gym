@@ -6,19 +6,20 @@ any geometry — not just the funnel. One SimSpec answers every setup
 question:
 
   geometry   : electrodes as inline shapes (rect/ellipse/polygon/cutout,
-               mm-space, matching ion_playground's vocabulary) OR a
+               mm-space, the scene-JSON shape vocabulary) OR a
                reference to STL files (one per electrode/basis). Symmetry
                is declared (planar | cylindrical | none) so the same spec
                drives a 2-D cross-section or a 3-D solve.
-  voltages   : per electrode — dc, rf_amplitude, rf_frequency_hz,
-               rf_phase_deg (ion_playground's exact field names). The
+  voltages   : per electrode — dc, and rf_groups naming the drive groups
+               it belongs to; each drive group (geometry.rf_groups) carries
+               amplitude_v, frequency_hz, phase_deg and its waveform. The
                field assembler turns these into A + sum_k s_k(t) B_k, so
                DC-only, single-RF (two-phase), and multi-phase drives are
                all expressible. Adjusting voltages never re-solves the
                bases — it re-weights them (the fast-adjust invariant), so
                the app can sweep voltages and redraw fields live.
   source     : ion births — a distribution spec (point | disc | grid |
-               line | file), KE or velocity spread, m/z list, charge,
+               line | file), KE or velocity spread, mass list (Da), charge,
                time-of-birth spread, count.
   collisions : HS on/off + gas, T, P, sigma (the C-1 kernel's params).
                enabled=false gives a vacuum run (reflectron, TOF).
@@ -35,6 +36,20 @@ turns a SimSpec into (field model, fly_fn) lives in sim_build.py, so the
 schema has no heavy dependencies and can be edited/inspected anywhere.
 """
 
+# The public names (docs/PUBLIC_API.md); everything else is internal.
+__all__ = [
+    "SimSpec", "GeometrySpec", "ElectrodeSpec", "ShapeSpec", "SymmetrySpec",
+    "SourceSpec", "CollisionSpec", "IntegrationSpec", "BoundsSpec",
+    "StationSpec", "ViewSpec", "RFGroupSpec", "DCGroupSpec",
+    "TransporterSpec", "OpticAxisSpec",
+    "MissingPhysicsKey", "SCHEMA_VERSION",
+    "set_pitch", "PitchChange",
+    "check_recording_capacity", "min_rec_every", "flight_steps",
+    "BASE_CHANNELS", "OPTIONAL_CHANNELS", "RADIAL_CHANNELS",
+    "build_travelling_wave", "retune_travelling_wave",
+    "reverse_travelling_wave", "travelling_wave_groups",
+]
+
 import json
 import math
 from dataclasses import dataclass, field, asdict, fields, MISSING
@@ -43,6 +58,26 @@ from typing import List, Optional, Dict, Any
 
 
 SCHEMA_VERSION = 1
+
+
+def check_schema_version(d, what="SimSpec"):
+    """Refuse a deck whose declared schema_version this version of
+    ion_gym does not read.
+
+    A deck written for a later schema may mean something different by
+    the same keys, and saving it would relabel it as this version, so it
+    is refused rather than loaded on trust. A deck that declares no
+    version predates versioning and is read as version 1."""
+    if "schema_version" not in d:
+        return          # pre-versioning deck: read as version 1
+    v = d["schema_version"]
+    if type(v) is not int or v != SCHEMA_VERSION:
+        raise ValueError(
+            f"{what}: schema_version {v!r} is not one this ion_gym reads "
+            f"(it reads {SCHEMA_VERSION}). A deck written for a different "
+            f"schema can mean something different by the same keys; load it "
+            f"with the ion_gym that wrote it, or correct the declared "
+            f"version if the content is version {SCHEMA_VERSION}.")
 
 # Builders whose geometry is NOT carried in the spec's electrodes. For these
 # the ElectrodeSpec is a VOLTAGE record (name/dc/rf_group/basis) and the
@@ -67,6 +102,18 @@ RF_RECOMMENDED_STEPS_PER_PERIOD = 250
 # velocity ensemble then measures one phase's micromotion, not the
 # distribution. 5% commensurability window.
 STROBE_WINDOW_FRAC = 0.05
+# LONG-FLIGHT ADVISORY. Above this many integrator steps for the whole
+# ensemble (steps per ion x ions, an upper bound: an ion that ends early
+# takes fewer) the run is announced as long, with an estimate. About five
+# times the largest shipped deck (the RF drift cell, 2e9). A warning, not
+# a refusal: long trapping runs are legitimate; a flight too long to count
+# is refused separately (MAX_FLIGHT_STEPS).
+LONG_FLIGHT_ION_STEPS = 1e10
+# Integrator cost per ion-step on one core, measured on shipped decks
+# (r-z vacuum 32 ns; r-z and planar with gas 87-101 ns; 3-D vacuum
+# 108 ns). An order of magnitude for the estimate, not a calibration:
+# other machines differ, and worker threads divide the wall time.
+FLIGHT_NS_PER_STEP = (30.0, 110.0)
 
 # recordable per-step channels (same set the funnel path validated)
 OPTIONAL_CHANNELS = {
@@ -94,19 +141,18 @@ BASE_CHANNELS = ["t", "x", "y", "z", "vx", "vy", "vz"]
 # --------------------------------------------------------------- geometry
 class MissingPhysicsKey(ValueError):
     """A deck leaves out a key that sets the physics and whose default is
-    one deck's operating point (R2, PI ruling 2026-10-15)."""
+    one deck's operating point."""
 
 
-# ELECTRODE LIMIT (L-538, PI ruling 2026-10-15: "keep it as is right now
-# for 255 ... if someone tries to load more than 255 electrodes, then
-# refuse with a message to contact the developer"). The solved-field
+# ELECTRODE LIMIT: at most 255; a deck with more electrodes is refused
+# with a message to contact the developer. The solved-field
 # cache stores electrode labels in 8 bits (basis_cache, uint8), so label
 # 256 would wrap to 0 silently; the largest deck in the tree has 140.
 MAX_ELECTRODES = 255
 
 # THE source distributions (validate and sim_build.generate_births both read
 # this; a distribution added in one place and not the other is refused, not
-# silently born as a point source -- L-554).
+# silently born as a point source).
 SOURCE_DISTRIBUTIONS = ("point", "disc", "line", "grid", "box", "gaussian",
                         "file")
 
@@ -122,6 +168,30 @@ def electrode_limit_error(n):
             f"contact the ion_gym developer to raise the limit.")
 
 
+def nonfinite_numbers(obj, path=""):
+    """[(deck path, value)] for every NaN or infinite number inside a
+    nested dict/list such as a spec's to_dict(). A list item that is a
+    dict with a "name" is labelled by it, so the path reads the way the
+    deck does: geometry.electrodes[2](lens).dc. Booleans are not numbers
+    here."""
+    out = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out += nonfinite_numbers(v, f"{path}.{k}" if path else str(k))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            label = (f"({v['name']})" if isinstance(v, dict) and "name" in v
+                     else "")
+            out += nonfinite_numbers(v, f"{path}[{i}]{label}")
+    elif isinstance(obj, float) and not math.isfinite(obj):
+        out.append((path, obj))
+    elif (not isinstance(obj, (bool, int, float, str)) and obj is not None
+          and hasattr(obj, "dtype") and getattr(obj, "shape", None) == ()
+          and not math.isfinite(float(obj))):
+        out.append((path, float(obj)))    # a numpy scalar
+    return out
+
+
 _NO_DEFAULT = object()
 
 
@@ -135,28 +205,48 @@ def _field_default(cls, name):
     return _NO_DEFAULT
 
 
+# Required keys renamed with a unit change: {new: (old, factor, old unit)},
+# so a deck that states only the old key is told how to convert it.
+_RENAMED_KEYS = {"dt_ns": ("dt_us", 1000.0, "microseconds")}
+
+
 def _check_missing(cls, d):
-    """MISSING-KEY ACCOUNTING (R2, PI ruling 2026-10-15: "split between
-    physics and cosmetic"). Each spec class declares two tiers; one rule
+    """MISSING-KEY ACCOUNTING, split between physics and cosmetic keys.
+    Each spec class declares two tiers; one rule
     enforces them for every block:
       cls._load_required(d) -- keys that SET THE PHYSICS and whose
-          dataclass default is one deck's operating point (m/z 556, KE
+          dataclass default is one deck's operating point (556 Da, KE
           0.1-1.9 eV, 500 kHz / 50 V ...). Missing -> REFUSED by name.
       cls._LOAD_ANNOUNCE -- COSMETIC keys (display, recording density).
           Missing -> loaded at the default and ANNOUNCED by name.
     Every other key has a NEUTRAL default (zero, off, unlimited, the
     convention) and loads silently: a feature left out is a feature off,
-    the same reading as "no collisions block = vacuum" (R3 Q1)."""
+    the same reading as "no collisions block = vacuum"."""
     req = [k for k in cls._load_required(d) if k not in d]
     if req:
         def _one(k):
             v = _field_default(cls, k)
             return k if v is _NO_DEFAULT else f"{k} (default {v!r})"
         shown = ", ".join(_one(k) for k in req)
+        # a required key the deck states under an OLD name: say so, with
+        # the conversion (a dt_us deck was refused naming only dt_ns)
+        hints = []
+        for k in req:
+            old, factor, unit = _RENAMED_KEYS.get(k, (None, None, None))
+            if old is not None and old in d:
+                try:
+                    conv = f" ({old} = {d[old]!r} -> {k} = " \
+                           f"{float(d[old]) * factor:g})"
+                except (TypeError, ValueError):
+                    conv = ""
+                hints.append(f" The deck has {old!r}, the old name of {k!r} "
+                             f"in {unit}: state {k} = {old} x {factor:g}"
+                             f"{conv}.")
         raise MissingPhysicsKey(
             f"{cls.__name__}: the deck does not state {shown}. These set "
             f"the physics, and the defaults are one deck's operating "
-            f"point, not a neutral value -- state them in the deck.")
+            f"point, not a neutral value -- state them in the deck."
+            + "".join(hints))
     ann = [k for k in cls._LOAD_ANNOUNCE if k not in d]
     if ann:
         import warnings
@@ -236,7 +326,7 @@ class _StrictAttrs:
     SourceSpec._drawn_seed (the seed actually drawn in random mode)."""
 
     _RUNTIME_ATTRS: frozenset = frozenset({"_extras"})
-    # Missing-key tiers (R2; see _check_missing). Default: nothing is
+    # Missing-key tiers (see _check_missing). Default: nothing is
     # refused and nothing announced -- a class opts keys in.
     _LOAD_ANNOUNCE: tuple = ()
 
@@ -303,7 +393,7 @@ EXTRUDE_INPLANE_AXES = {"x": ("y", "z"), "y": ("z", "x"),
                         "z": ("x", "y")}
 
 
-# ONE SHAPE-OFFSET AUTHORITY (L-527), for every shape kind the
+# ONE SHAPE-OFFSET AUTHORITY, for every shape kind the
 # rasterizer draws (raster2d._shape_mask: rect, ellipse, polygon; a
 # cutout subtracts its child). It lived in the editor (edit.outline.
 # shift_shape, which now delegates here); the assembly flatten shifted
@@ -374,7 +464,7 @@ def shape_metal_bounds_mm(shape: dict):
 class ShapeSpec(_StrictAttrs):
     """A geometry primitive in mm-space. type in
     {rect, ellipse, polygon, cutout, group}. Fields mirror
-    ion_playground.shapes so its scene JSONs translate directly.
+    the scene-JSON shape vocabulary so scene JSONs translate directly.
 
     OPTIONAL EXTRUSION: params may
     carry
@@ -402,7 +492,7 @@ class ShapeSpec(_StrictAttrs):
         if legacy:
             raise ValueError(
                 f"shape {self.type!r} carries legacy extrusion key(s) "
-                f"{legacy} (pre-2026-08-02 extrude_spec output). These "
+                f"{legacy} (older extrude_spec output). These "
                 f"were superseded by the extrude descriptor; reading "
                 f"them as full-length would be silently wrong. Rewrite "
                 f"as extrude={{'axis': 'z', 'lo_mm': ..., 'hi_mm': ...}} "
@@ -436,6 +526,27 @@ class ShapeSpec(_StrictAttrs):
                 f"shape {self.type!r}: extrude lo_mm ({lo:g}) must be "
                 f"<= hi_mm ({hi:g})")
         return {"axis": ax, "lo_mm": lo, "hi_mm": hi}
+
+    # Size parameters that must be positive. The rasterizers do not refuse
+    # a bad one: an ellipse squares its radii, so a negative radius draws
+    # the same ellipse as the positive one, and a zero one draws almost
+    # nothing; a non-positive rect side draws nothing.
+    SIZE_PARAMS = ("width_mm", "height_mm", "rx_mm", "ry_mm")
+
+    def size_errors(self, where):
+        """Refusals for non-positive size parameters, for this shape and
+        its children (a cutout's inner shape), naming `where`."""
+        errs = []
+        for k in self.SIZE_PARAMS:
+            v = self.params.get(k)
+            if (isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and v <= 0):
+                errs.append(f"{where} ({self.type}): {k} = {v!r} must be > 0 "
+                            f"-- a non-positive size is drawn as its mirror "
+                            f"or as nothing, not refused, by the rasterizer")
+        for i, c in enumerate(self.children):
+            errs += c.size_errors(f"{where}.children[{i}]")
+        return errs
 
     def to_dict(self):
         d = {"type": self.type, **self.params}
@@ -539,7 +650,7 @@ class RFGroupSpec(_StrictAttrs):
 
     @classmethod
     def _load_required(cls, d):
-        # R2: the drive's size and rate are one deck's operating point
+        # The drive's size and rate are one deck's operating point
         # (50 V / 500 kHz). A table waveform takes its timing from its
         # breakpoints, so it has no frequency to state.
         if d.get("waveform", "sin") == "table":
@@ -598,8 +709,7 @@ def travelling_wave_groups(n, frequency_hz=5e5, amplitude_v=50.0,
 
 def reverse_travelling_wave(spec, *, prefix="TW"):
     """Flip the propagation DIRECTION of an existing travelling-wave
-    ladder (PI, 2026-09-29: "sometimes when you specify the TW it is
-    going the wrong way").
+    ladder (a TW specified one way sometimes needs to run the other).
 
     Each TW group drives waveform(w*t + phase_k); the wave's direction
     lives entirely in the SIGN of the phase progression across the
@@ -655,7 +765,7 @@ def retune_travelling_wave(spec, *, amplitude_v=None, frequency_hz=None,
     # creation order = trailing integer (TW0, TW1, ...): the phase index,
     # so re-stepping matches travelling_wave_groups' k*step convention.
     # A suffix that is not an integer has no phase index: refused by name
-    # (it used to sort as 0, silently re-phasing that group -- L-556).
+    # (it used to sort as 0, silently re-phasing that group).
     def _k(gr):
         tail = gr.name[len(prefix):]
         if not tail.isdigit():
@@ -810,7 +920,7 @@ class DCGroupSpec(_StrictAttrs):
       'weights' -- per-member `dc_weight` in [0,1] positions each tap along
                    the ramp, for an unequal ladder. Set exactly one.
 
-    mode (PI ruling 2026-09-29: "I want groups to be additive"):
+    mode (groups can be additive):
       'set' -- everything above: the group OWNS the member voltage, the
                member dc is derived, not authored. The ladder/divider
                semantics every shipped deck uses; the default, so every
@@ -842,7 +952,7 @@ class DCGroupSpec(_StrictAttrs):
 
     @classmethod
     def from_dict(cls, d):
-        # Through the one key-accounting door (L-525): this filtered on
+        # Through the one key-accounting door: this filtered on
         # __dataclass_fields__, so a misspelled 'v_inn' loaded as v_in =
         # 0.0 with no warning.
         return _take_known(cls, dict(d or {}))
@@ -905,9 +1015,11 @@ class ElectrodeSpec(_StrictAttrs):
     or amplitude: that made two ways to say one thing.
 
     Back-compat on LOAD only: from_dict folds a legacy singular
-    `rf_group` into `rf_groups`, and drops obsolete per-electrode
-    rf_amplitude/rf_frequency_hz/rf_phase_deg with those semantics moved
-    to the group. New specs never write them."""
+    `rf_group` into `rf_groups`. The obsolete per-electrode
+    rf_amplitude/rf_frequency_hz/rf_phase_deg are dropped when zero (zero
+    asks for nothing the group model does not already do) and REFUSED
+    when non-zero, because the group model never applies them. New specs
+    never write them."""
     name: str
     shapes: List[ShapeSpec] = field(default_factory=list)
     stl: Optional[str] = None
@@ -982,7 +1094,7 @@ class ElectrodeSpec(_StrictAttrs):
     def is_rf(self):
         return bool(self.group_names())
 
-    _LOAD_ANNOUNCE = ("color",)          # R2: display only
+    _LOAD_ANNOUNCE = ("color",)          # display only
 
     def to_dict(self):
         d = asdict(self)
@@ -994,22 +1106,42 @@ class ElectrodeSpec(_StrictAttrs):
         _check_missing(cls, d)
         d = dict(d)
         d["shapes"] = [ShapeSpec.from_dict(s) for s in d.get("shapes", [])]
-        # LEGACY FOLD (clean drive model): singular rf_group ->
-        # rf_groups; per-electrode rf_phase_deg 180 becomes a distinct
-        # group only if the caller already split rails by group, so we
-        # simply drop the obsolete per-electrode fields (their semantics
-        # moved to RFGroupSpec). A legacy JSON that relied on per-electrode
-        # phase to make a rail is refused loudly at compose time, not
-        # silently mis-driven.
+        # LEGACY FOLD (clean drive model): singular rf_group -> rf_groups,
+        # which means the same thing in the group model.
         groups = list(d.get("rf_groups", []) or [])
         if d.get("rf_group") and d["rf_group"] not in groups:
             groups = [d["rf_group"]] + groups
         d["rf_groups"] = groups
-        # documented legacy folds — deliberately dropped,
-        # so they must not trip the loud unknown-key warning
         d.pop("rf_group", None)
-        d.pop("rf_phase_deg", None)
+        # LEGACY PER-ELECTRODE DRIVE: amplitude, frequency and phase live
+        # on the drive group (RFGroupSpec), and nothing reads these keys.
+        # A ZERO value asks for nothing the group model does not already
+        # do, so it is dropped on purpose (legacy decks carry
+        # rf_phase_deg: 0 on every electrode). A NON-ZERO value is a drive
+        # the deck asks for and would not get -- two plates at phase 0 and
+        # 180 flew in phase, and per-electrode amplitudes flew with no RF
+        # at all -- so it is refused, naming the way to say it.
+        for key in _LEGACY_ELECTRODE_DRIVE:
+            if key not in d:
+                continue
+            v = d.pop(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) \
+                    and v == 0:
+                continue      # zero: a deliberate no-op, see above
+            raise ValueError(
+                f"electrode {d.get('name', '?')!r}: per-electrode {key} = "
+                f"{v!r} is not part of the drive model and would be ignored. "
+                f"Amplitude, frequency and phase belong to a drive group: "
+                f"declare geometry.rf_groups entries with amplitude_v, "
+                f"frequency_hz and phase_deg (e.g. two groups 180 deg apart "
+                f"for a rod pair) and list the group names in this "
+                f"electrode's rf_groups.")
         return _take_known(cls, d, checked=True)
+
+
+# Per-electrode drive keys from before the drive-group model (see
+# ElectrodeSpec.from_dict): dropped when zero, refused otherwise.
+_LEGACY_ELECTRODE_DRIVE = ("rf_amplitude", "rf_frequency_hz", "rf_phase_deg")
 
 
 # RESOLUTION ADVISORY THRESHOLD, in CELLS.
@@ -1214,8 +1346,8 @@ class GeometrySpec(_StrictAttrs):
     def coords(self):
         return self.symmetry.coords
 
-    # (electrode_rf / electrode_drive and their _group_map helper removed
-    # 2026-10-15, L-556: no
+    # (electrode_rf / electrode_drive and their _group_map helper removed:
+    # no
     # callers, a docstring describing retired per-electrode RF fields, and
     # both read only an electrode's FIRST group -- wrong for multi-group
     # electrodes. Drives are composed from every group by the builders.)
@@ -1241,7 +1373,7 @@ class GeometrySpec(_StrictAttrs):
 
     @classmethod
     def _load_required(cls, d):
-        # R2: the pitch sets the solved grid; 0.1 mm/gu is one deck's
+        # The pitch sets the solved grid; 0.1 mm/gu is one deck's
         # resolution, not a neutral value.
         return ("mm_per_gu",)
 
@@ -1250,7 +1382,7 @@ class GeometrySpec(_StrictAttrs):
         _check_missing(cls, d)
         _lim = electrode_limit_error(len(d.get("electrodes", []) or []))
         if _lim:
-            raise ValueError(_lim)          # refused at LOAD (L-538)
+            raise ValueError(_lim)          # refused at LOAD
         d = dict(d)
         d["electrodes"] = [ElectrodeSpec.from_dict(e)
                            for e in d.get("electrodes", [])]
@@ -1260,12 +1392,91 @@ class GeometrySpec(_StrictAttrs):
                           for g in d.get("dc_groups", [])]
         sym = d.get("symmetry")
         if isinstance(sym, str):
-            # back-compat: old coarse enum
-            coords = "rz" if sym == "cylindrical" else "xyz"
-            d["symmetry"] = SymmetrySpec(coords=coords)
+            # back-compat: the old coarse enum, through the one mapping
+            d["symmetry"] = symmetry_from_string(sym)
         else:
             d["symmetry"] = SymmetrySpec.from_dict(sym)
         return _take_known(cls, d, checked=True)
+
+    def __post_init__(self):
+        # The constructor accepts the same old string form as from_dict,
+        # through the same mapping: it used to keep the string and fail
+        # much later (at to_json), so the two doors disagreed.
+        if isinstance(self.symmetry, str):
+            self.symmetry = symmetry_from_string(self.symmetry)
+
+
+# The old string form of geometry.symmetry and the coordinates each means.
+# Exact names only: anything else used to fall through to Cartesian
+# silently ("rz", a typo, "Cylindrical"), so a deck meant for r-z flew a
+# planar solve.
+SYMMETRY_STRINGS = {"cylindrical": "rz", "planar": "xyz", "none": "xyz"}
+
+
+def write_text_atomic(path, text):
+    """Write `text` to `path` so a failed write never leaves a truncated
+    file: a temp file in the same folder, fsync, then os.replace (the
+    field_io._atomic_savez rule). A full disk or a killed process used to
+    leave a half-written deck under the good one's name (review F8). The
+    file keeps the mode an existing file had, else the umask default."""
+    import os
+    import tempfile
+    path = Path(path)
+    folder = path.parent if str(path.parent) else Path(".")
+    if path.exists():
+        mode = path.stat().st_mode & 0o777
+    else:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                               dir=folder)
+    done = False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+        done = True
+    finally:
+        if not done and os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def _whole_number(v):
+    """An int, or a float with an integral finite value (JSON 2.0); never
+    a bool."""
+    return (not isinstance(v, bool)
+            and (isinstance(v, int)
+                 or (isinstance(v, float) and math.isfinite(v)
+                     and v.is_integer())))
+
+
+def charge_error(value, where):
+    """The refusal for a charge state that is not a whole number, else
+    None: one rule for every source and beam that states a charge (0 is a
+    neutral and is allowed)."""
+    if _whole_number(value):
+        return None
+    return (f"{where} = {value!r}: a charge state is a whole number of "
+            f"elementary charges (e.g. 1, -2, or 0 for a neutral); a "
+            f"fractional one used to be truncated silently (2.5 flew as 2)")
+
+
+def symmetry_from_string(s):
+    """SymmetrySpec for the old string form, or a refusal naming the
+    accepted strings and the mapping form."""
+    if s not in SYMMETRY_STRINGS:
+        hint = (" ('rz' is a coords value: write {\"coords\": \"rz\"} or "
+                "'cylindrical')" if str(s).lower() == "rz" else "")
+        raise ValueError(
+            f"geometry.symmetry = {s!r} is not a known symmetry. Use one of "
+            f"{sorted(SYMMETRY_STRINGS)} or a mapping such as "
+            f"{{\"coords\": \"rz\"}} / {{\"coords\": \"xyz\"}}{hint}. An "
+            f"unknown string is refused rather than read as Cartesian.")
+    return SymmetrySpec(coords=SYMMETRY_STRINGS[s])
 
 
 # ----------------------------------------------------------------- source
@@ -1281,10 +1492,10 @@ class SourceSpec(_StrictAttrs):
       grid     : n x n lattice on the disc
       gaussian : TRUNCATED Gaussian, per-axis FWHM (fwhm_mm) with
                  MANDATORY truncation half-widths (trunc_mm) — see
-                 gaussian_layout() for the refusal contract (L-248)
+                 gaussian_layout() for the refusal contract
       file     : births_file (csv with x,y,z,vx,vy,vz[,tob]) — e.g. an external
     Kinematics: ke_lo..ke_hi (eV) directed along `direction`, OR
-    thermal at temperature_k; m/z list flown as a mix; charge signed;
+    thermal at temperature_k; mass list flown as a mix; charge signed;
     tob_span_us spreads birth times (RF phase sampling)."""
     n_ions: int = 100
     distribution: str = "disc"      # point|disc|line|grid|box|file
@@ -1347,6 +1558,11 @@ class SourceSpec(_StrictAttrs):
     # zeros, so every existing deck is bit-identical.
     v_drift_mm_us: List[float] = field(
         default_factory=lambda: [0.0, 0.0, 0.0])
+    # ION MASSES IN Da. The name is historical: this
+    # is NOT m/z. Every route reads it as the mass (sim_build.mz_of), with
+    # the signed charge state below; m/z = mass / |charge| is derived for
+    # display only (ion_envelope.ion_label). Kept as mz_list so every deck,
+    # bank and trajectory file stays readable.
     mz_list: List[float] = field(default_factory=lambda: [556.0])
     charge: int = 1
     tob_span_us: float = 2.0
@@ -1412,7 +1628,7 @@ class SourceSpec(_StrictAttrs):
                     f"spread that does not exist; set it to 0.")
         return sig, t
 
-    # R2 (PI ruling 2026-10-15): the size of the distribution IN USE is
+    # The size of the distribution IN USE is
     # physics; the others are never read.
     _SIZE_KEY = {"disc": "r_mm", "grid": "r_mm", "line": "len_mm",
                  "box": "box_mm"}
@@ -1420,7 +1636,7 @@ class SourceSpec(_StrictAttrs):
     @classmethod
     def _load_required(cls, d):
         """Keys whose defaults are one deck's operating point (the funnel
-        ion m/z 556, KE 0.1-1.9 eV, a 2 us birth span, x0 = 1 mm, a
+        ion mass 556 Da, KE 0.1-1.9 eV, a 2 us birth span, x0 = 1 mm, a
         4 mm disc): the deck must state the ones its distribution
         reads. A births file carries positions and velocities itself."""
         req = ["distribution", "n_ions", "mz_list"]
@@ -1433,6 +1649,80 @@ class SourceSpec(_StrictAttrs):
         if dist in cls._SIZE_KEY:
             req.append(cls._SIZE_KEY[dist])
         return req
+
+    def value_errors(self):
+        """Refusals for source values that cannot mean anything, by deck
+        key. Each used to be accepted and then truncated, padded or
+        dropped where it was used (review F6): charge 2.5 flew as 2, a
+        two-entry box_mm was padded with 0, a negative temperature gave
+        the births of T = 0."""
+        errs = []
+        ce = charge_error(self.charge, "source.charge")
+        if ce:
+            errs.append(ce)
+        if not (_whole_number(self.n_ions) and self.n_ions >= 1):
+            errs.append(f"source.n_ions = {self.n_ions!r}: a whole number "
+                        f">= 1 of ions per mass")
+        if self.seed is not None and not (_whole_number(self.seed)
+                                          and self.seed >= 0):
+            errs.append(f"source.seed = {self.seed!r}: a whole number >= 0, "
+                        f"or null for a fresh seed per run")
+        for key in ("temperature_k", "tob_span_us", "r_mm"):
+            v = getattr(self, key)
+            if isinstance(v, (int, float)) and v < 0:
+                errs.append(f"source.{key} = {v!r}: must be >= 0")
+        lo, hi = self.ke_lo, self.ke_hi
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) \
+                and (lo < 0 or hi < lo):
+            errs.append(f"source.ke_lo..ke_hi = {lo!r}..{hi!r} eV: energies "
+                        f">= 0 with ke_lo <= ke_hi")
+        if self.distribution == "box":
+            b = self.box_mm
+            if not (isinstance(b, (list, tuple)) and len(b) == 3
+                    and all(isinstance(x, (int, float))
+                            and not isinstance(x, bool) and x >= 0
+                            for x in b)):
+                errs.append(f"source.box_mm = {b!r}: three full extents "
+                            f">= 0 mm (x, y, z)")
+        return errs
+
+    def direction_error(self):
+        """The refusal for a source.direction that is not a 3-vector of
+        finite numbers, else None. One authority: validate() reports it,
+        and zero_direction_note() raises it."""
+        d = self.direction
+        try:
+            dv = [float(v) for v in d]
+        except (TypeError, ValueError):
+            dv = None                # not numbers: refused just below
+        if dv is not None and len(dv) == 3 and all(math.isfinite(v)
+                                                   for v in dv):
+            return None
+        return (f"source.direction must be a 3-vector of finite floats, "
+                f"got {d!r} — e.g. [1.0, 0.0, 0.0] for +x (a scalar sign "
+                f"is not the contract; `axis` is a separate field)")
+
+    def zero_direction_note(self):
+        """WARNING text when a beam energy is declared with a zero
+        direction, else None. Such an energy has nowhere to point and is
+        IGNORED: ions are born at rest (plus any temperature_k or
+        dv_fwhm_ms spread). This is what every such deck has always flown
+        (births normalise the direction, and a zero vector left the
+        directed term at zero); it is said out loud, never silently.
+        A malformed direction raises ValueError (direction_error): there
+        is no note to give about a direction that is not a vector."""
+        err = self.direction_error()
+        if err:
+            raise ValueError(err)
+        zero = not any(float(v) != 0.0 for v in self.direction)
+        if not zero or not (self.ke_lo > 0 or self.ke_hi > 0):
+            return None
+        return (f"WARNING: source.direction is the zero vector, so "
+                f"ke_lo..ke_hi = {self.ke_lo:g}..{self.ke_hi:g} eV has "
+                f"nowhere to point and is IGNORED: ions are born at rest. "
+                f"Give the beam a direction (e.g. [1.0, 0.0, 0.0] for +x), "
+                f"declare ke_lo = ke_hi = 0 to state births at rest, or "
+                f"use temperature_k for a thermal spread.")
 
     def to_dict(self):
         return asdict(self)
@@ -1447,7 +1737,7 @@ from ion_gym.physics.constants import TORR_PA  # noqa: E402  (101325/760, exact)
 from ion_gym.physics.ccs import (  # noqa: E402  (one default each)
     LEGACY_FIXED_SIGMA_M2, SIGMA_MODEL_DEFAULT)
 
-# R2b (PI ruling 2026-10-15). One fixed text, so Python's warning filter
+# One fixed text, so Python's warning filter
 # shows it once per call site rather than once per deck in a sweep.
 _P_PA_DEPRECATED = (
     "collisions.P_pa is deprecated: pressure is authored in Torr "
@@ -1477,23 +1767,36 @@ def _warn_pa_disagrees(p_torr, p_pa):
 class CollisionSpec(_StrictAttrs):
     """HS buffer gas. enabled=false -> vacuum (reflectron/TOF).
 
-    PRESSURE IS TORR (PI ruling R2b, 2026-10-15: "Make torr canonical.
-    Warn that P_pa is deprecated."). P_torr is the one stored value;
+    PRESSURE IS TORR: Torr is canonical and P_pa is deprecated, with a
+    warning. P_torr is the one stored value;
     P_pa is DERIVED from it (the kernels take Pa) and is never written
     to a saved deck. Authoring P_pa is deprecated and warns:
       * P_pa alone        -> converted to P_torr (legacy decks keep
                              flying at their pressure)
-      * P_torr and P_pa   -> P_torr wins; a P_pa that disagrees is named
-                             and ignored
+      * P_torr and P_pa   -> in a DECK: P_torr wins, and a P_pa that
+                             disagrees is named and ignored. In CODE
+                             (the constructor, dataclasses.replace) a
+                             disagreeing pair is refused: which one was
+                             meant cannot be told
       * assigning .P_pa   -> sets P_torr (None re-derives from P_torr)
+      * P_torr None       -> the default (1.0 Torr), marked as defaulted
+                             so the advisory says so, whether at
+                             construction or by assignment
     so the two can never disagree. The old rule was the reverse: a
     present P_pa overwrote P_torr, so a hand-edited P_torr was silently
-    ignored (L-523)."""
+    ignored.
+
+    P_pa is a field the constructor does not take (init=False), so
+    dataclasses.replace re-derives it from P_torr instead of carrying the
+    old one along (a replace of P_torr kept the stale Pa, and a replace of
+    P_pa was silently overruled by the old Torr; replace(spec, P_pa=...)
+    is now refused by dataclasses itself). The deprecated P_pa= keyword
+    still works: _collision_init below takes it."""
     enabled: bool = True
     gas: str = "N2"
     T_k: float = 273.0
     P_torr: Optional[float] = None     # None = not authored -> 1.0 Torr
-    P_pa: Optional[float] = None       # DERIVED; authoring it is deprecated
+    P_pa: Optional[float] = field(default=None, init=False)   # DERIVED
     sigma_m2: float = LEGACY_FIXED_SIGMA_M2   # used under sigma_model "fixed"
     model: str = "hs"                  # "hs" (hard-sphere) or "sds";
                                        # legacy "hs1" is accepted and
@@ -1502,33 +1805,52 @@ class CollisionSpec(_StrictAttrs):
     gas_diam_nm: float = 0.366         # SDS gas diameter (air default)
     flow_mm_us: List[float] = field(
         default_factory=lambda: [0.0, 0.0, 0.0])
-    # PER-ION HARD-SPHERE CROSS SECTION (2026-10-17). "fixed" flies
+    # PER-ION HARD-SPHERE CROSS SECTION. "fixed" flies
     # sigma_m2 for every ion. "ccs_fit" takes each ion's cross section
     # from the N2 drift-tube CCS power-law fit in physics.ccs, subset
     # ccs_fit_class. physics.ccs.ion_sigma_m2 is the one authority every
     # route reads.
-    # DEFAULT IS THE FIT (PI ruling 2026-10-24): a deck that names no
+    # DEFAULT IS THE FIT: a deck that names no
     # sigma_model flies the CCS fit, because the old fixed 2.27e-18 was a
     # SIMION default (He with a ~200 amu ion) inherited without a reason.
-    # Outside the fit's domain (gas other than N2, |z| != 1) the default
-    # REFUSES with a diagnostic, through validate(). A deck that means one
-    # sigma for every ion states sigma_model: "fixed". The default lives in
+    # The fit is evaluated at the ion's MASS for every charge (a charge
+    # other than +/-1 gets an advisory); for a gas other than N2 it falls
+    # back, loudly, to sigma_m2 (physics.ccs.fallback_note). A deck that
+    # means one sigma for every ion states sigma_model: "fixed". The default lives in
     # physics.ccs (SIGMA_MODEL_DEFAULT), the module that owns the models.
     sigma_model: str = SIGMA_MODEL_DEFAULT
     ccs_fit_class: str = "all"
+    # SDS SPECIES VALUES: a measured reduced mobility and/or ion diameter
+    # per ion MASS, each K0 tagged with the gas it was measured in, e.g.
+    #   [{"mass_amu": 133, "gas": "N2", "K0_cm2_per_Vs": 2.31},
+    #    {"mass_amu": 622, "d_nm": 1.1}]
+    # A K0 measured in another gas than the deck's is converted, loudly,
+    # which needs that gas's diameter ("gas_d_nm"). Masses not listed are
+    # estimated from mass (physics.sds). Read only under model 'sds'.
+    sds_species: List[dict] = field(default_factory=list)
 
-    _RUNTIME_ATTRS = frozenset({"_extras", "_ready"})
+    # _init_pa: the deprecated P_pa= keyword, handed to __post_init__
+    _RUNTIME_ATTRS = frozenset({"_extras", "_ready", "_defaulted",
+                                "_init_pa"})
+    # Physics keys a gas deck may leave out (they fly their default),
+    # recorded in _defaulted so the advisory can SAY so (before this,
+    # gas on with no pressure flew 1 Torr N2 at 273 K without a word). An
+    # explicit assignment later clears the mark.
+    _DEFAULTABLE = ("gas", "T_k", "P_torr")
     # Written to a saved deck only when they differ from these values.
-    # sigma_model is NOT here: it is written on every save (PI ruling
-    # 2026-10-24), so a saved deck states which model it flew whatever the
-    # default is later. A pre-ruling deck that omits it loads with the
-    # current default, which is the point of the ruling.
-    _OMIT_WHEN_DEFAULT = (("ccs_fit_class", "all"),)
-    P_TORR_DEFAULT = 1.0               # the dataclass default (R3 ruling)
+    # sigma_model is NOT here: it is written on every save, so a saved
+    # deck states which model it flew whatever the
+    # default is later. An older deck that omits it loads with the
+    # current default, on purpose.
+    _OMIT_WHEN_DEFAULT = (("ccs_fit_class", "all"), ("sds_species", []))
+    P_TORR_DEFAULT = 1.0               # the dataclass default
 
     def __post_init__(self):
         import warnings
-        pa = self.P_pa
+        pa = getattr(self, "_init_pa", None)
+        self._init_pa = None
+        self._defaulted = ({"P_torr"} if (pa is None and self.P_torr is None)
+                           else set())
         if pa is not None and self.P_torr is None:
             # legacy Pa-only: converted to Torr, and the kernel keeps the
             # AUTHORED Pa exactly (a Torr round trip can move it by an
@@ -1543,15 +1865,23 @@ class CollisionSpec(_StrictAttrs):
             if pa is not None and abs(float(pa) - derived) <= (
                     _PA_SAME_NUMBER_REL * abs(derived)):
                 # the SAME pressure to rounding: every deck saved before
-                # R2b stores P_torr back-filled from P_pa, so re-deriving
+                # Torr was canonical stores P_torr back-filled from P_pa, so re-deriving
                 # Pa would move the kernel input by an ulp. Keep it.
                 self.P_pa = float(pa)
             else:
                 if pa is not None:
-                    _warn_pa_disagrees(self.P_torr, pa)
+                    # only a constructor call reaches here with both
+                    # (from_dict settles a deck's pair first): refused, as
+                    # which was meant cannot be told
+                    raise ValueError(
+                        f"CollisionSpec: P_torr = {float(self.P_torr):.12g} "
+                        f"Torr ({derived:.12g} Pa) and P_pa = "
+                        f"{float(pa):.12g} Pa disagree. Pass P_torr only "
+                        f"(P_pa is deprecated and derived from it; "
+                        f"P_torr = Pa / {TORR_PA:.12g}).")
                 self.P_pa = derived
         # legacy model spelling normalized at INGEST (was rewritten inside
-        # validate(), which must not mutate what it checks -- L-554)
+        # validate(), which must not mutate what it checks)
         if str(self.model or "").lower() == "hs1":
             self.model = "hs"
         self._ready = True
@@ -1559,6 +1889,16 @@ class CollisionSpec(_StrictAttrs):
     def __setattr__(self, name, value):
         if not getattr(self, "_ready", False):
             super().__setattr__(name, value)
+            return
+        if name in getattr(self, "_defaulted", ()):
+            self._defaulted.discard(name)   # stated now, not defaulted
+        if name == "P_torr" and value is None:
+            # "not stated" = the default, as at construction, and said so;
+            # leaving the old Pa in place flew the old pressure while a save
+            # wrote null, which reloads as 1 Torr
+            super().__setattr__("P_torr", self.P_TORR_DEFAULT)
+            super().__setattr__("P_pa", self.P_TORR_DEFAULT * TORR_PA)
+            self._defaulted.add("P_torr")
             return
         if name == "P_pa":
             if value is None:          # "null P_pa" = re-derive from Torr
@@ -1573,6 +1913,48 @@ class CollisionSpec(_StrictAttrs):
         if name == "P_torr" and value is not None:
             super().__setattr__("P_pa", float(value) * TORR_PA)
 
+    def validate(self):
+        """Refusals for gas values that cannot describe a gas, as messages
+        naming the deck key. Empty for vacuum (enabled false).
+
+        A pressure, temperature or cross section that is zero or negative
+        does not raise anywhere in the kernels: it makes the collision
+        rate zero or negative, so the ion flies a trajectory bit-identical
+        to vacuum while the deck says gas is on. The cross section is
+        checked only under sigma_model "fixed", the one model that flies
+        it; the gas diameter only under the SDS model, which reads it.
+        NaN and infinity are refused here too, because callers that build
+        a gas without a deck (and so never run SimSpec.validate) reach
+        the kernels through resolve_collisions, which applies this."""
+        if not self.enabled:
+            return []
+
+        def _bad(v):
+            return v is not None and not (math.isfinite(v) and v > 0)
+
+        errs = []
+        for key, unit in (("P_torr", "Torr"), ("T_k", "K")):
+            v = getattr(self, key)
+            if _bad(v):
+                errs.append(f"collisions.{key} = {v!r} {unit}: gas is "
+                            f"enabled, so this must be a finite number > 0 "
+                            f"(otherwise the ion flies as if in vacuum); "
+                            f"for a vacuum run set collisions.enabled: "
+                            f"false")
+        if self.sigma_model == "fixed" and _bad(self.sigma_m2):
+            errs.append(f"collisions.sigma_m2 = {self.sigma_m2!r} m^2 under "
+                        f"sigma_model 'fixed': a cross section must be a "
+                        f"finite number > 0 (otherwise there are no "
+                        f"collisions)")
+        if str(self.model).lower() == "sds" and _bad(self.gas_diam_nm):
+            errs.append(f"collisions.gas_diam_nm = {self.gas_diam_nm!r} nm "
+                        f"under model 'sds': a gas diameter must be a "
+                        f"finite number > 0")
+        if self.sds_species:
+            from ion_gym.physics.sds import species_errors
+            errs.extend(species_errors(self.sds_species, self.gas))
+        return errs
+
     def set_pressure_torr(self, torr):
         """Set BOTH pressure fields from Torr, atomically.
 
@@ -1580,13 +1962,13 @@ class CollisionSpec(_StrictAttrs):
         lives in __post_init__), so the two fields drift apart and the kernel
         -- which reads P_torr -- silently disagrees with anything reading
         P_pa. Two fields for one quantity is a standing hazard; this is the
-        one door through it. (Since R2b P_pa is derived on every P_torr
+        one door through it. (P_pa is now derived on every P_torr
         write, so this is equivalent to assigning P_torr.)"""
         self.P_torr = float(torr)
         return self
 
     def set_pressure_pa(self, pa):
-        """DEPRECATED (R2b): pressure is Torr. Converts and warns."""
+        """DEPRECATED: pressure is Torr. Converts and warns."""
         self.P_pa = float(pa)          # warns, sets P_torr (see __setattr__)
         return self
 
@@ -1598,14 +1980,60 @@ class CollisionSpec(_StrictAttrs):
                 # omitted ON PURPOSE: the loader restores the default,
                 # and pre-existing decks stay byte-identical on save
                 d.pop(key)
+        if (self.sigma_model != "fixed"
+                and d["sigma_m2"] == LEGACY_FIXED_SIGMA_M2):
+            # The legacy value under any model but "fixed" is the field
+            # default nobody chose: writing it made every saved deck show
+            # a cross section the flight never used. Omitted, the loader
+            # restores the same number, so the fallback for a gas the fit
+            # does not cover flies what it did. A value someone stated is
+            # always written (and ccs.stated_sigma_note flags it).
+            d.pop("sigma_m2")
         return d
 
     @classmethod
     def from_dict(cls, d):
-        if "P_pa" in d and "P_torr" in d:
-            import warnings
+        import warnings
+        d = dict(d)
+        pa = d.pop("P_pa", None)
+        if pa is not None:
             warnings.warn(_P_PA_DEPRECATED, FutureWarning, stacklevel=3)
-        return _take_known(cls, d)
+        obj = _take_known(cls, d)
+        if pa is not None:
+            if d.get("P_torr") is None:
+                # legacy Pa-only deck: converted to Torr, and the kernel
+                # keeps the AUTHORED Pa exactly (a Torr round trip can move
+                # it by an ulp, which would break bit-identity with every
+                # old run)
+                obj.P_torr = float(pa) / TORR_PA
+                object.__setattr__(obj, "P_pa", float(pa))
+            elif abs(float(pa) - obj.P_pa) <= _PA_SAME_NUMBER_REL * abs(
+                    obj.P_pa):
+                # the SAME pressure to rounding (decks saved before Torr
+                # was canonical carry both): keep the authored Pa, as above
+                object.__setattr__(obj, "P_pa", float(pa))
+            else:
+                _warn_pa_disagrees(obj.P_torr, pa)    # a deck: Torr wins
+        # keys the deck left out (P_torr is already marked by
+        # __post_init__ unless a P_pa stood in for it)
+        obj._defaulted |= {k for k in ("gas", "T_k") if k not in d}
+        return obj
+
+
+_collision_init = CollisionSpec.__init__
+
+
+def _collision_init_with_pa(self, *args, P_pa=None, **kwargs):
+    """CollisionSpec's constructor, still taking the deprecated P_pa=
+    keyword (the dataclass field is init=False, so replace() never passes
+    a stale one); __post_init__ converts or refuses it."""
+    object.__setattr__(self, "_init_pa", P_pa)
+    _collision_init(self, *args, **kwargs)
+
+
+_collision_init_with_pa.__doc__ = (_collision_init.__doc__ or "") + \
+    _collision_init_with_pa.__doc__
+CollisionSpec.__init__ = _collision_init_with_pa
 
 
 # ------------------------------------------------------------ integration
@@ -1625,19 +2053,65 @@ class IntegrationSpec(_StrictAttrs):
     record_channels: List[str] = field(
         default_factory=lambda: ["speed", "ke_ev", "e_field"])
 
-    # R2: the step and the flight time are physics; recording density
+    # The step and the flight time are physics; recording density
     # and the record cap are storage (sizing.record_volume: rec_every is
     # STORAGE ONLY), so they are announced, not refused. dt_ns: null is
     # an AUTHORED value (derive from the drives), so only an absent key
     # is refused.
     _LOAD_ANNOUNCE = ("rec_every", "max_records")
+    # _dt_derived: dt_ns holds a step derived from an authored null. The
+    # flight needs a number, but a save must write null again, or the deck
+    # stops following its drives (a later frequency change would keep the
+    # old step).
+    # _channels_added: record channels a build added because a derived
+    # channel needs them (sim_build: e_axial/e_radial off the r-z route
+    # need e_x/e_y/e_z). The flight records them; a save writes the
+    # channels the deck asked for.
+    _RUNTIME_ATTRS = frozenset({"_extras", "_dt_derived", "_channels_added"})
 
     @classmethod
     def _load_required(cls, d):
         return ("dt_ns", "t_max_us")
 
+    def set_derived_dt(self, dt_ns):
+        """Fill an unset step with the value derived from the drives, and
+        remember that it was derived, so to_dict writes null."""
+        self.dt_ns = float(dt_ns)
+        self._dt_derived = True
+
+    def add_derived_channels(self, names):
+        """Record `names` as well, remembered as added by a build, so
+        to_dict writes the channels the deck asked for. Returns the
+        channels actually added."""
+        add = [c for c in names if c not in (self.record_channels or [])]
+        if add:
+            already = list(getattr(self, "_channels_added", None) or [])
+            self.record_channels = list(self.record_channels or []) + add
+            self._channels_added = already + add
+        return add
+
+    def __setattr__(self, name, value):
+        # a DIFFERENT step is a stated one; the same value written back
+        # (the app syncs every widget into the spec) is not
+        if (name == "dt_ns" and getattr(self, "_dt_derived", False)
+                and value != self.dt_ns):
+            self._dt_derived = False
+        # likewise a different channel list is a stated one
+        if (name == "record_channels"
+                and getattr(self, "_channels_added", None)
+                and value != self.record_channels):
+            self._channels_added = []
+        super().__setattr__(name, value)
+
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        if getattr(self, "_dt_derived", False):
+            d["dt_ns"] = None
+        added = getattr(self, "_channels_added", None)
+        if added:
+            d["record_channels"] = [c for c in d["record_channels"]
+                                    if c not in added]
+        return d
 
     @classmethod
     def from_dict(cls, d):
@@ -1653,7 +2127,7 @@ class StationSpec(_StrictAttrs):
     represent a detector; a station is a plane at `axis` = `pos_mm`
     with optional WINDOWS over the other axes).
 
-    kind (ruled 2026-09-12 — record/detect was "a distinction
+    kind (record/detect was "a distinction
     without a difference"; the meaningful axis is what happens ON
     a hit, so it is explicit):
       "detect" -- a measuring plane; `on_hit` REQUIRED:
@@ -1674,7 +2148,7 @@ class StationSpec(_StrictAttrs):
                   a wall: every crossing splats. This is the "splat
                   window" bounds cannot express (bounding planes are
                   whole-plane absolute kills). (Renamed from
-                  "aperture" 2026-09-11, Brian: an aperture is the
+                  "aperture": an aperture is the
                   OPENING; this kind is the plate.)
 
     Stations are configuration-agnostic: any axis in the run's
@@ -1702,11 +2176,11 @@ class StationSpec(_StrictAttrs):
         if self.kind == "aperture":
             errs.append(f"{prefix}station {self.name!r}: kind "
                         f"'aperture' was RENAMED 'impact_plane' "
-                        f"(2026-09-11 — an aperture is the opening; "
+                        f"(an aperture is the opening; "
                         f"this kind is the plate). Update the deck.")
         elif self.kind == "record":
             errs.append(f"{prefix}station {self.name!r}: kind "
-                        f"'record' was RETIRED (2026-09-12 — "
+                        f"'record' was RETIRED ("
                         f"record vs detect was a distinction "
                         f"without a difference). Use kind='detect' "
                         f"with on_hit='pass'.")
@@ -1802,7 +2276,7 @@ class ViewSpec(_StrictAttrs):
     color_by: str = "fate"
     decimate: int = 4
 
-    # R2: every view key is display only
+    # every view key is display only
     _LOAD_ANNOUNCE = ("mode", "planes", "equipotential_lines",
                       "show_field", "color_by", "decimate")
 
@@ -1817,9 +2291,8 @@ class ViewSpec(_StrictAttrs):
 # ------------------------------------------------------------ optic axis
 # The channels measured RELATIVE TO THE INSTRUMENT AXIS. They are DERIVED
 # AFTER FLIGHT from the recorded positions and field components about
-# SimSpec.radial_frame() (PI ruling 2026-10-15, L-539: "derived from the
-# route's axis. r-z it is r. 3D -- declared"; then "go with the
-# alternative": derive after flight, no kernel computes them).
+# SimSpec.radial_frame(): derived from the route's axis (on r-z it is r;
+# in 3-D it is declared), after flight; no kernel computes them.
 RADIAL_CHANNELS = ("radius", "e_axial", "e_radial")
 
 
@@ -1879,15 +2352,15 @@ TRANSPORTER_UNLIMITED_PASSES = 10 ** 9   # "no pass limit" (the kernel's own
 
 @dataclass
 class TransporterSpec(_StrictAttrs):
-    """The periodic transporter plane pair (CHARTER_transporter): an ion
+    """The periodic transporter plane pair: an ion
     crossing the ACCEPT plane along `axis` in `direction` is moved to the
     EMIT plane, so a short periodic section stands in for a long device.
     Only the 3-D shapes route implements it; every other route REFUSES a
     spec that carries one. Planes are in the spec frame (mm).
 
-    A TYPED block (PI ruling R2c, 2026-10-15) loaded through the same key
+    A TYPED block loaded through the same key
     accounting as every other block: it was a bare dict that to_dict and
-    from_dict both dropped, silently (L-524). Code that assigns a dict
+    from_dict both dropped, silently. Code that assigns a dict
     (spec.transporter = dict(...), the internal ATD studies) is converted
     through from_dict, so the same refusals apply."""
     axis: str
@@ -1927,13 +2400,33 @@ class TransporterSpec(_StrictAttrs):
         return _take_known(cls, dict(d))
 
 
+# The documents spec_io.sniff tells apart from a single deck, and what
+# loads each one (SimSpec.from_dict refuses them by name).
+_OTHER_DOCUMENT_LOADERS = {
+    "staged_assembly": (
+        "a staged assembly (schema ion_gym.assembly/1), not a single deck: "
+        "each stage solves in its own grid and the ion is handed across "
+        "the seams. Load it with ion_gym.physics.staged_flight."
+        "load_assembly(path) or fly it with fly_assembly(path); each "
+        "stage's own deck is its 'spec' entry."),
+    "assembly": (
+        "a coaxial assembly (kind 'assembly'), not a single deck. Load it "
+        "with ion_gym.io.spec_io.load_any_spec, which flattens it to one "
+        "SimSpec."),
+    "scene3d": (
+        "a 3-D CSG scene (grid + indexed electrodes), not a deck. Load it "
+        "with ion_gym.io.spec_io.load_any_spec, which embeds it in a "
+        "SimSpec."),
+}
+
+
 # =================================================================== SimSpec
 @dataclass
 class SimSpec(_StrictAttrs):
     _RUNTIME_ATTRS = frozenset({"_loaded_from", "_extras"})
     geometry: GeometrySpec
     source: SourceSpec = field(default_factory=SourceSpec)
-    # Collisions left out = VACUUM (PI ruling 2026-10-14, R3 Q1). An
+    # Collisions left out = VACUUM. An
     # explicit CollisionSpec(...) still means gas on.
     collisions: CollisionSpec = field(
         default_factory=lambda: CollisionSpec(enabled=False))
@@ -1964,7 +2457,7 @@ class SimSpec(_StrictAttrs):
     def __setattr__(self, name, value):
         # ONE typed transporter: a dict (constructor or assignment) is
         # loaded through TransporterSpec.from_dict, so its keys are
-        # accounted for exactly as in a deck file (R2c).
+        # accounted for exactly as in a deck file.
         if name == "transporter" and isinstance(value, dict):
             value = TransporterSpec.from_dict(value)
         if name == "optic_axis" and isinstance(value, dict):
@@ -2069,7 +2562,8 @@ class SimSpec(_StrictAttrs):
         if any(getattr(s, "v_drift_mm_us", None) or []):
             kin.append(f"drift {list(s.v_drift_mm_us)} mm/us")
         L.append("    kinematics: " + "; ".join(kin))
-        L.append(f"    m/z {list(s.mz_list)}, charge {s.charge:+d}; birth "
+        from ion_gym.physics.ion_envelope import charge_str
+        L.append(f"    mass {list(s.mz_list)} Da, {charge_str(s.charge)}; birth "
                  f"times spread over {s.tob_span_us:g} us"
                  + (f"; seed {s.seed}" if getattr(s, "seed", None) is not None
                     else "; unseeded (random draw announced at build)"))
@@ -2193,6 +2687,18 @@ class SimSpec(_StrictAttrs):
 
     def validate(self):
         errs = []
+        # NON-FINITE NUMBERS. The JSON loader accepts NaN and Infinity and
+        # no flight kernel checks for them, so a NaN voltage, frequency,
+        # amplitude or mass flew every ion to t_max and came back as an
+        # ordinary result (a timeout reported as 100% transmitted). Every
+        # number the spec serialises is checked, by its deck path, so a
+        # field added later is covered without keeping a list in step.
+        for _path, _val in nonfinite_numbers(self.to_dict()):
+            errs.append(
+                f"{_path} = {_val!r} is not a finite number. NaN and "
+                f"infinity propagate through the field and the flight "
+                f"without raising and come back as ordinary-looking "
+                f"results; give it a finite value.")
         # DECLARED PLACEMENT: validated by the same authority the
         # mesh ingest uses, so the deck that refuses here is exactly the
         # deck that would have loaded wrong. Declared on a deck with no
@@ -2214,43 +2720,17 @@ class SimSpec(_StrictAttrs):
         # source.direction is a 3-VECTOR (List[float]; `axis` is a
         # separate field). A scalar (+1) built fine, validated clean,
         # and travelled until the FIRST consumer that iterates it —
-        # the UI's direction widgets, an IndexError-adjacent crash on
-        # Brian's machine (2026-09-11). Refuse it here, by name, with
-        # the fix in the message.
-        _d = self.source.direction
-        try:
-            _dv = [float(v) for v in _d]
-            _shape_ok = (len(_dv) == 3
-                         and all(math.isfinite(v) for v in _dv))
-        except TypeError:
-            _dv, _shape_ok = None, False
-        if not _shape_ok:
-            errs.append(
-                f"source.direction must be a 3-vector of finite "
-                f"floats, got {_d!r} — e.g. [1.0, 0.0, 0.0] for +x "
-                f"(a scalar sign is not the contract; `axis` is a "
-                f"separate field)")
-        elif not any(v != 0.0 for v in _dv):
-            # ZERO NORM is legitimate ONLY as "no directed beam".
-            # Combined with a declared kinetic energy it is a
-            # CONTRADICTION that used to resolve silently: births
-            # normalises with `d / (norm(d) or 1.0)`, so a zero vector
-            # left the directed term at zero and threw ke_lo..ke_hi
-            # away — the deck declared an energy the solver never
-            # received. Refuse THAT, by name, and say which of the two
-            # declarations to change; a zero direction with no energy
-            # declared stays valid and means exactly what it says.
-            if self.source.ke_lo > 0 or self.source.ke_hi > 0:
-                errs.append(
-                    f"source.direction is the zero vector while "
-                    f"ke_lo..ke_hi = {self.source.ke_lo}.."
-                    f"{self.source.ke_hi} eV declares a directed beam — "
-                    f"the energy has nowhere to point and would be "
-                    f"silently discarded (ions born exactly at rest). "
-                    f"Either give the beam its direction (e.g. "
-                    f"[1.0, 0.0, 0.0] for +x) or declare ke_lo = "
-                    f"ke_hi = 0 to mean births at rest; for a random "
-                    f"thermal spread use temperature_k.")
+        # the UI's direction widgets, an IndexError-adjacent crash in
+        # the field. Refuse it here, by name, with
+        # the fix in the message. (A non-numeric entry used to escape
+        # validate() as a raw ValueError: only TypeError was caught.)
+        _dir_err = self.source.direction_error()
+        if _dir_err:
+            errs.append(_dir_err)
+        # (A ZERO direction with a declared energy is not refused: the
+        # energy has nowhere to point and is ignored, LOUDLY -- see
+        # SourceSpec.zero_direction_note, raised as an advisory and by
+        # the births generator.)
         for st in self.stations:
             errs += st.validate(prefix="stations: ")
         # A None pressure with collisions ON passed validation and then died
@@ -2262,7 +2742,7 @@ class SimSpec(_StrictAttrs):
         # Refuse by name, and name the field that actually controls it.
         # "hs1" (the legacy spelling of "hs") is normalized at INGEST, in
         # CollisionSpec.__post_init__; validate() checks and never
-        # mutates (L-554).
+        # mutates.
         _KNOWN_MODELS = ("hs", "sds")
         _model = str(getattr(self.collisions, "model", "hs") or "").lower()
         if _model not in _KNOWN_MODELS:
@@ -2281,6 +2761,9 @@ class SimSpec(_StrictAttrs):
                     errs.append(
                         f"collisions enabled but {_f} is None -- set it "
                         f"(pressure is collisions.P_torr; P_pa is derived)")
+            if all(getattr(self.collisions, _f, None) is not None
+                   for _f in ("P_torr", "T_k", "sigma_m2")):
+                errs.extend(self.collisions.validate())
             # per-ion cross-section model: unknown model, unknown fit
             # class, or a fit asked of a gas/charge it was not fitted to
             from ion_gym.physics.ccs import validate_sigma_model
@@ -2288,7 +2771,7 @@ class SimSpec(_StrictAttrs):
                                              self.source.charge))
         if self.transporter is not None:
             errs.extend(self.transporter.validate())
-        # RADIAL CHANNELS need an axis (L-539): built in on r-z, declared
+        # RADIAL CHANNELS need an axis: built in on r-z, declared
         # everywhere else. One rule, every route.
         if self.optic_axis is not None:
             errs.extend(self.optic_axis.validate())
@@ -2311,7 +2794,7 @@ class SimSpec(_StrictAttrs):
         g = self.geometry
         _lim = electrode_limit_error(len(g.electrodes))
         if _lim:
-            errs.append(_lim)               # programmatic specs (L-538)
+            errs.append(_lim)               # programmatic specs
         errs.extend(g.symmetry.validate())
         # SIGNED FRAME (origin_mm) guards: (1) shape must be
         # [x_lo, y_lo]; (2) each origin must sit ON the pitch lattice, or
@@ -2325,6 +2808,19 @@ class SimSpec(_StrictAttrs):
                     or not all(isinstance(v, (int, float)) for v in o)):
                 errs.append(f"geometry.origin_mm must be [x_lo, y_lo] mm, "
                             f"got {o!r}")
+            elif g.symmetry.coords == "rz" and any(v != 0 for v in o):
+                # The planar and 3-D builders place the lattice at
+                # origin_mm; the r-z builder does not read it, so shapes
+                # authored in the shifted frame landed in the unshifted
+                # one (a rect -5..5 at origin -5 kept 11 of its 21 nodes,
+                # and an ion inside it was reported leaving the box).
+                errs.append(
+                    f"geometry.origin_mm = {list(o)!r} on an r-z deck: the "
+                    f"r-z builder does not apply origin_mm (the planar and "
+                    f"3-D builders do), so the geometry would be placed in "
+                    f"the unshifted frame. Author the r-z deck with the "
+                    f"axis at r = 0 and x from 0 (omit origin_mm or give "
+                    f"[0, 0]).")
             else:
                 h = float(g.mm_per_gu)
                 for a, v in zip("xy", o):
@@ -2345,6 +2841,26 @@ class SimSpec(_StrictAttrs):
                             f"place the plane in the wrong spot")
         if g.mm_per_gu <= 0:
             errs.append("mm_per_gu must be > 0")
+        # Each of these used to surface far downstream with a message that
+        # pointed elsewhere (review F7): no electrodes -> a bare
+        # StopIteration; a zero width -> "Factor is exactly singular"; a
+        # zero mass -> ZeroDivisionError.
+        if not g.electrodes and self.builder != "scene3d":
+            errs.append("geometry.electrodes is empty -- a field needs at "
+                        "least one electrode")
+        for key in ("width_mm", "height_mm"):
+            v = getattr(g, key)
+            if isinstance(v, (int, float)) and not v > 0:
+                errs.append(f"geometry.{key} = {v!r}: the domain must have "
+                            f"a size > 0 mm")
+        if isinstance(g.depth_mm, (int, float)) and g.depth_mm < 0:
+            errs.append(f"geometry.depth_mm = {g.depth_mm!r}: 0 for a 2-D "
+                        f"deck, > 0 for 3-D")
+        _bad_m = [m for m in (self.source.mz_list or [])
+                  if isinstance(m, (int, float)) and not m > 0]
+        if _bad_m:
+            errs.append(f"source.mz_list holds {_bad_m}: every ion mass "
+                        f"must be > 0 Da")
         else:
             # THE LATTICE IS GU-NATIVE: domain
             # extents and every symmetry-plane position are integer gu,
@@ -2465,6 +2981,8 @@ class SimSpec(_StrictAttrs):
                 errs.append(f"electrode {e.name}: both shapes and stl set")
             if not skip_geo and not e.shapes and not e.stl:
                 errs.append(f"electrode {e.name}: no geometry")
+            for _i, _s in enumerate(e.shapes or []):
+                errs.extend(_s.size_errors(f"electrode {e.name}: shape #{_i}"))
         # ---- DC ladders ------------------------------------------------
         names = {gr.name for gr in g.dc_groups}
         for gr in g.dc_groups:
@@ -2505,7 +3023,7 @@ class SimSpec(_StrictAttrs):
                 # against R_* 100..102 in the planar MRTOF and xevo
                 # decks, plate ordinals in the OA decks — while the
                 # group itself carries v_in == v_out. Refusing it here
-                # rejects 19 decks in this tree that pristine v522
+                # rejects 19 decks in this tree that an earlier release
                 # accepts and that resolve to exactly the same voltages
                 # either way. An unused ordinal is not a contradiction;
                 # the voltage the deck declares is the voltage the
@@ -2538,12 +3056,35 @@ class SimSpec(_StrictAttrs):
 
         # An empty m/z list flies no ion: refused here, for every route (on
         # r-z it was only caught by a stray `mz_list[0]` expression in
-        # make_rz_fly_fn, as a bare IndexError -- L-556).
+        # make_rz_fly_fn, as a bare IndexError).
         if not list(self.source.mz_list or []):
-            errs.append("source.mz_list is empty -- state at least one m/z")
+            errs.append("source.mz_list is empty -- state at least one ion mass "
+                        "(Da)")
+        errs += self.source.value_errors()
+        # The flight's step and length, for every route. A step <= 0 never
+        # advances time (it was refused only at sizing, by record_volume,
+        # without the field's name); a t_max_us <= 0 flew a zero-length
+        # flight on r-z and 3-D, every ion a 'timeout', and failed planar
+        # with "negative dimensions are not allowed".
+        _it = self.integration
+
+        def _positive(v):
+            return (isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and v > 0)
+        if _it.dt_ns is not None and not _positive(_it.dt_ns):
+            errs.append(f"integration.dt_ns = {_it.dt_ns!r}: the step must "
+                        f"be a number > 0 ns (or null, to derive it from "
+                        f"the drives)")
+        if not _positive(_it.t_max_us):
+            errs.append(f"integration.t_max_us = {_it.t_max_us!r}: the "
+                        f"flight must last a number > 0 us")
+        if (isinstance(_it.rec_every, bool)
+                or not isinstance(_it.rec_every, int) or _it.rec_every < 1):
+            errs.append(f"integration.rec_every = {_it.rec_every!r}: record "
+                        f"every N steps needs a whole number N >= 1")
         # (The P_torr/P_pa disagreement check that sat here is gone: P_pa
-        # is derived from P_torr on every write, so they cannot disagree
-        # -- R2b. It also carried a retyped Torr constant, L-532.)
+        # is derived from P_torr on every write, so they cannot disagree.
+        # It also carried a retyped Torr constant.)
         if self.source.distribution not in SOURCE_DISTRIBUTIONS:
             errs.append(f"bad distribution {self.source.distribution!r}; "
                         f"known: {list(SOURCE_DISTRIBUTIONS)}")
@@ -2574,6 +3115,22 @@ class SimSpec(_StrictAttrs):
         out = []
         g = self.geometry
         _it = self.integration
+        # a beam energy with a zero direction is ignored (births at rest)
+        _zd = self.source.zero_direction_note()
+        if _zd:
+            out.append(_zd)
+        # gas physics the deck did not state, flown at the default
+        _col = self.collisions
+        _dflt = (sorted(getattr(_col, "_defaulted", ()) or ())
+                 if _col.enabled else [])
+        if _dflt:
+            _unit = {"P_torr": " Torr", "T_k": " K", "gas": ""}
+            out.append(
+                "collisions: the deck does not state "
+                + ", ".join(f"{k} (flying the default "
+                            f"{getattr(_col, k)!r}{_unit.get(k, '')})"
+                            for k in _dflt)
+                + " -- state them in the deck if they matter")
         # TABLE DRIVES vs AUTO-dt: the
         # auto-dt heuristic derives the step from the slowest drive PERIOD,
         # and a table group's frequency_hz is a placeholder, not a
@@ -2591,10 +3148,14 @@ class SimSpec(_StrictAttrs):
         _rf_f = [gr.frequency_hz for gr in g.rf_groups
                  if gr.frequency_hz and gr.amplitude_v]
         # the step the run WILL use; read, never written back -- an
-        # advisory reports and must not change the spec (L-554; the
+        # advisory reports and must not change the spec (the
         # resolution itself lives in from_dict and sim_build.build_run)
         _dt = (_it.dt_ns if _it.dt_ns is not None
                else self.derive_dt_ns())
+        _long = long_flight_note(_dt, _it.t_max_us,
+                                 getattr(self.source, "n_ions", 1))
+        if _long:
+            out.append(_long)
         # GAS-TRANSPORT TIMING BIAS (validation spec
         # V10, scope extended by V11): gas-phase transport TIMING is
         # fast-biased O(dt). Measured, operating points inline: funnel
@@ -2664,7 +3225,7 @@ class SimSpec(_StrictAttrs):
                 _ext[_a] = float(_v)
         elif _s.distribution != "file":
             # NOT a known kind: say so. An empty extent here used to fall
-            # through to the POINT-source note below (L-554);
+            # through to the POINT-source note below;
             # validate() refuses the kind itself.
             _ext = None
         # 'file' births are not declared here: their extent is in the CSV,
@@ -2696,8 +3257,8 @@ class SimSpec(_StrictAttrs):
                     f"gradients) is dominated by the interpolation "
                     f"stencil, not the solved field. Measured precedent: a "
                     f"0.19-cell packet reported an aberration 5x its "
-                    f"converged value AND the wrong functional form "
-                    f"(ledger L-216). Demonstrate a pitch ladder before "
+                    f"converged value AND the wrong functional form. "
+                    f"Demonstrate a pitch ladder before "
                     f"quoting any such number, and quote it with its "
                     f"pitch.")
             elif all(v == 0.0 for v in _ext.values()):
@@ -2707,14 +3268,14 @@ class SimSpec(_StrictAttrs):
                     f"by the optics and cannot be checked against the "
                     f"{_h:g} mm lattice from the spec alone. Measure the "
                     f"flown spread in cells before trusting a derivative "
-                    f"across the packet (ledger L-216).")
+                    f"across the packet.")
         if self.collisions.enabled and _dt >= 0.5:
             out.append(
                 f"collisions: gas-phase transport at dt_ns="
                 f"{_dt:g} carries an O(dt) FAST bias on TIMING "
                 f"observables (~1.5-3%/ns measured; fates/positions "
                 f"are dt-robust). For certified timing, demonstrate a "
-                f"dt plateau (adopted convention 2026-08-13) or quote "
+                f"dt plateau (the adopted convention) or quote "
                 f"the bias inline; dt_ns <= 0.25 reached the plateau "
                 f"on both measured devices.")
         if _rf_f and _dt > 0:
@@ -2743,15 +3304,19 @@ class SimSpec(_StrictAttrs):
                         f"and biases velocity statistics. Change "
                         f"rec_every so the sampling interval is not an "
                         f"integer multiple of the period.")
-        # SDS OUTSIDE ITS RF REGIME (L-452; PI ruling: warn, not refuse).
+        # SDS OUTSIDE ITS RF REGIME: warn, not refuse.
         # Carried as an advisory so it reaches every place advisories go:
         # build_run's console print AND the app's status line -- it used to
         # be printed by build_run only, so a UI user never saw it.
         from ion_gym.physics.sds import (rf_regime_note, sds_active,
+                                         species_notes,
                                          SDS_NO_COLLISION_COUNT)
         _sds_note = rf_regime_note(self)
         if _sds_note:
             out.append(_sds_note)
+        # the SDS mobility each species flies, and any converted between
+        # gases (displayed equals solver input)
+        out.extend(species_notes(self))
         # n_col UNDER SDS: the one rule every route applies (NaN column,
         # empty per-ion count); stated whenever the channel is recorded.
         if (sds_active(self.collisions)
@@ -2761,18 +3326,21 @@ class SimSpec(_StrictAttrs):
         # each declared m/z flies with, extrapolations flagged (displayed
         # equals solver input).
         from ion_gym.physics.ccs import (sigma_note, extrapolation_note,
-                                         stated_sigma_note)
+                                         stated_sigma_note, fallback_note,
+                                         charge_note)
         _sig_note = sigma_note(self)
         if _sig_note:
             out.append(_sig_note)
         # ...any extrapolated m/z as its OWN warning, so it is not buried
-        # in that list, and a stated sigma_m2 the fit leaves unused (PI
-        # rulings 2026-10-24: console and the app's advisory line)
-        for _note in (extrapolation_note(self), stated_sigma_note(self)):
+        # in that list, a stated sigma_m2 the fit leaves unused (on the
+        # console and the app's advisory line), and
+        # the static-sigma fallback where the fit does not apply
+        for _note in (extrapolation_note(self), stated_sigma_note(self),
+                      fallback_note(self), charge_note(self)):
             if _note:
                 out.append(_note)
-        # HARD-SPHERE STEP vs COLLISION TIME (PI ruling 2026-10-17: a
-        # loud warning, never a refusal).
+        # HARD-SPHERE STEP vs COLLISION TIME: a
+        # loud warning, never a refusal.
         from ion_gym.physics.collision3d import hs_step_note
         _hs_note = hs_step_note(self, _dt)
         if _hs_note:
@@ -2794,7 +3362,7 @@ class SimSpec(_StrictAttrs):
             "import_path": self.import_path,
             "scene": self.scene}
         # Written only when present, so a deck without one saves
-        # byte-identically to before (L-524: it was never written).
+        # byte-identically to before (it was never written).
         if self.transporter is not None:
             d["transporter"] = self.transporter.to_dict()
         if self.optic_axis is not None:            # only when declared
@@ -2830,16 +3398,23 @@ class SimSpec(_StrictAttrs):
     def to_json(self, path=None, indent=2):
         s = json.dumps(self.to_dict(), indent=indent)
         if path is not None:
-            Path(path).write_text(s)
+            write_text_atomic(path, s)
         return s
 
     @classmethod
     def from_dict(cls, d):
+        # Another kind of document is named as itself, with its loader,
+        # before any single-deck check can blame a missing block.
+        from ion_gym.io.spec_io import sniff
+        _kind = sniff(d)
+        if _kind in _OTHER_DOCUMENT_LOADERS:
+            raise ValueError(f"SimSpec: this is {_OTHER_DOCUMENT_LOADERS[_kind]}")
+        check_schema_version(d, "SimSpec")
         _known_top = {f.name for f in fields(cls)}
         # sanctioned metadata (documented allowlist): these
         # ride in spec files by design — _display_name is read by the
-        # app's example menu; schema_version is provenance. They are the
-        # ONLY tolerated non-field keys; everything else warns.
+        # app's example menu; schema_version is checked above. They are
+        # the ONLY tolerated non-field keys; everything else warns.
         # _ui_hidden: the deck ships and flies (notebooks reference it)
         # but is kept out of the example MENU. UI-side metadata, like
         # _display_name -- known, not a misspelling.
@@ -2851,10 +3426,10 @@ class SimSpec(_StrictAttrs):
                 f"SimSpec: unknown top-level key(s) {_extra} retained in "
                 f"the saved file but NOT interpreted — misspelled or "
                 f"foreign parameter?", stacklevel=3)
-        # R2 (PI ruling 2026-10-15): the ion source and the integration
+        # The ion source and the integration
         # contract set the physics, and their defaults are one deck's
         # operating point -- a deck without them is refused, not flown
-        # as the funnel. (No collisions block = vacuum, R3 Q1.)
+        # as the funnel. (No collisions block = vacuum.)
         for _blk in ("source", "integration"):
             if _blk not in d:
                 raise MissingPhysicsKey(
@@ -2871,7 +3446,7 @@ class SimSpec(_StrictAttrs):
             source=SourceSpec.from_dict(d["source"]),
             collisions=(CollisionSpec.from_dict(d["collisions"])
                         if "collisions" in d
-                        else CollisionSpec(enabled=False)),   # R3 Q1: vacuum
+                        else CollisionSpec(enabled=False)),   # absent: vacuum
             integration=IntegrationSpec.from_dict(d["integration"]),
             bounds=BoundsSpec.from_dict(d.get("bounds", {})),
             stations=[StationSpec.from_dict(x)
@@ -2885,13 +3460,18 @@ class SimSpec(_StrictAttrs):
             builder=d.get("builder", ""),
             import_path=d.get("import_path", ""),
             scene=d.get("scene"))
-        if _extra:
-            # PASSTHROUGH: top-level foreign keys survive too --
-            # SimSpec.from_dict is a hand-built constructor, not a
-            # _take_known site, so retention is explicit here.
-            spec._extras = {k: d[k] for k in _extra}
+        # PASSTHROUGH: top-level foreign keys survive too --
+        # SimSpec.from_dict is a hand-built constructor, not a
+        # _take_known site, so retention is explicit here. The sanctioned
+        # menu metadata is retained the same way (it is known, so it does
+        # not warn, but a save that dropped it changed the deck's menu
+        # label and visibility).
+        _keep = _extra + [k for k in ("_display_name", "_ui_hidden")
+                          if k in d]
+        if _keep:
+            spec._extras = {k: d[k] for k in _keep}
         if spec.integration.dt_ns is None:
-            spec.integration.dt_ns = spec.derive_dt_ns()
+            spec.integration.set_derived_dt(spec.derive_dt_ns())
         return spec
 
     @classmethod
@@ -2906,7 +3486,7 @@ class SimSpec(_StrictAttrs):
         else:
             p = Path(s)
             if p.exists():
-                raw = p.read_text()
+                raw = p.read_text(encoding="utf-8")
                 loaded_from = str(p)
             else:
                 # No silent fallthrough:
@@ -2992,21 +3572,75 @@ def min_rec_every(integ):
         raise ValueError(
             f"max_records={cap} holds only the two end rows; no rec_every "
             f"can cover a {t_max_us:g} us flight. Raise max_records.")
-    steps = t_max_us * 1e3 / dt_ns
+    steps = flight_steps(dt_ns, t_max_us)
     # the exact solution of _records_needed(steps, r) <= cap, then nudged
     # through THE SAME predicate so float rounding can never disagree
-    # with the check
+    # with the check. Rounding moves it by a step or two; the nudge is
+    # bounded so a case it cannot settle fails loudly instead of looping.
     r = max(int(steps // (cap - 1)) + 1, 1)
-    while r > 1 and _records_needed(steps, r - 1) <= cap:
-        r -= 1
-    while _records_needed(steps, r) > cap:
-        r += 1
-    return r
+    for _ in range(_REC_EVERY_NUDGES):
+        if r > 1 and _records_needed(steps, r - 1) <= cap:
+            r -= 1
+        elif _records_needed(steps, r) > cap:
+            r += 1
+        else:
+            return r
+    raise RuntimeError(
+        f"min_rec_every did not settle within {_REC_EVERY_NUDGES} steps of "
+        f"its estimate (steps={steps:g}, max_records={cap}, last "
+        f"rec_every={r}); this is a defect in the arithmetic, not the deck")
+
+
+# A flight longer than this many integrator steps cannot be counted in a
+# float exactly (2**53): steps / r stops changing with r, which is how the
+# record arithmetic above once looped forever on a t_max_us of 1e27.
+MAX_FLIGHT_STEPS = 2 ** 53
+_REC_EVERY_NUDGES = 64
+
+
+def flight_steps(dt_ns, t_max_us):
+    """Integrator steps in a flight, refused by name when it is not a
+    finite count below MAX_FLIGHT_STEPS."""
+    steps = t_max_us * 1e3 / dt_ns
+    if not math.isfinite(steps) or steps >= MAX_FLIGHT_STEPS:
+        raise ValueError(
+            f"integration: t_max_us={t_max_us:g} at dt_ns={dt_ns:g} is "
+            f"{steps:g} integrator steps; a flight must be a finite number "
+            f"of steps below 2**53 ({float(MAX_FLIGHT_STEPS):.3g}). Check "
+            f"t_max_us and dt_ns.")
+    return steps
+
+
+def long_flight_note(dt_ns, t_max_us, n_ions):
+    """The long-flight advisory, or None. Steps per ion x ions above
+    LONG_FLIGHT_ION_STEPS is announced with a wall-time range from
+    FLIGHT_NS_PER_STEP. Values the validator refuses (a non-positive step
+    or flight) give None here; the refusal names them."""
+    try:
+        dt_ns, t_max_us = float(dt_ns), float(t_max_us)
+        n = max(int(n_ions or 1), 1)
+    except (TypeError, ValueError):
+        return None
+    if not (dt_ns > 0 and t_max_us > 0
+            and math.isfinite(dt_ns) and math.isfinite(t_max_us)):
+        return None
+    per_ion = t_max_us * 1e3 / dt_ns
+    total = per_ion * n
+    if total <= LONG_FLIGHT_ION_STEPS:
+        return None
+    from ion_gym.physics.sizing import fmt_time
+    lo, hi = (total * ns * 1e-9 for ns in FLIGHT_NS_PER_STEP)
+    return (f"integration: a long flight -- up to {per_ion:.3g} steps per "
+            f"ion (t_max_us={t_max_us:g} at dt_ns={dt_ns:g}) x {n} ions = "
+            f"{total:.3g} integrator steps, roughly {fmt_time(lo)} to "
+            f"{fmt_time(hi)} on one core (fewer if ions end early; divided "
+            f"by the worker count). If that is not intended, check dt_ns "
+            f"and t_max_us.")
 
 
 def _records_needed(steps, every):
     """Records a flight of `steps` integrator steps needs at `every` --
-    the count check_recording_capacity has used since L-448, kept in one
+    the count check_recording_capacity uses, kept in one
     place so min_rec_every solves the same inequality the check tests."""
     return int(steps / every) + 2
 
@@ -3019,7 +3653,7 @@ def check_recording_capacity(integ):
     IT STOPS RECORDING. The trajectory returned then covers only the
     first part of the flight and carries nothing saying so.
 
-    MEASURED (L-448): dt 2 ns, t_max 3000 us, rec_every 10,
+    MEASURED: dt 2 ns, t_max 3000 us, rec_every 10,
     max_records 100000. 1,500,000 steps / 10 = 150,000 records wanted
     against a 100,000 cap, so every trace stopped around 2000 us of a
     3000 us flight and the last third was simply absent. Fates and
@@ -3040,7 +3674,7 @@ def check_recording_capacity(integ):
     cap = int(getattr(integ, "max_records", 0) or 0)
     if dt_ns <= 0 or t_max_us <= 0 or cap <= 0:
         return None                      # nothing to check against
-    steps = t_max_us * 1e3 / dt_ns
+    steps = flight_steps(dt_ns, t_max_us)
     need = _records_needed(steps, every)
     if need <= cap:
         return None
@@ -3218,7 +3852,9 @@ def set_pitch(spec, mm_per_gu):
 
 def reflectron_vacuum_spec():
     """A vacuum (collisions off), planar example skeleton — shows the
-    schema handling a DC-only, no-gas instrument."""
+    schema handling a DC-only, no-gas instrument. It carries NO
+    electrodes, so validate() refuses it until some are added; for a
+    flyable deck start from examples/."""
     return SimSpec(
         geometry=GeometrySpec(
             width_mm=90.0, height_mm=40.0, mm_per_gu=0.1,

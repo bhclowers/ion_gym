@@ -6,14 +6,20 @@ Licensed under the GNU General Public License v3 (see LICENSE).
 Support for this work was provided in part by NIGMS R35GM161833.
 
 Importing this package has NO side effects: no solves, no I/O, no path
-mutation. Subpackages (physics, io, viz, ui, cad, examples, projects) are
-imported explicitly by their absolute dotted paths.
+mutation. Subpackages (physics, io, viz, ui, cad, edit, projects) are
+imported explicitly by their absolute dotted paths. The example decks are
+JSON data, not code: ion_gym.io.paths.examples_dir() finds them in a
+checkout or an installed package.
+
+The public API -- the command line and the `__all__` of the modules listed
+in docs/PUBLIC_API.md -- is what scripts and notebooks should use;
+everything else is internal and can change without notice.
 """
 
 # SINGLE VERSION AUTHORITY (the version shows in the
-# Config tab). This string IS the release number -- the vNNN in the
+# Load tab). This string IS the release number -- the vNNN in the
 # delivered zip name. pyproject.toml derives from it (dynamic
-# version, tool.setuptools.dynamic), and the Config tab displays it,
+# version, tool.setuptools.dynamic), and the Load tab displays it,
 # so the number on the zip, the installed metadata, and the UI can
 # never disagree. Bump it when cutting a zip, nowhere else --
 # and the release packer REFUSES to cut a zip
@@ -22,9 +28,9 @@ imported explicitly by their absolute dotted paths.
 # while the zip series had reached 384, and the UI Config
 # tab faithfully displayed the stale number for 40 cuts).
 # (Found stale and split once: __init__ said 148.2 while
-# pyproject said 149.0 and the zip series was at v328.)
+# pyproject said 149.0.)
 # Version = the cut number of the zip this tree ships in; bumped AT CUT
-# TIME so the Config tab (which reads this live) always matches the
+# TIME so the Load tab (which reads this live) always matches the
 # artifact the user downloaded. A tree whose version trails its zip
 # name reads as "did my upload take?" in the browser.
-__version__ = "561"
+__version__ = "571"

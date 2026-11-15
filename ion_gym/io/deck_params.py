@@ -17,8 +17,8 @@ Both return the report lines, so a caller can log instead of print.
 Every override is applied to the SPEC OBJECT, after construction, so it
 cannot be defeated by deck defaults; None always means "inherit".
 
-DRIVE-GROUP CONVENTION (documented, PI ruling R7 2026-10-15: "the prefix
-should stay as a documented convention"): a drive group whose NAME
+DRIVE-GROUP CONVENTION (the prefix is a documented convention): a drive
+group whose NAME
 begins with `tw_prefix` (default "TW") is a TRAVELLING-WAVE phase; every
 other group is a confining / RF drive. Real decks name phases TW1..TW8,
 TW1_a/TW1_b (split-float) and TWA1/TWB1 (slimgrid), so the rule is the
@@ -54,7 +54,7 @@ def _drive_sig(g):
 
 
 def _override_targets(groups, names, tag, all_names):
-    """The groups an override applies to (L-544). Named: exactly those
+    """The groups an override applies to. Named: exactly those
     (each must exist and be of this class). Unnamed: every group of the
     class, but only when they are one uniform drive; a class holding
     different drives is refused by name instead of retuning all of them."""
@@ -87,7 +87,7 @@ def describe_deck(spec, *, tw_prefix="TW", show=True):
             f"{g.name} {g.amplitude_v:g} V @ {g.frequency_hz:g} Hz"
             f" ({g.waveform})" for g in rf))
     if tw:
-        # every distinct TW drive, not just the first phase's (L-544)
+        # every distinct TW drive, not just the first phase's
         sigs = {}
         for g in tw:
             sigs.setdefault(_drive_sig(g), []).append(g.name)
@@ -104,7 +104,9 @@ def describe_deck(spec, *, tw_prefix="TW", show=True):
         L.append(f"DC bias:    {len(dcs)} biased electrode(s), "
                  f"{lo:g} to {hi:g} V")
     s = spec.source
-    L.append(f"ion:        m/z {list(s.mz_list)}, charge {s.charge}, "
+    from ion_gym.physics.ion_envelope import charge_str
+    L.append(f"ion:        mass {list(s.mz_list)} Da, "
+             f"{charge_str(s.charge)}, "
              f"KE {s.ke_lo:g}-{s.ke_hi:g} eV, source T {s.temperature_k:g} K, "
              f"{s.n_ions} ion(s)")
     c = spec.collisions
@@ -173,7 +175,7 @@ def apply_deck_overrides(spec, *, rf_v=None, rf_f=None, tw_v=None, tw_f=None,
                 f"{g.name} {g.amplitude_v:g} V @ {g.frequency_hz:g} Hz"
                 for g in grp))
             continue
-        # EVERY group changed is reported, before -> after (L-544: the
+        # EVERY group changed is reported, before -> after (the
         # readout used to show grp[0] while the loop retuned them all)
         for g in _override_targets(grp, names, tag, all_names):
             before = f"{g.amplitude_v:g} V @ {g.frequency_hz:g} Hz"
@@ -195,7 +197,7 @@ def apply_deck_overrides(spec, *, rf_v=None, rf_f=None, tw_v=None, tw_f=None,
             L.append(f"dc[{k}]: OVERRIDE -> {float(v):g} V")
 
     s = spec.source
-    note("ion m/z", mz_list, list(s.mz_list))
+    note("ion mass (Da)", mz_list, list(s.mz_list))
     if mz_list is not None:
         s.mz_list = list(mz_list)
     note("charge", charge, s.charge)
@@ -315,8 +317,8 @@ def spec_table(spec, *, sections=None, show=True):
                 f"({getattr(grp, 'waveform', '?')}, phase "
                 f"{getattr(grp, 'phase_deg', 0.0):g} deg)", "0-pk")
     if "ion" in sections and src is not None:
-        add("ion", "m/z", ", ".join(f"{m:g}" for m in
-                                    (getattr(src, "mz_list", []) or [])), "Th")
+        add("ion", "mass", ", ".join(f"{m:g}" for m in
+                                     (getattr(src, "mz_list", []) or [])), "Da")
         add("ion", "charge", f"{getattr(src, 'charge', 1)}", "e")
         add("ion", "count", f"{getattr(src, 'n_ions', 0)}", "ions")
         add("ion", "kinetic energy",

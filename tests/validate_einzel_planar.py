@@ -2,7 +2,7 @@
 validate_einzel_planar.py — the INDEPENDENCE proof: a full spec -> native
 solve -> fly natively, gated on einzel physics.
 
-Geometry is ion_playground's einzel_lens (three plates, thickness 1.5 mm
+Geometry is the classic einzel lens (three plates, thickness 1.5 mm
 at x = cx +/- 8 and cx; bore radius 3 mm; outer two grounded, centre at
 lens_voltage) expressed as a SimSpec with inline shapes. The field is
 solved natively (solver3d ghost_linear stencil, conservative omega — auto-omega

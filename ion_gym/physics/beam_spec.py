@@ -49,7 +49,7 @@ DISTRIBUTIONS = ("single", "uniform", "gaussian", "grid", "list",
 # THE parameters each distribution kind takes (exactly what sample_scalar
 # reads), and which kinds draw randomly (sample_scalar needs a seed). The
 # beam panel reads these tables to label its fields, assemble a
-# declaration and show a derived one (L-554, D10): it carried three
+# declaration and show a derived one: it carried three
 # hand-written copies of the kind chain, two with no catch-all.
 DIST_FIELDS = {
     "single": ("value",),
@@ -67,7 +67,7 @@ SEEDED_DISTRIBUTIONS = ("uniform", "gaussian", "maxwellian")
 # regenerated from the fit is more ideal than the packet, so resolution
 # reads optimistically (measured on the certified OA-MRT packet: residual
 # 0.59, about +20% in R). A display threshold only -- it changes no
-# number (PI ruling 2026-10-16: keep 0.3, as a named constant; L-552).
+# number (0.3, kept as a named constant).
 DERIVE_RESIDUAL_WARN = 0.3
 
 # Which scalars each format requires. The UI renders exactly these fields,

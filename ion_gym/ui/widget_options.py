@@ -18,7 +18,7 @@ stays there, and the widget sits in a state its own options contradict::
 The browser renders the first real option as though it were chosen, so
 the user sees a selection the server does not have — the displayed-is-not-
 computed class, at the widget layer. Every control that reads
-`widget.value` then behaves as if nothing is selected. Measured in v523:
+`widget.value` then behaves as if nothing is selected. Measured:
 the Cache tab's export button stayed disabled reading "nothing selected"
 after its own refresh, "remove selected" answered "nothing to remove
 (refresh first)" immediately after a refresh, and the Fields tab's "Load
@@ -31,7 +31,7 @@ restored it only when it was still valid (leaving the invalid case — the
 one that matters — unhandled), and some did nothing. So the rule lives
 here and every site calls it, rather than each site remembering.
 
-SELECTION POLICY (PI ruling 2026-09-14): keep the current selection when
+SELECTION POLICY: keep the current selection when
 it survives into the new options; otherwise take the first entry. NOT
 "always reset to first" — the Cache tab's picker also drives "✕ remove
 selected", and a refresh that silently re-points a destructive-adjacent

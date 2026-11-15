@@ -2,8 +2,8 @@
 
 Owner of figures computed ACROSS an ensemble of flights (per-ion
 scalars and channel statistics), as distinct from field/PE/scene
-renders (viz_core, pe_view) and single-path renders. Added 2026-09-09
-for the rf_arrival_time campaign; both renderers satisfy the framework
+renders (viz_core, pe_view) and single-path renders. Added for the
+rf_arrival_time campaign; both renderers satisfy the framework
 contract: config-driven (channel names and windows are arguments, no
 magic numbers), display equals solver input (values plotted are the
 recorded channels verbatim), figures are RETURNED (no show/savefig
@@ -21,7 +21,7 @@ MM_US_TO_M_S = 1e3         # recorded velocities are mm/us
 
 def _fig(nrows, ncols, figsize):
     # no backend selection — display is the caller's decision (same
-    # fix as viz_core.deck_plane_preview, 2026-09-10); headless
+    # fix as viz_core.deck_plane_preview); headless
     # environments auto-select Agg themselves
     import matplotlib.pyplot as plt
     return plt.subplots(nrows, ncols, figsize=figsize)
@@ -150,7 +150,7 @@ def atd_figure(tofs_by_label, *, operating_point, bins=30,
     if not len(allt):
         raise ValueError("atd_figure: no arrival times supplied")
     if isinstance(bins, float):
-        # a FLOAT bins is a bin WIDTH in tof units (PI knob 2026-09-10)
+        # a FLOAT bins is a bin WIDTH in tof units
         if bins <= 0:
             raise ValueError(f"atd_figure: bin width {bins} <= 0")
         lo, hi = float(allt.min()), float(allt.max())
@@ -169,7 +169,7 @@ def atd_figure(tofs_by_label, *, operating_point, bins=30,
         # independent injection + transport, kappa2 and kappa3 ADD,
         # while normalized skew DILUTES as the gate widens (kappa2
         # grows under it) — so kappa3, not skew, is the observable
-        # that untangles gate width from transport tailing (2026-09-11).
+        # that untangles gate width from transport tailing.
         k3 = float(((t - mu) ** 3).mean())
         tail = float((t > mu + 2 * sd).mean())
         stats[lab] = dict(centroid=mu, width=sd, skew=sk, kappa3=k3,
@@ -213,7 +213,7 @@ def trajectory_panel(results, cols, *, axial_channel, transverse_channel,
     per doctrine) and axial position vs time (right). time_channel
     defaults to "t" — the BASE_CHANNELS name (sim_spec authority); it
     was briefly hardcoded as a guessed "t_us" and crashed the campaign
-    notebook (2026-09-10) — channel names come from the spec authority
+    notebook — channel names come from the spec authority
     or the caller, never from memory."""
     import matplotlib.pyplot as plt
     for ch in (axial_channel, transverse_channel, time_channel):

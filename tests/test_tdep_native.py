@@ -62,7 +62,7 @@ DECK = [  # (name, mz, KE_eV, z0, u0, tob_us, breakpoint_us_ion_clock)
 ]
 # FROZEN from the anchored kernel (see docstring):
 # (tof_us, KE_eV, u_exit_mm, steps)
-# RE-BLESSED 2026-10-13 for the PI's R1 ruling (CODATA 2018 everywhere):
+# RE-BLESSED for rule R1 (CODATA 2018 everywhere):
 # tracer_tdep's AMU moved 1.66053907e-27 -> 1.66053906660e-27 (-2.05e-9
 # relative), so every TOF moved by -0.83e-9..-1.12e-9 (TOF ~ sqrt(m)) and
 # every step count is unchanged. Before: ion1 2.039054531158466 us /

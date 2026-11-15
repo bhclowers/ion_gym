@@ -56,11 +56,28 @@ from ion_gym.physics.ccs import ion_sigma_m2   # per-ion HS cross section
 # a stale conversion is wrong in a way no test would name.
 from ion_gym.physics.stats import FWHM_PER_SIGMA
 # An ion born inside metal SPLATS AT BIRTH, with a warning, and the rest
-# of the packet flies on (PI 2026-10-15); every other refusal aborts the
+# of the packet flies on; every other refusal aborts the
 # packet. Worded like a region's metal impact ("hit metal (kind 0)").
 from ion_gym.physics.raster2d import BirthInMetal
 from ion_gym.physics.stations import FATE_IMPACT_PLANE
+from ion_gym.physics.numba_rng import call_rng_preserved
 _BORN_IN_METAL = "splat at birth: born inside metal (kind 0)"
+# a BirthInMetal subclass (physics.birth_domain): reported apart
+_BORN_OUTSIDE = "left at birth: born outside the solved domain (kind 1)"
+
+
+def packet_ion_seed(base, i):
+    """The kernel seed of packet ion i under base seed `base`. Base 0 is
+    i + 1, the seeds every packet flew with before packets took a seed,
+    so an unseeded packet is bit-identical to before. Any other base
+    derives each ion's seed from (base, i) with numpy's SeedSequence, so
+    different bases give independent streams (base + i would make base 1
+    replay base 0 shifted by one ion)."""
+    if int(base) == 0:
+        return int(i) + 1
+    import numpy as _np
+    return int(_np.random.SeedSequence([int(base), int(i)])
+               .generate_state(1)[0] & 0x7FFFFFFF) or 1
 
 
 def _region_station_planes(reg, off):
@@ -68,7 +85,7 @@ def _region_station_planes(reg, off):
     shared builder every single-stage route uses (stations.station_planes),
     so the staged route cannot drift from the ruled station contract.
 
-    FRAME (PI ruling 2026-10-16, L-435): a stage's stations are authored
+    FRAME: a stage's stations are authored
     in the STAGE's own frame -- the frame the stage deck flies in alone --
     not the assembly world frame (exits are the world-frame objects).
     `off` is that frame minus the kernel's: the pack's mirror offset, plus
@@ -78,8 +95,12 @@ def _region_station_planes(reg, off):
 
 
 def _rot_matrix(rot_deg):
-    """Intrinsic X->Y->Z rotation (deg) -> 3x3. Identity for None/zeros.
-    Small, explicit; no scipy dependency."""
+    """rot_deg = [rx, ry, rz] (deg) -> 3x3, R = Rz @ Ry @ Rx: rotate about
+    the FIXED world x, then world y, then world z (extrinsic X-Y-Z, the
+    same as intrinsic Z-Y'-X''). Identity for None/zeros. The convention
+    matters only when two or more angles are nonzero; the assembly view
+    (viz_core) builds the same matrix, and tests/test_pose_convention.py
+    pins both. Small, explicit; no scipy dependency."""
     if rot_deg is None:
         return np.eye(3)
     rx, ry, rz = (np.radians(a) for a in rot_deg)
@@ -95,8 +116,9 @@ def _rot_matrix(rot_deg):
 @dataclass
 class Pose:
     """Rigid placement of a region's LOCAL frame in the world frame:
-    world = R @ local + t. offset_mm is t; rot_deg is the intrinsic
-    X-Y-Z Euler rotation. A coaxial unit has rot_deg=None (identity) —
+    world = R @ local + t. offset_mm is t; rot_deg is the EXTRINSIC
+    X-Y-Z rotation (about world x, then y, then z: R = Rz Ry Rx; see
+    _rot_matrix). A coaxial unit has rot_deg=None (identity) —
     so this generalizes the old (axial, radial) offset without breaking
     it: a pure translation is just Pose(offset_mm=[dx,dy,dz])."""
     offset_mm: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
@@ -197,7 +219,7 @@ def _mirror_off(fields):
 
 def _seam_index(region, axis, offset_mm, h, n):
     """Grid index of the region's declared exit plane on `axis`, REFUSED
-    when the plane lies outside the field grid (L-535). The seam gate used
+    when the plane lies outside the field grid. The seam gate used
     to clamp the index to the grid edge, so its verdict could be about a
     plane nobody declared (a 370 mm typo for 37 mm was judged at the
     edge). offset_mm maps the stored grid to the declared frame."""
@@ -388,8 +410,8 @@ def _region_sds(reg, mz_Da, q_e):
     """(sds_on, damping, mfp, V, log_mr, stats) for one ion in one
     region, from the shared SDS door; inert placeholders when the region's
     gas is off or hard-sphere. The gas FLOW is not here: it applies to
-    hard-sphere regions too, so callers read collision3d.gas_flow (L-563;
-    this returned it for SDS only, and HS regions flew still gas)."""
+    hard-sphere regions too, so callers read collision3d.gas_flow (this
+    returned it for SDS only, and HS regions flew still gas)."""
     from ion_gym.physics import sds as _sds
     if not _sds.sds_active(reg.gas):
         return (False, 0.0, 0.0, 0.0, 0.0, np.zeros((5, 1002)))
@@ -397,7 +419,7 @@ def _region_sds(reg, mz_Da, q_e):
     col = resolve_collisions(reg.gas)
     p = _sds.sds_ion_params(col, mz_Da, q_e)
     return (True, p["damping"], p["mfp_mm"], p["V_mm_us"],
-            p["log_mr_ratio"], _sds.load_tables()[0])
+            p["log_mr_ratio"], _sds.jump_statistics())
 
 
 def _fly_region(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
@@ -424,7 +446,7 @@ def _fly_region(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
         # 3-D route (build_stl3d dispatches the same way)
         from ion_gym.physics.sds import sds_active
         q_e = _region_charge(reg)
-        # FACES (L-165): the exit seam and the stage's DECLARED bounds,
+        # FACES: the exit seam and the stage's DECLARED bounds,
         # armed per face exactly as the planar and r-z regions arm them
         # (_merge_declared_bounds: same precedence, same dead-handoff
         # refusal), in the kernel frame (stage frame - st_off). fly3d
@@ -447,7 +469,7 @@ def _fly_region(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
         planes = st_planes + [("xyz"[k // 2], bnd_val[k],
                                1.0 if k % 2 else -1.0) for k in faces]
         # The REGION's recording settings, as the planar and r-z region
-        # flyers pass them (L-564: this used each kernel's own default --
+        # flyers pass them (this used each kernel's own default --
         # every 10 steps for fly3d, every 50 for fly3d_sds -- so the gas
         # model changed the recording density, and post-hoc station timing
         # interpolates along those records).
@@ -589,10 +611,10 @@ def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
     q_e = _region_charge(reg)
     (sds_on, sds_damp, sds_mfp, sds_V, sds_logmr,
      sds_stats) = _region_sds(reg, mz_Da, q_e)
-    # declared gas flow, in-plane only on a planar region (L-563)
+    # declared gas flow, all three axes (the planar gas is 3-D)
     from ion_gym.physics.build_planar import planar_gas_flow
-    gfx, gfy, _gfz = planar_gas_flow(reg.gas, f"region {reg.name!r}")
-    # STATION PLANES (L-435): the stage-frame stations in the kernel's
+    gfx, gfy, gfz = planar_gas_flow(reg.gas, f"region {reg.name!r}")
+    # STATION PLANES: the stage-frame stations in the kernel's
     # anchored frame -- the same anchor single-stage planar applies; z
     # carries no anchor (the field-free drift coordinate).
     from ion_gym.physics.tracer3d import pack_planes
@@ -604,7 +626,7 @@ def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
     max_records = int(reg.max_records)
     rec = _np.empty((max_records, ncol))
     acc = q_e * E_CHG / (mz_Da * KG_AMU)
-    n, kind, _nc, bface = _fly_planar(
+    n, kind, _nc, bface = call_rng_preserved(_fly_planar,
         x0, y0, float(v0_mm_us[0]), float(v0_mm_us[1]), float(tob_us),
         float(mz_Da), f["ExA"], f["EyA"], f["ExK"], f["EyK"],
         f["ch_kind"], f["ch_om"], f["ch_ph"], f["ch_duty"],
@@ -617,7 +639,7 @@ def _fly_region_planar(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
         rec, int(reg.rec_every), nch, bnd_on, bnd_val, int(seed),
         float(r0_mm[2]), float(v0_mm_us[2]),
         sds_on, sds_damp, sds_mfp, sds_V, sds_logmr, sds_stats,
-        *_st, gfx, gfy)
+        *_st, gfx, gfy, gfz)
     if n >= max_records:
         raise RuntimeError(
             f"region {reg.name!r}: the trajectory buffer filled "
@@ -810,14 +832,14 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
     _merge_declared_bounds(reg, bnd_on, bnd_val, src, (0.0, 0.0, 0.0))
 
     # the ion's charge from the REGION (was the pack's value with a silent
-    # default of 1) and the region's SDS model (r-z SDS, L-519)
+    # default of 1) and the region's SDS model (r-z SDS)
     q_e = _region_charge(reg)
     acc = q_e * E_CHG / (mz_Da * KG_AMU)
     (sds_on, sds_damp, sds_mfp, sds_V, sds_logmr,
      sds_stats) = _region_sds(reg, mz_Da, q_e)
     # Same single derivation the planar and 3-D routes use.
     g = gas_kernel_scalars(reg.gas)
-    # the declared gas flow, for HS AND SDS regions (L-563: it reached the
+    # the declared gas flow, for HS AND SDS regions (it reached the
     # kernel only under SDS)
     from ion_gym.physics.collision3d import gas_flow
     gas_flow_v = gas_flow(reg.gas)
@@ -831,13 +853,13 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
     # (the planar route's global-registry flag bug is the cautionary
     # tale), so this must not be derived from OPTIONAL_CHANNELS.
     f13 = tuple([False] * 13)
-    # STATION PLANES (L-435): stage-frame stations; the r-z kernel flies
+    # STATION PLANES: stage-frame stations; the r-z kernel flies
     # the stage frame, so only the pack's mirror offset (zero on r-z
     # packs) separates them.
     from ion_gym.physics.tracer3d import pack_planes
     _st = pack_planes(_region_station_planes(reg, st_off),
                       f"region {reg.name!r}")
-    n, kind, _nc, bface = _fly_rec_full(
+    n, kind, _nc, bface = call_rng_preserved(_fly_rec_full,
         float(r0_mm[0]), float(r0_mm[1]), float(r0_mm[2]),
         float(v0_mm_us[0]), float(v0_mm_us[1]), float(v0_mm_us[2]),
         float(tob_us), float(mz_Da),
@@ -873,7 +895,7 @@ def _fly_region_rz(reg, mz_Da, *, r0_mm, v0_mm_us, tob_us, seed, planes,
 
 
 def _extend_final_region(reg, res, moff):
-    """DRIFT EXTENSION for the FINAL region (L-286): an ion that left the
+    """DRIFT EXTENSION for the FINAL region: an ion that left the
     region's solved domain toward a station or bound the stage declares
     beyond it gets ONE analytically exact record (physics.drift_extension,
     the function every single-stage route calls), ending on a terminating
@@ -944,7 +966,7 @@ def _detect_hit(reg, res, moff=(0.0, 0.0, 0.0)):
     A detect with on_hit="pass" is NON-DESTRUCTIVE: the ion flies on
     through the plane, and the arrival is the FIRST in-window crossing
     read back off the completed trace. A detect with on_hit="splat" is a
-    kernel plane (L-435): the kernel absorbs the ion AT the crossing
+    kernel plane: the kernel absorbs the ion AT the crossing
     (kind 6) and writes that exact state as the trace's final record, so
     that record is the arrival -- the first in-window crossing by
     construction (k = 1).
@@ -1018,10 +1040,11 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
                            f"{a.name!r}'s field is dropped at the plane, "
                            f"so trajectories near this seam carry a "
                            f"defect bounded by that magnitude. Stated, "
-                           f"not refused (PI ruling 2026-09-05); reduce "
+                           f"not refused; reduce "
                            f"it with a DC terminator electrode or a "
                            f"longer field-free gap.")
-                    print(msg)
+                    from ion_gym.advisories import advise
+                    advise(msg)
                     seam_advisories.append(msg)
 
     p_world = np.asarray(p0_world, float)
@@ -1077,7 +1100,7 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
             # returns (the traces, the handoffs): the hit is in the stage
             # frame, and it used to be published as-is, so /flight and
             # the impact tab drew a posed stage's arrivals in the wrong
-            # place (L-435). Identity-posed stages are unchanged.
+            # place. Identity-posed stages are unchanged.
             _pw, _vw = reg.pose.local_to_world(
                 np.array([_hit["x"], _hit["y"], _hit["z"]], float),
                 np.array([_hit["vx"], _hit["vy"], _hit["vz"]], float))
@@ -1127,7 +1150,7 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
         # axis the seam can never occupy -- face identity discriminates
         # ALL sources on ALL axes with no position tolerance at all.
         # EVERY route reports the face now: the 3-D region maps fly3d's
-        # terminating plane to its face (L-165; it used to arm no bounds
+        # terminating plane to its face (it used to arm no bounds
         # and declare -2 for "kind 3 is the seam by construction"). A
         # kind = 3 with no face is impossible by the kernels' own
         # contract -- if it arrives, the contract broke, and that is
@@ -1141,11 +1164,11 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
                 raise RuntimeError(
                     f"region {reg.name!r}: kernel returned kind = 3 "
                     f"with no terminating face -- the kernel's "
-                    f"face-reporting contract (L-165) is broken.")
+                    f"face-reporting contract is broken.")
         if reg.exit is None or not _crossed_exit:
             # a station impact plane is a TERMINATION even in the final
             # region: "completed" there would count a splatted ion as an
-            # arrival (L-435, measured)
+            # arrival (measured)
             if reg.exit is None and int(res["kind"]) != FATE_IMPACT_PLANE:
                 fate = "completed"
             elif res["kind"] == 3:
@@ -1175,7 +1198,7 @@ def fly_staged(regions: List[Region], mz_Da, p0_world, v0_world_mm_us,
                                    f"another stage's"),
                                3: "crossed a bound",
                                # a stage-frame impact_plane outside its
-                               # window (L-435); kind 6 (detect splat) is
+                               # window; kind 6 (detect splat) is
                                # an arrival and never reaches this branch
                                5: "splat on a station impact plane "
                                   "(outside its window)"}
@@ -1331,7 +1354,7 @@ def trace_policy(doc):
             f"assembly 'view' declares unknown key(s) {unknown}; it takes "
             f"'trace_fraction' and 'trace_floor'. A view key read under a "
             f"name nothing consumes is a setting the user believes is "
-            f"applied and is not (L-159).")
+            f"applied and is not.")
     return (float(v.get("trace_fraction", TRACE_FRACTION)),
             int(v.get("trace_floor", TRACE_FLOOR)))
 
@@ -1373,7 +1396,7 @@ def _pose_from(d) -> Pose:
             hint = (" `origin_mm` was an older spelling of `offset_mm` and "
                     "is no longer accepted, because a pose silently read "
                     "under one name and written under another places the "
-                    "stage at the world origin without saying so (L-159). "
+                    "stage at the world origin without saying so. "
                     "Note that `geometry.origin_mm` is a DIFFERENT thing -- "
                     "the solve grid's anchor -- and is unaffected.")
         raise ValueError(
@@ -1567,11 +1590,93 @@ def check_stage_clearance(named_stage_boxes):
         raise ValueError(
             f"stage clearance: {len(hits)} pair(s) of DECLARED metal "
             f"interpenetrate: {shown}{more}. An assembly with overlapping "
-            f"stages is not an instrument (PI, 2026-08-24). Move a "
+            f"stages is not an instrument. Move a "
             f"pose offset, correct a metal_depth_mm — or, if a beam is "
             f"meant to fly THROUGH one of these (an injection aperture in "
             f"a liner), that aperture is not yet declarable and is "
             f"Tier-3 geometry.")
+
+
+def _beam_charge(doc):
+    """(charge, where) for stages that inherit their source: the beam's
+    declared charge, else the charge every source-declaring stage states
+    (load_assembly refuses a disagreement), else a refusal."""
+    from ion_gym.io.sim_spec import charge_error
+    beam = doc.get("beam") or {}
+    found = None
+    if "charge" in beam:
+        found = (beam["charge"], "beam.charge")
+    else:
+        for st in doc.get("stages") or []:
+            src = (st.get("spec") or {}).get("source") \
+                if isinstance(st.get("spec"), dict) else None
+            if isinstance(src, dict) and "charge" in src:
+                found = (src["charge"], f"stage {st.get('name')!r}")
+                break
+    if found is not None:
+        err = charge_error(found[0], f"staged assembly {found[1]}")
+        if err:
+            raise ValueError(err)      # int() would truncate 2.5 to 2
+        return int(found[0]), found[1]
+    raise ValueError(
+        "staged assembly: a stage inherits its source from the beam, but "
+        "neither the beam nor any stage states a charge. Add 'charge' to "
+        "the assembly's 'beam' block (e.g. \"charge\": 1).")
+
+
+def _inherited_source(spec_dict, mz, charge):
+    """The source a non-birth stage is BUILT with when it declares none:
+    one ion at rest at the domain centre with the beam's m/z and charge.
+    No ion is ever flown from it -- births come from the beam or the
+    from_stage stage -- but the build validates and sizes a source."""
+    g = spec_dict.get("geometry") or {}
+    org = list(g.get("origin_mm") or []) + [0.0, 0.0, 0.0]
+    return {"distribution": "point", "n_ions": 1, "mz_list": [float(mz)],
+            "charge": int(charge),
+            "x0_mm": float(org[0]) + 0.5 * float(g.get("width_mm", 0.0)),
+            "y0_mm": float(org[1]) + 0.5 * float(g.get("height_mm", 0.0)),
+            "z0_mm": float(org[2]) + 0.5 * float(g.get("depth_mm", 0.0)),
+            "direction": [1.0, 0.0, 0.0], "ke_lo": 0.0, "ke_hi": 0.0,
+            "tob_span_us": 0.0, "seed": 0}
+
+
+def stage_spec_dicts(doc):
+    """[(stage entry, inline spec dict)] with a missing source filled in.
+
+    A stage's source is used for births only when the beam names that
+    stage (beam.from_stage); otherwise ions come from the beam itself, and
+    the only thing read from a stage's source is its charge. So a SimSpec
+    stage that is NOT the birth stage may omit its source: it inherits the
+    beam's m/z and charge, and the load says so. The birth stage, any
+    stage that does declare a source, and any stage in another format (a
+    scene3d stage's converter supplies its own source) is loaded exactly
+    as written. The ONE authority for the flight loader and the app."""
+    from ion_gym.io.spec_io import sniff
+    beam = doc.get("beam") or {}
+    birth = beam.get("from_stage")
+    out = []
+    for st in doc.get("stages") or []:
+        raw = st.get("spec")
+        if (not isinstance(raw, dict) or "source" in raw
+                or sniff(raw) != "simspec"):
+            out.append((st, raw))
+            continue
+        if st.get("name") == birth:
+            raise ValueError(
+                f"stage {birth!r} is the assembly's birth stage "
+                f"(beam.from_stage) but declares no source: its source IS "
+                f"the packet. Give that stage a source block.")
+        if "mz" not in beam:
+            raise ValueError(f"assembly 'beam' needs 'mz': {beam}")
+        charge, where = _beam_charge(doc)
+        filled = dict(raw)
+        filled["source"] = _inherited_source(raw, beam["mz"], charge)
+        print(f"[ASSEMBLY] stage {st.get('name')!r} declares no source. It "
+              f"is not the birth stage, so no ion is born from it; it is "
+              f"built with the beam's m/z {float(beam['mz']):g} and charge "
+              f"{charge:+d} (from {where}).")
+        out.append((st, filled))
+    return out
 
 
 def load_assembly(path):
@@ -1587,7 +1692,7 @@ def load_assembly(path):
     path-valued `spec` rather than silently supporting both.
     """
     apath = Path(path)
-    doc = json.loads(apath.read_text())
+    doc = json.loads(apath.read_text(encoding="utf-8"))
     schema = doc.get("schema", "")
     if schema != SCHEMA:
         raise ValueError(f"assembly schema {schema!r} != {SCHEMA!r} "
@@ -1600,7 +1705,9 @@ def load_assembly(path):
     for st in stages:
         if "name" not in st or "spec" not in st:
             raise ValueError(f"stage needs 'name' and 'spec': {st}")
-        raw = st["spec"]
+    # a non-birth stage without a source inherits the beam's (announced)
+    _spec_dicts = [d for _st, d in stage_spec_dicts(doc)]
+    for st, raw in zip(stages, _spec_dicts):
         if isinstance(raw, str):
             raise TypeError(
                 f"stage {st['name']!r}: 'spec' is a path ({raw!r}), but "
@@ -1625,7 +1732,7 @@ def load_assembly(path):
                 f"stage {st['name']!r}: built model exposes no fly_fields "
                 f"pack (builder {spec.builder!r} is not staged-flight "
                 f"ready). Every current route publishes one — planar and "
-                f"r-z included (route-tagged packs, L-113/L-134) — so a "
+                f"r-z included (route-tagged packs) — so a "
                 f"missing pack means this builder predates the contract "
                 f"or its solve did not complete; it does NOT mean the "
                 f"stage's geometry class is unsupported.")
@@ -1645,7 +1752,7 @@ def load_assembly(path):
         # flight reports a timeout fate with a perfectly plausible partial
         # trajectory, which reads as a transmission failure rather than as
         # a setting that was never consulted.
-        # Read DIRECTLY (L-557): every SimSpec carries integration, and
+        # Read DIRECTLY: every SimSpec carries integration, and
         # build_run above has already resolved an unset dt_ns, so the old
         # getattr fallbacks (1 ns / 50 us / rec_every 1 / 100000 records)
         # could only hide a missing value.
@@ -1666,7 +1773,7 @@ def load_assembly(path):
         _po = _pose_from(st.get("pose"))
         if _ex is not None:
             _ex = exit_world_to_local(_ex, _po)
-        # STATIONS ARE HONOURED on this route (L-435): each region hands
+        # STATIONS ARE HONOURED on this route: each region hands
         # its stage-frame stations to its kernel (_region_station_planes),
         # so the load-time "not honoured" notice is retired. Built once
         # here so a malformed station (a window on its own axis, an
@@ -1699,8 +1806,8 @@ def load_assembly(path):
     # unphysical assembly never reaches a solver. Skips undeclared-z
     # stages by design — see check_stage_clearance.
     _boxes = []
-    for _st, _reg in zip(stages, regions):
-        _sp = load_any_spec(json.dumps(_st["spec"]))
+    for _st, _raw in zip(stages, _spec_dicts):
+        _sp = load_any_spec(json.dumps(_raw))
         _boxes.append((_st["name"], stage_shape_boxes_world(
             _sp, _pose_from(_st.get("pose")))))
     check_stage_clearance(_boxes)
@@ -1838,8 +1945,14 @@ def fly_assembly(path, check_seams=True):
 
 
 def fly_packet(regions, beam, *, check_seams=True, tracker=None,
-               keep_traces=0):
+               keep_traces=0, seed=None):
     """Fly an ENSEMBLE through a staged assembly and report its statistics.
+
+    seed: the packet's base seed (collisions and any other per-ion random
+    draw); None takes beam["seed"], and a beam without one uses base 0,
+    the seeds packets always flew with (packet_ion_seed). Each repeat of a
+    gas packet with the same base is identical; pass another base for an
+    independent repeat. The base used is returned as out["seed"].
 
     Resolution is a property of a packet, not of an ion. A single-ion
     staged flight can prove the seams are sane and the geometry connects,
@@ -1860,6 +1973,8 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
     """
     import numpy as _np
 
+    base_seed = seed if seed is not None else beam.get("seed")
+    base_seed = 0 if base_seed is None else int(base_seed)
     mz = float(beam["mz"])
     rows = [[float(v) for v in r] for r in beam["ions"]]
     # PER-ION m/z (a 3-mass Ion-tab packet once flew every row
@@ -1906,17 +2021,19 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
         x, y, z, vx, vy, vz, tob = r
         try:
             res = fly_staged(regions, _mz_i(i), (x, y, z), (vx, vy, vz),
-                             tob_us=tob, seed=i + 1,
+                             tob_us=tob, seed=packet_ion_seed(base_seed, i),
                              check_seams=(check_seams and i == 0))
         except BirthInMetal as e:
-            # A birth inside metal is a fact about THIS ion: it SPLATS at
-            # birth, the user is WARNED, and every other ion still flies
-            # (PI 2026-10-15). Its row carries the splat point (the birth)
-            # and the full diagnostic.
-            print(f"[staged] WARNING: ion {i} was born inside metal and "
-                  f"splats at birth -- {e}", flush=True)
-            losses[_BORN_IN_METAL] = losses.get(_BORN_IN_METAL, 0) + 1
-            per_ion.append(dict(i=i, arrived=False, why=_BORN_IN_METAL,
+            # A birth inside metal (or outside the solved domain) is a fact
+            # about THIS ion: it is lost at birth, the user is WARNED, and
+            # every other ion still flies. Its row carries
+            # the birth point and the full diagnostic.
+            from ion_gym.physics.birth_domain import BirthOutsideDomain
+            why = (_BORN_OUTSIDE if isinstance(e, BirthOutsideDomain)
+                   else _BORN_IN_METAL)
+            print(f"[staged] WARNING: ion {i}: {why} -- {e}", flush=True)
+            losses[why] = losses.get(why, 0) + 1
+            per_ion.append(dict(i=i, arrived=False, why=why,
                                 detail=str(e), mz=_mz_i(i),
                                 x=float(x), y=float(y), z=float(z)))
             continue
@@ -1924,7 +2041,7 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
             # EVERY OTHER refusal is about the configuration, not the ion:
             # a seam the gate cannot evaluate, a kernel contract, an
             # unknown route, a charge/SDS/region refusal. It ABORTS the
-            # packet with a warning (PI 2026-10-15; L-521). It used to be
+            # packet with a warning. It used to be
             # tallied as a lost ion -- configuration errors mixed into
             # transmission -- and a seam refusal on ion 0 (the only ion
             # that runs the seam check) then let every other ion fly
@@ -1957,8 +2074,8 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
                     z=np.asarray(rg["z"], float)[_m], t_us=_t[_m]))
             traces.append(dict(i=i, fate=fate, mz=_mz_i(i),
                                regions=_rg_out))
-        # DETECTED IS THE ONLY TRANSMISSION (PI ruling 2026-10-16: "all
-        # you can say is how many of the ions flown hit the detector").
+        # DETECTED IS THE ONLY TRANSMISSION: all you can say is how many
+        # of the ions flown hit the detector.
         # `arrived` -- the field name kept for the record format -- means
         # DETECTED: the ion crossed a declared detector. Every other
         # ending is a reason it was not detected, never an arrival. That
@@ -2020,9 +2137,9 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
 
     n = len(rows)
     # n_arrived = DETECTED, n_lost = NOT detected, losses = the reasons
-    # (names kept for the record format; PI ruling 2026-10-16)
+    # (names kept for the record format)
     out = dict(n=n, n_arrived=len(arrivals), n_lost=n - len(arrivals),
-               losses=losses, per_ion=per_ion,
+               losses=losses, per_ion=per_ion, seed=base_seed,
                detector_declared=bool(_has_detector),
                # A DRAWN subset, never the measured set. n_traced is
                # reported alongside n so a reader of this dict can never
@@ -2050,9 +2167,9 @@ def fly_packet(regions, beam, *, check_seams=True, tracker=None,
         # honest per-m/z numbers; this headline refuses.
         out.update(T_us=float("nan"), fwhm_ns=float("nan"),
                    R=float("nan"),
-                   note=(f"multi-m/z packet "
+                   note=(f"multi-mass packet "
                          f"({len(set(float(v) for v in _mzs))} masses) — "
-                         f"per-m/z statistics on the Stats card; a pooled "
+                         f"per-mass statistics on the Stats card; a pooled "
                          f"R across masses is undefined."))
         return out
     a = _np.asarray(arrivals)

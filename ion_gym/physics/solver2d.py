@@ -20,7 +20,8 @@ Stencils (spacing h both directions):
   cyl axis (r=0)  : L'Hopital: lap = phi_zz + 2 phi_rr, phi_r(0)=0
                     -> centre -6, z-nbrs 1, first off-axis node 4
 Open edges: Neumann mirror — a missing neighbour's coefficient folds onto the
-opposite (existing) neighbour.
+opposite (existing) neighbour, which puts the zero-gradient plane ON the
+edge node (second order; the 3-D solvers' open-edge rule too).
 """
 
 import numpy as np
@@ -29,29 +30,29 @@ from scipy.sparse import coo_matrix
 
 def assemble_laplace(fixed, h, symmetry="planar",
                      neumann_edges=("z0", "z1", "u0", "u1"),
-                     edge_ghost="ghost_linear"):
+                     edge_ghost="mirror"):
     """edge_ghost: discrete treatment of the missing neighbour at open edges.
-      'ghost_linear'     : phi_ghost = phi_edge  (fold coef onto the CENTRE node).
-                 Empirically matched to an external solve at 1e-6 relative on the
-                 einzel basis cross-check -- use for all external comparisons.
-      'mirror' : phi_ghost = phi_inner (fold onto the OPPOSITE neighbour) --
-                 the standard second-order symmetric Neumann. This, NOT
-                 ghost_linear, is the even-reflection BC a symmetry FOLD
-                 plane requires: on a discretely symmetric problem
-                 phi(plane-1) == phi(plane+1) != phi(plane), so
-                 ghost_linear at a fold plane halves the transverse
-                 second difference — an O(h^2 * phi_perp'') boundary
-                 error that scales with field CURVATURE at the plane
-                 (measured 38 V on a real MRT median plane;
-                 invisible on curvature-flat planes, which
-                 is how it survived certification).
+      'mirror' (default): phi_ghost = phi_inner (fold onto the OPPOSITE
+                 neighbour) -- the standard second-order symmetric
+                 Neumann, with the zero-gradient plane ON the edge node.
+                 The 3-D solvers use it at open edges, so a full-depth
+                 extrusion solves to the planar field; it is also the
+                 even-reflection a symmetry FOLD plane requires (on a
+                 discretely symmetric problem phi(plane-1) ==
+                 phi(plane+1) != phi(plane)).
+      'ghost_linear': phi_ghost = phi_edge (fold onto the CENTRE node),
+                 which puts the zero-gradient plane half a node OUTSIDE
+                 the domain: first order (against an exact solution the
+                 error halves, not quarters, with h). It was the open-edge
+                 default until the routes were made consistent; kept by
+                 name for comparisons with fields solved that way. At a
+                 fold plane it halves the transverse second difference
+                 (measured 38 V on a real MRT median plane).
     The two differ at the edge at O(h); interior stencils are identical.
 
-    edge_ghost may be a single kind (applied to every open edge — the
-    historical behaviour, byte-identical) or a mapping {edge: kind}
-    naming a kind PER open edge, e.g. {"u0": "mirror"} for a solve
-    folded about the low-u plane. Unnamed edges default to
-    'ghost_linear'; unknown edge names or kinds refuse loudly."""
+    edge_ghost may be a single kind (applied to every open edge) or a
+    mapping {edge: kind} naming a kind PER open edge. Unnamed edges
+    default to 'mirror'; unknown edge names or kinds refuse loudly."""
     _KINDS = ("ghost_linear", "mirror")
     _EDGES = ("z0", "z1", "u0", "u1")
     if isinstance(edge_ghost, str):
@@ -66,7 +67,7 @@ def assemble_laplace(fixed, h, symmetry="planar",
             raise ValueError(
                 f"edge_ghost mapping: unknown edge(s) {bad_e} / "
                 f"kind(s) {bad_k}; edges are {_EDGES}, kinds {_KINDS}")
-        ghost_of = dict.fromkeys(_EDGES, "ghost_linear")
+        ghost_of = dict.fromkeys(_EDGES, "mirror")
         ghost_of.update(edge_ghost)
     nz, nu = fixed.shape
     if symmetry == "cylindrical" and "u0" in neumann_edges:
@@ -125,7 +126,7 @@ def assemble_laplace(fixed, h, symmetry="planar",
 
 def laplace_factor(fixed, h, symmetry="planar",
                    neumann_edges=("z0", "z1", "u0", "u1"),
-                   edge_ghost="ghost_linear", dtype=np.float64):
+                   edge_ghost="mirror", dtype=np.float64):
     """FACTOR-ONCE path:
     assemble and LU-factorize the Laplace system for a given metal mask
     ONCE, returning solve_rhs(val) that back-substitutes per Dirichlet
@@ -150,7 +151,7 @@ def laplace_factor(fixed, h, symmetry="planar",
         b[fn] = np.asarray(val, dtype)[fixed]
         phi = lu.solve(b).reshape(nz, nu).astype(np.float64)
         if pending:
-            # THIS MACHINE'S LU RATE for the solve-cost quote (L-439):
+            # THIS MACHINE'S LU RATE for the solve-cost quote:
             # the one LU door records every factorisation it performs.
             pending.clear()
             from ion_gym.physics.sizing import record_solve
@@ -162,9 +163,20 @@ def laplace_factor(fixed, h, symmetry="planar",
 
 def solve_laplace(fixed, val, h, symmetry="planar",
                   neumann_edges=("z0", "z1", "u0", "u1"),
-                  edge_ghost="ghost_linear"):
+                  edge_ghost="mirror"):
     """Single-RHS wrapper over the factored path (same system as
-    always; behaviour unchanged for existing callers)."""
+    always; behaviour unchanged for existing callers).
+
+    Arguments (units in brackets; [-] is dimensionless):
+      fixed          [-]   (nz, nu) bool: Dirichlet (metal) nodes
+      val            [V]   (nz, nu) potentials, read where fixed
+      h              [mm]  node spacing, the same on both axes (only
+                           ratios of h enter the stencil; callers pass mm)
+      symmetry       [-]   "planar" or "cylindrical" (u is the radius)
+      neumann_edges  [-]   open edges among ("z0", "z1", "u0", "u1"),
+                           zero normal field there
+      edge_ghost     [-]   "mirror" or "ghost_linear", or {edge: kind}
+                           (see assemble_laplace)"""
     return laplace_factor(fixed, h, symmetry, neumann_edges,
                           edge_ghost)(val)
 

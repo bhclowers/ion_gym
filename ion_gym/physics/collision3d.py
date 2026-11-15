@@ -44,11 +44,11 @@ import math
 import numpy as np
 from numba import njit
 
-# Constants come from the one authority (PI ruling 2026-10-13, R1: CODATA
-# 2018 everywhere). This module previously carried the source's kB/amu
+# Constants come from the one authority (CODATA 2018 everywhere). This module previously carried the source's kB/amu
 # (1.3806505e-23, 1.6605402e-27); eight physics modules import these names.
 from ion_gym.physics.constants import K_B as KB, KG_AMU, E_CHG  # noqa: E402,F401
-from ion_gym.io.sim_spec import CollisionSpec   # the one gas default (R3)
+from ion_gym.io.sim_spec import CollisionSpec   # the one gas default
+from ion_gym.physics.numba_rng import call_rng_preserved
 
 # Buffer-gas presets (amu). The gas is a USER PARAMETER everywhere; the
 # one default is CollisionSpec's (see resolve_collisions). Collision
@@ -66,25 +66,30 @@ GASES = {"He": 4.002602, "H2": 2.01588, "N2": 28.0134, "air": 28.9647,
 _VACUUM_REF_T_K = 298.0
 _VACUUM_REF_M_GAS = 4.0
 
+# Bound on the partner rejection draw in _collide. Acceptance is of order
+# one for finite inputs (at least ~1/7), so this many rejections in a row
+# means a non-finite input, which is refused rather than looped on.
+MAX_PARTNER_TRIES = 10_000
+
 # dt guidance for HS: collision occurrence is one draw per step,
 # P = 1 - exp(-x) with x = v dt / lambda = dt / tau, and at most ONE
 # collision is applied per step. The kept fraction of the true collision
 # rate is therefore (1 - exp(-x)) / x: 0.975 at x = 1/20, 0.952 at 1/10,
 # 0.87 at 0.29. Lost collisions make the ion too mobile.
-# 2026-10-17: raised from 10 to 20 to match SIMION collision_hs1.lua,
+# Raised from 10 to 20 to match SIMION collision_hs1.lua,
 # whose tstep_adjust caps every step at MFP / speed / _steps_per_MFP with
 # _steps_per_MFP = 20 by default (about a 2.5 % rate undercount). ion_gym
 # flies a FIXED dt, so the rule is checked at build time by hs_step_note
-# and reported as a loud advisory, never a refusal (PI ruling 2026-10-17).
+# and reported as a loud advisory, never a refusal.
 HS_DT_PER_COLLISION_TIME = 20.0
 
 
 def hs_step_table(spec, dt_ns):
-    """Per-m/z hard-sphere step check, the numbers behind hs_step_note.
+    """Per-mass hard-sphere step check, the numbers behind hs_step_note.
 
     Returns None when the check does not apply (vacuum, SDS, no dt, or a
     cross-section model validate() refuses), else a list of dicts, one per
-    declared m/z: mz, sigma_m2 (from ccs.ion_sigma_m2, so a per-ion CCS
+    declared mass: mz (Da), sigma_m2 (from ccs.ion_sigma_m2, so a per-ion CCS
     model is honoured), tau_ns (mean collision time of an ion AT REST,
     1 / (n sigma c_bar_gas)), x = dt / tau, and kept = (1 - exp(-x)) / x,
     the fraction of the true collision rate a one-collision-per-step
@@ -124,11 +129,10 @@ def hs_step_table(spec, dt_ns):
 
 def hs_step_note(spec, dt_ns):
     """Loud advisory when a hard-sphere step is coarse against the mean
-    collision time (any declared m/z above dt/tau = 1/HS_DT_PER_COLLISION_
+    collision time (any declared mass above dt/tau = 1/HS_DT_PER_COLLISION_
     TIME), or None when it is not. Numbers from hs_step_table, evaluated
     for an ion at rest: a LOWER bound on the problem, so the note's
-    absence does not certify a field-driven ion. Warns, never refuses
-    (PI ruling 2026-10-17)."""
+    absence does not certify a field-driven ion. Warns, never refuses."""
     rows = hs_step_table(spec, dt_ns)
     if rows is None:
         # the check does not apply; hs_step_table states why per case
@@ -139,7 +143,7 @@ def hs_step_note(spec, dt_ns):
         return None
     col = resolve_collisions(spec.collisions)
     dt_ok = float(dt_ns) * limit / worst
-    parts = [f"m/z {r['mz']:g}: tau {r['tau_ns']:.2f} ns, dt/tau "
+    parts = [f"mass {r['mz']:g} Da: tau {r['tau_ns']:.2f} ns, dt/tau "
              f"{r['x']:.3f}, rate kept {r['kept']:.3f}" for r in rows]
     return (f"WARNING collisions: hard-sphere step dt = {float(dt_ns):g} ns "
             f"is coarse against the mean collision time at "
@@ -165,7 +169,7 @@ def gas_mass(gas):
 
 
 def resolve_collisions(collisions):
-    """THE gas authority (L-531; PI ruling 2026-10-14, R3): a collisions
+    """THE gas authority: a collisions
     argument in any accepted form -> a CollisionSpec when gas is ON, or
     None for vacuum.
 
@@ -177,7 +181,13 @@ def resolve_collisions(collisions):
     - a CollisionSpec: returned as is.
 
     Routes call this (or gas_kernel_scalars) instead of keeping their own
-    getattr fallbacks; a second fallback is a second authority."""
+    getattr fallbacks; a second fallback is a second authority.
+
+    Gas that is ON with values that cannot describe a gas (a pressure,
+    temperature or flown cross section <= 0) REFUSES here, with
+    CollisionSpec.validate's messages: every route reaches the kernels
+    through this door, including callers that never run SimSpec.validate,
+    and such values would otherwise fly as vacuum."""
     if collisions is None:
         return None
     if isinstance(collisions, dict):
@@ -186,7 +196,12 @@ def resolve_collisions(collisions):
         raise TypeError(
             f"collisions must be None, a dict or a CollisionSpec, got "
             f"{type(collisions).__name__}")
-    return collisions if collisions.enabled else None
+    if not collisions.enabled:
+        return None
+    errs = collisions.validate()
+    if errs:
+        raise ValueError("invalid gas: " + "; ".join(errs))
+    return collisions
 
 
 def gas_kernel_scalars(collisions):
@@ -194,7 +209,7 @@ def gas_kernel_scalars(collisions):
     tracer kernel takes: (enabled, T_k, P_pa, c_star, c_bar, sig1d,
     m_gas).
 
-    The hard-sphere CROSS SECTION is deliberately NOT here (2026-10-17):
+    The hard-sphere CROSS SECTION is deliberately NOT here:
     it is a per-ION quantity, and physics.ccs.ion_sigma_m2(collisions,
     mz, charge) is its one authority. Leaving a run-wide sigma_m2 in this
     dict would let a route read it and silently fly every ion with one
@@ -235,7 +250,7 @@ def gas_flow(collisions):
     collisions.flow_mm_us through resolve_collisions -- (0, 0, 0) for
     vacuum, where there is no gas to move. A malformed declaration (not
     three numbers) REFUSES by name. Every route and staged region reads
-    the flow here (L-563: it was read only by the SDS paths, so every
+    the flow here (it was once read only by the SDS paths, so every
     hard-sphere route flew a declared flow as still gas)."""
     col = resolve_collisions(collisions)
     if col is None:
@@ -268,17 +283,27 @@ def _collide(vx, vy, vz, ugx, ugy, ugz, m_ion, m_gas, sig1d, speed_rel):
     """One elastic hard-sphere collision. (vx,vy,vz) ion velocity in the
     gas-flow frame; returns the post-collision ion velocity (same frame).
     (ugx..) unused slot kept for signature stability."""
-    # rejection-biased Maxwell partner
+    # rejection-biased Maxwell partner, bounded: acceptance is of order
+    # one for finite inputs, so running out of tries means a non-finite
+    # velocity or thermal speed (NaN never passes the test) -- refused,
+    # where the unbounded loop it replaces spun forever in a nogil kernel
     scale = speed_rel + sig1d * 5.196152422706632   # 3*sqrt(3)
     gx = gy = gz = 0.0
-    while True:
+    rx = ry = rz = rlen = 0.0
+    accepted = False
+    for _try in range(MAX_PARTNER_TRIES):
         gx = np.random.normal() * sig1d
         gy = np.random.normal() * sig1d
         gz = np.random.normal() * sig1d
         rx, ry, rz = vx - gx, vy - gy, vz - gz
         rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
         if np.random.random() < rlen / scale:
+            accepted = True
             break
+    if not accepted:
+        raise ValueError("hard-sphere collision: no gas partner accepted "
+                         "in MAX_PARTNER_TRIES draws; the ion velocity or "
+                         "the gas thermal speed is not finite")
     if rlen < 1e-12:
         return vx, vy, vz
     # r_hat at impact angle from the relative-velocity axis
@@ -312,15 +337,29 @@ def hs_collision_step(vx, vy, vz, gfx, gfy, gfz, dt, dt_to_us, T_k, P_pa,
     frame: the collision test and the scatter use the ion's velocity
     relative to the moving gas (gfx, gfy, gfz; mm/us), and the result is
     shifted back to the lab frame. Exactly fly_gas_uniform's step below,
-    shared by every kernel so the physics has one copy (L-563).
+    shared by every kernel so the physics has one copy.
 
-    Velocities in mm/us. The step is dt in the CALLER's unit with
-    dt_to_us its factor to microseconds (1.0 for the mm/us kernels, 1e6
-    for those stepping in seconds), applied as (sp * dt) * dt_to_us --
-    the order each kernel already evaluated. Returns (vx, vy, vz,
-    collided). With zero flow every operation reduces to the still-gas
-    step the kernels carried (v - 0.0 is v), in the same random-draw
-    order, so zero-flow flights are bit-identical to before."""
+    The step is dt in the CALLER's unit with dt_to_us its factor to
+    microseconds (1.0 for the mm/us kernels, 1e6 for those stepping in
+    seconds), applied as (sp * dt) * dt_to_us -- the order each kernel
+    already evaluated. Returns (vx, vy, vz, collided). With zero flow
+    every operation reduces to the still-gas step the kernels carried
+    (v - 0.0 is v), in the same random-draw order, so zero-flow flights
+    are bit-identical to before.
+
+    Arguments (units in brackets; [-] is dimensionless):
+      vx, vy, vz     [mm/us]  ion velocity, lab frame
+      gfx, gfy, gfz  [mm/us]  gas flow velocity
+      dt             [caller] the step, in the caller's time unit
+      dt_to_us       [us per caller unit] 1.0, or 1e6 for a step in s
+      T_k            [K]      gas temperature
+      P_pa           [Pa]     gas pressure
+      sigma_m2       [m^2]    hard-sphere cross section
+      c_star         [mm/us]  gas most-probable speed, sqrt(2kT/m_gas)
+      c_bar          [mm/us]  gas mean speed, sqrt(8kT/(pi m_gas))
+      m_ion          [Da]     ion mass
+      m_gas          [Da]     gas molecule mass
+      sig1d          [mm/us]  gas 1-D thermal speed, sqrt(kT/m_gas)"""
     wx = vx - gfx
     wy = vy - gfy
     wz = vz - gfz
@@ -336,10 +375,39 @@ def hs_collision_step(vx, vy, vz, gfx, gfy, gfz, dt, dt_to_us, T_k, P_pa,
 
 
 @njit(cache=True, nogil=True)
+def n_records(n_steps, record_every):
+    """Rows fly_gas_uniform writes: one at every step that is a multiple of
+    record_every below n_steps (ceil(n_steps / record_every) of them) and
+    one final row. Sizing the buffer as n_steps // record_every + 1 ran one
+    row past the end whenever record_every did not divide n_steps, and
+    numba does not bounds-check."""
+    return (n_steps + record_every - 1) // record_every + 1
+
+
+@njit(cache=True, nogil=True)
 def fly_gas_uniform(m_ion, q_e, r0, v0, E_vmm, T_k, P_pa, sigma_m2,
                     m_gas, gas_flow, dt_us, n_steps, record_every, seed):
     """One ion in uniform field + HS gas. Records every record_every
-    steps: t, x, y, z, vx, vy, vz. Returns (rec, n_collisions)."""
+    steps: t, x, y, z, vx, vy, vz. Returns (rec, n_collisions).
+
+    Arguments (units in brackets; [-] is dimensionless):
+      m_ion         [Da]     ion mass
+      q_e           [e]      charge, in elementary charges
+      r0            [mm]     start position (3,)
+      v0            [mm/us]  start velocity (3,)
+      E_vmm         [V/mm]   uniform field (3,)
+      T_k           [K]      gas temperature
+      P_pa          [Pa]     gas pressure
+      sigma_m2      [m^2]    hard-sphere cross section
+      m_gas         [Da]     gas molecule mass
+      gas_flow      [mm/us]  gas flow velocity (3,)
+      dt_us         [us]     step
+      n_steps       [-]      steps to fly
+      record_every  [-]      steps between recorded rows
+      seed          [-]      numba RNG seed for this ion"""
+    if record_every < 1 or n_steps < 0:
+        raise ValueError("fly_gas_uniform: record_every must be >= 1 and "
+                         "n_steps >= 0")
     np.random.seed(seed)
     c_star = math.sqrt(2.0 * KB * T_k / (m_gas * KG_AMU)) / 1000.0
     c_bar = math.sqrt(8.0 * KB * T_k / (math.pi * m_gas * KG_AMU)) / 1000.0
@@ -352,8 +420,7 @@ def fly_gas_uniform(m_ion, q_e, r0, v0, E_vmm, T_k, P_pa, sigma_m2,
     ax, ay, az = acc * E_vmm[0], acc * E_vmm[1], acc * E_vmm[2]
     x, y, z = r0[0], r0[1], r0[2]
     vx, vy, vz = v0[0], v0[1], v0[2]
-    n_rec = n_steps // record_every + 1
-    rec = np.empty((n_rec, 7))
+    rec = np.empty((n_records(n_steps, record_every), 7))
     ncol = 0
     ir = 0
     for step in range(n_steps):
@@ -394,15 +461,35 @@ def fly_gas_uniform(m_ion, q_e, r0, v0, E_vmm, T_k, P_pa, sigma_m2,
 def ensemble(n_ions, m_ion, q_e, r0, v0, E_vmm, T_k, P_pa, sigma_m2,
              gas="He", gas_flow=(0.0, 0.0, 0.0), dt_us=5e-4,
              t_us=100.0, record_every=200, seed0=1234):
-    m_gas = gas_mass(gas)
     """Serial deterministic ensemble; returns (recs list, collisions).
-    gas: preset name ('He','N2','Ar',...) or explicit mass in amu."""
+
+    Arguments (units in brackets; [-] is dimensionless):
+      n_ions        [-]      ions to fly
+      m_ion         [Da]     ion mass
+      q_e           [e]      charge, in elementary charges
+      r0            [mm]     start position (3,), every ion
+      v0            [mm/us]  start velocity (3,), every ion
+      E_vmm         [V/mm]   uniform field (3,)
+      T_k           [K]      gas temperature
+      P_pa          [Pa]     gas pressure
+      sigma_m2      [m^2]    hard-sphere cross section
+      gas           [name or Da] preset name ('He', 'N2', 'Ar', ...) or
+                             the gas molecule mass
+      gas_flow      [mm/us]  gas flow velocity (3,)
+      dt_us         [us]     step
+      t_us          [us]     flight time
+      record_every  [-]      steps between recorded rows
+      seed0         [-]      seed of ion 0; ion i uses seed0 + i"""
+    if int(record_every) < 1:
+        raise ValueError(f"ensemble: record_every = {record_every!r} must be "
+                         f">= 1")
+    m_gas = gas_mass(gas)
     n_steps = int(t_us / dt_us)
     recs, cols = [], []
     E = np.asarray(E_vmm, float)
     gf = np.asarray(gas_flow, float)
     for i in range(n_ions):
-        r, nc = fly_gas_uniform(m_ion, q_e, np.asarray(r0, float),
+        r, nc = call_rng_preserved(fly_gas_uniform, m_ion, q_e, np.asarray(r0, float),
                                 np.asarray(v0, float), E, T_k, P_pa,
                                 sigma_m2, m_gas, gf, dt_us, n_steps,
                                 record_every, seed0 + i)

@@ -22,6 +22,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+from ion_gym.io.paths import outputs_dir  # noqa: E402  scratch under the configured outputs root
 from ion_gym.io.stl_upload import (load_mesh_bytes, propose_sizing, spec_from_upload,
                         check_mask_overlaps)
 
@@ -39,7 +40,7 @@ def main():
     RF = {n[0]: "A", n[2]: "A", n[1]: "B", n[3]: "B"}
 
     s = propose_sizing(meshes, pitch=0.15, margin_mm=2.0)
-    spec = spec_from_upload(meshes, DC, s, "/tmp/quad_asm_gate",
+    spec = spec_from_upload(meshes, DC, s, str(outputs_dir("tests", "quad_asm_gate")),
                             rf_groups=RF)
     # DECLARED seed: spec_from_upload defaults seed=None =
     # fresh entropy; seed 0 = the historical draws.

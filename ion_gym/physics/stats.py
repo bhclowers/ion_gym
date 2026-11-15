@@ -5,7 +5,7 @@ One source of truth for ensemble reductions: the GUI Card (sim_app) and any
 gate script render from the same `compute_stats()`, so they can never
 disagree.
 
-Conventions (pinned against v51 code, not assumed):
+Conventions (pinned against the code, not assumed):
 - fate codes (THE table: physics.ion_envelope.FATE_NAME):
       0 = impact / exit (electrode)     1 = boundary exit (left domain)
       2 = timeout (still flying)       3 = bounding plane
@@ -13,15 +13,18 @@ Conventions (pinned against v51 code, not assumed):
       6 = station detect (absorbed by a detector patch)
 - summary keys: kind, tof [us], x_end, y_end, z_end, r_end [mm], n_col
 - "transmitted" is EXAMPLE-DEPENDENT: the r-z einzel detector is a fate-3
-  bound; the quad's success case is fate-2 drift-through. So the
-  transmitted fate is a parameter, with an 'auto' heuristic: fate 3 if any
-  bounding plane is enabled in the spec, else fate 2.
+  bound; a trap's success case is fate-2 held. So the transmitted fate is
+  a REQUIRED argument of compute_stats (it has no default, because a
+  default that counted timeouts let a run in which every ion timed out
+  report 100% transmission), with an 'auto' answer for transmission
+  devices: fate 3 if any bounding plane is enabled in the spec, else
+  fate 1 (auto_transmitted_fate).
 - mz_list runs mix masses in one ensemble; TOF stats pooled across masses
-  are meaningless, so TOF / resolving power group per m/z.
+  are meaningless, so TOF / resolving power group per mass.
 
 This module is Panel-free (usable from gate scripts / notebooks). The app's
 Card that renders these reductions lives in ion_gym/ui/stats_card.py
-(moved out of this physics module 2026-10-15, L-548).
+(moved out of this physics module).
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -87,7 +90,7 @@ def auto_transmitted_fate(spec) -> int:
 
 
 def mz_of_results(spec, n: int):
-    """Per-ion m/z for n results: ions cycle spec.source.mz_list."""
+    """Per-ion mass (Da) for n results: ions cycle spec.source.mz_list."""
     # No try/except: mz_list is a DECLARED SimSpec field
     # (a capability is declared or refused, never defaulted).
     # The old `except Exception: lst = []` silently substituted all-None
@@ -201,7 +204,7 @@ def enabled_planes(spec):
 def _tof_block(rows):
     """Arrival-time stats for ONE landing group, as PlaneStats kwargs.
 
-    A resolving power is only a number for a single mass: mixed-m/z rows
+    A resolving power is only a number for a single mass: mixed-mass rows
     (the pooled 'all' tab) get a stated blank with the reason, same for
     routes whose summaries carry no tof. Single-ion groups get the time
     but no width (a 1-point FWHM is not a measurement).
@@ -211,7 +214,7 @@ def _tof_block(rows):
     if not tofs:
         return dict(tof_n=0, tof_note="route records no tof")
     if len(mzs) > 1:
-        return dict(tof_n=0, tof_note="mixed m/z — see per-m/z tabs")
+        return dict(tof_n=0, tof_note="mixed masses — see the per-mass tabs")
     mu, sd, cnt = _mean_std(tofs)
     if cnt < 2 or not sd:
         return dict(tof_n=cnt, tof_mean=mu, tof_note="n < 2 — no width")
@@ -309,15 +312,19 @@ class Stats:
     landing: dict = None                # fate code -> PlaneStats
 
 
-def compute_stats(results, *, transmitted_fate: int = 2,
+def compute_stats(results, *, transmitted_fate: Optional[int] = None,
                   mz: Optional[Sequence] = None,
                   planes: Optional[Sequence] = None,
                   plane_tol_mm: float = 2.0) -> Stats:
     """Reduce an ensemble (list of driver results or raw summary dicts).
 
-    transmitted_fate: which kind counts as success for transmission and
-        for the TOF / spot statistics (see module docstring / 'auto').
-    mz: optional per-result m/z (same order as results) for per-mass TOF
+    transmitted_fate: REQUIRED -- which fate code counts as success for
+        transmission and for the TOF / spot statistics. For a transmission
+        device pass auto_transmitted_fate(spec) (3 with a bounding plane,
+        else 1); pass 2 only when being held to t_max IS success (a trap).
+        There is no default: the old default of 2 counted every timeout as
+        transmitted, so a run in which no ion got anywhere read 100%.
+    mz: optional per-result mass in Da (same order as results) for per-mass TOF
         grouping; from `mz_of_results(spec, len(results))` in the app.
     planes: DECLARED impact planes as (label, axis, coord_mm) — from
         `enabled_planes(spec)`. When given, landing stats GROUP terminated
@@ -330,6 +337,17 @@ def compute_stats(results, *, transmitted_fate: int = 2,
         coordinate is within this of the plane; capped internally at half
         the smallest inter-plane gap so two planes can't claim one ion.
     """
+    if transmitted_fate is None:
+        raise ValueError(
+            "compute_stats: transmitted_fate is required -- state which fate "
+            "counts as success: auto_transmitted_fate(spec) for a "
+            "transmission device (3 = bounding plane, 1 = left the domain), "
+            "or 2 only when being held to t_max is success (a trap).")
+    if transmitted_fate not in FATE_NAME:
+        raise ValueError(
+            f"compute_stats: transmitted_fate {transmitted_fate!r} is not a "
+            f"fate code; known codes: "
+            f"{ {k: v for k, v in sorted(FATE_NAME.items())} }")
     S = _summaries(results)
     n = len(S)
     mz = list(mz) if mz is not None else [None] * n
@@ -437,7 +455,12 @@ def _f(v, p=4):
     return f"{v:.{p}g}"
 
 
-def stats_markdown(st: Stats, plane_filter=None) -> str:
+def stats_markdown(st: Stats, plane_filter=None, *, charge=1,
+                   label_mode="mass") -> str:
+    """Markdown statistics. charge and label_mode set how the per-species
+    table names each species (ion_envelope.ion_label: mass in Da or
+    m/z, always with the charge); the numbers are unaffected."""
+    from ion_gym.physics.ion_envelope import ion_label, ion_mode_noun
     L = [f"**{st.n_total} ions** &nbsp; transmitted "
          f"(fate {st.transmitted_fate}, {FATE_NAME.get(st.transmitted_fate)}): "
          f"**{st.n_transmitted}**"
@@ -497,7 +520,7 @@ def stats_markdown(st: Stats, plane_filter=None) -> str:
                           and p.plane_label != plane_filter)]
         if trows:
             L += ["", "**arrival time** — per landing group; R is only "
-                      "quoted for a single-m/z group"]
+                      "quoted for a single-mass group"]
             L.append("| fate | plane | n | t̄ (µs) | FWHM (ns) | "
                      "R = t/2FWHM |")
             L.append("|---|---|---:|---:|---:|---:|")
@@ -537,11 +560,12 @@ def stats_markdown(st: Stats, plane_filter=None) -> str:
                   "read with that in mind. r is measured about the centroid, "
                   "not the axis._"]
     if st.per_mz:
-        L += ["", "| m/z | n | TOF μs | σ ns | FWHM ns | R=t/2FWHM |",
+        L += ["", f"| {ion_mode_noun(label_mode)} | n | TOF μs | σ ns | "
+                  f"FWHM ns | R=t/2FWHM |",
               "|---|---:|---:|---:|---:|---:|"]
         for g in st.per_mz:
             L.append(
-                f"| {_f(g.mz)} | {g.n} | {_f(g.tof_mean, 6)} | "
+                f"| {ion_label(g.mz, charge, label_mode)} | {g.n} | {_f(g.tof_mean, 6)} | "
                 f"{_f(None if g.tof_sigma is None else g.tof_sigma * 1e3)} | "
                 f"{_f(None if g.tof_fwhm is None else g.tof_fwhm * 1e3)} | "
                 f"**{_f(g.resolving_power, 5)}** |")
@@ -634,7 +658,7 @@ def delivered_spread_cells(spec):
     # This used to be `if rz / else` with the else meaning "Cartesian" and
     # 3-D re-decided here by depth_mm > 0 -- a second copy of the routing
     # rule (it agrees with build_route on every current deck, but a route
-    # added there would have been measured here as Cartesian, L-554).
+    # added there would have been measured here as Cartesian).
     route = build_route(spec).builder
     spread = {}
     if route == "rz":

@@ -22,6 +22,9 @@ and the way across.
 """
 from __future__ import annotations
 
+# The public names (docs/PUBLIC_API.md); everything else is internal.
+__all__ = ["load_any_spec", "sniff", "scene_to_simspec"]
+
 import json
 
 
@@ -66,7 +69,7 @@ def load_any_spec(txt):
 
     A GeomScene is solved AS AUTHORED (analytic CSG -> rasterize3d),
     embedded in the spec; no meshes or sidecar files are produced. (The
-    work_dir / stl_dir arguments were accepted and ignored -- L-556.)
+    work_dir / stl_dir arguments were accepted and ignored.)
     """
     from ion_gym.io.sim_spec import SimSpec
     kind = sniff(txt)
@@ -98,9 +101,8 @@ def load_any_spec(txt):
             "cannot load as one SimSpec.\n"
             "  -> load it with ion_gym.physics.staged_flight.load_assembly(path) "
             "or fly it with fly_assembly(path).\n"
-            "  (The app's example menu and single-spec loader only take "
-            "individual stage specs, e.g. stageA/spec.json, not the "
-            "instrument.json.)")
+            "  (The app's example menu and SimSpec.from_json take single "
+            "decks only; each stage's own deck is its 'spec' entry.)")
 
     if kind == "scene3d":
         from ion_gym.physics.scene3d import GeomScene
@@ -115,7 +117,7 @@ def load_any_spec(txt):
 
     if kind != "unknown":
         # a kind sniff() names but this loader has no branch for: refuse
-        # it as itself, never as "unrecognised" (L-554)
+        # it as itself, never as "unrecognised"
         raise ValueError(f"load_any_spec: no loader for schema {kind!r}")
     d = json.loads(txt) if isinstance(txt, (str, bytes)) else txt
     seen = (", ".join(sorted(map(str, d))[:8]) if isinstance(d, dict)
@@ -373,8 +375,9 @@ def spec_summary_rows(spec):
         mz = getattr(src, "mz_list", []) or []
         if n_per is not None:
             total = n_per * max(1, len(mz))
-            add("ions", f"{n_per} per m/z x {len(mz)} m/z = {total} total")
-        add("m/z list", ", ".join(f"{m:g}" for m in mz) if mz else "-")
+            add("ions", f"{n_per} per mass x {len(mz)} mass(es) = "
+                        f"{total} total")
+        add("masses (Da)", ", ".join(f"{m:g}" for m in mz) if mz else "-")
         add("distribution", getattr(src, "distribution", None))
     # integration
     integ = getattr(spec, "integration", None)
@@ -382,4 +385,154 @@ def spec_summary_rows(spec):
         tmax = getattr(integ, "t_max_us", None)
         if tmax is not None:
             add("t_max", f"{tmax:g} us ({tmax/1000:g} ms)")
+    return rows
+
+
+# ---------------------------------------------------------------- excerpts
+# The ellipsis line that marks every elision in an excerpt. One character,
+# so an excerpt never pretends to be a complete, loadable deck.
+EXCERPT_ELLIPSIS = "…"
+
+
+def _keep_tree(doc, keep_paths):
+    """Nested dict of the kept branches; a leaf value True keeps the whole
+    subtree. Each path is a tuple of keys (str for objects, int for list
+    indices). A path that does not resolve in `doc` is REFUSED by name: an
+    excerpt that silently dropped a requested line would misstate the deck."""
+    tree = {}
+    for path in keep_paths:
+        if isinstance(path, str):
+            raise TypeError(
+                f"keep path {path!r}: give a tuple of keys, e.g. "
+                f"('geometry', 'electrodes', 0, 'name'), not a string")
+        node = doc
+        for k, key in enumerate(path):
+            ok = ((isinstance(node, dict) and isinstance(key, str)
+                   and key in node)
+                  or (isinstance(node, list) and isinstance(key, int)
+                      and 0 <= key < len(node)))
+            if not ok:
+                raise KeyError(
+                    f"keep path {path!r}: {key!r} does not resolve at "
+                    f"{path[:k]!r} (holds a {type(node).__name__}"
+                    + (f" with keys {sorted(node)}" if isinstance(node, dict)
+                       else f" of length {len(node)}"
+                       if isinstance(node, list) else "") + ")")
+            node = node[key]
+        t = tree
+        for key in path[:-1]:
+            nxt = t.get(key)
+            if nxt is True:
+                break                   # an ancestor is already kept whole
+            t = t.setdefault(key, {})
+        else:
+            t[path[-1]] = True
+    return tree
+
+
+def _scalar(v):
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _inline(v, width):
+    """Single-line JSON for a container of scalars when it fits `width`,
+    else None. Keeps short lists such as ["RFX"] on the line of their key."""
+    if isinstance(v, dict):
+        if any(isinstance(x, (dict, list)) for x in v.values()):
+            return None
+        s = "{" + ", ".join(f"{_scalar(k)}: {_scalar(x)}"
+                            for k, x in v.items()) + "}"
+    elif isinstance(v, list):
+        if any(isinstance(x, (dict, list)) for x in v):
+            return None
+        s = "[" + ", ".join(_scalar(x) for x in v) + "]"
+    else:
+        return _scalar(v)
+    return s if len(s) <= width else None
+
+
+def deck_excerpt(doc, keep_paths, *, indent=2, inline_width=40):
+    """Abbreviated listing of a deck dict (SimSpec.to_dict() or a loaded
+    deck JSON), for schemes and reports.
+
+    keep_paths : iterable of key tuples. Each path keeps its whole subtree,
+        e.g. ('geometry', 'electrodes', 0) keeps the first electrode
+        entirely, and ('source', 'mz_list') keeps one key of the source.
+        Kept keys appear in deck order, so the excerpt reads like the file.
+    Every object or list from which anything was dropped closes with an
+    EXCERPT_ELLIPSIS line. For a list of named items (electrodes, drive
+    groups) the line also states how many items were omitted and their
+    names, so the reader knows what the excerpt left out.
+
+    Values are written with json.dumps, exactly as the deck file holds them,
+    so the displayed numbers equal the solver input.
+
+    Returns a list of (text, tag) rows, one per line. The tag is the key
+    tuple of the deepest node the line belongs to, so a renderer can mark
+    the lines of one electrode or one drive group.
+    """
+    if not isinstance(doc, dict):
+        raise TypeError(f"deck_excerpt needs a deck dict, got "
+                        f"{type(doc).__name__}")
+    tree = _keep_tree(doc, keep_paths)
+    rows = []
+    pad = " " * indent
+
+    def full(value, path, level, head, tail):
+        s = _inline(value, inline_width)
+        if s is not None:
+            rows.append((pad * level + head + s + tail, path))
+            return
+        if isinstance(value, dict):
+            rows.append((pad * level + head + "{", path))
+            items = list(value.items())
+            for k, (key, v) in enumerate(items):
+                full(v, path + (key,), level + 1, f"{_scalar(key)}: ",
+                     "," if k < len(items) - 1 else "")
+            rows.append((pad * level + "}" + tail, path))
+        else:
+            rows.append((pad * level + head + "[", path))
+            for k, v in enumerate(value):
+                full(v, path + (k,), level + 1, "",
+                     "," if k < len(value) - 1 else "")
+            rows.append((pad * level + "]" + tail, path))
+
+    def partial(value, keep, path, level, head, tail):
+        if keep is True:
+            full(value, path, level, head, tail)
+            return
+        if isinstance(value, dict):
+            kept = [key for key in value if key in keep]
+            dropped = len(value) - len(kept)
+            rows.append((pad * level + head + "{", path))
+            for k, key in enumerate(kept):
+                more = k < len(kept) - 1 or dropped
+                partial(value[key], keep[key], path + (key,), level + 1,
+                        f"{_scalar(key)}: ", "," if more else "")
+            if dropped:
+                rows.append((pad * (level + 1) + EXCERPT_ELLIPSIS, path))
+            rows.append((pad * level + "}" + tail, path))
+        elif isinstance(value, list):
+            kept = sorted(keep)
+            omitted = [i for i in range(len(value)) if i not in keep]
+            rows.append((pad * level + head + "[", path))
+            for k, i in enumerate(kept):
+                more = k < len(kept) - 1 or omitted
+                partial(value[i], keep[i], path + (i,), level + 1, "",
+                        "," if more else "")
+            if omitted:
+                names = [value[i].get("name") for i in omitted
+                         if isinstance(value[i], dict)]
+                note = f" {len(omitted)} more"
+                if names and all(isinstance(n, str) for n in names):
+                    note += " (" + ", ".join(names) + ")"
+                rows.append((pad * (level + 1) + EXCERPT_ELLIPSIS + note,
+                             path))
+            rows.append((pad * level + "]" + tail, path))
+        else:
+            raise TypeError(
+                f"keep path below {path!r}: a {type(value).__name__} "
+                f"has no keys to select")
+
+    partial(doc, tree, (), 0, "", "")
     return rows

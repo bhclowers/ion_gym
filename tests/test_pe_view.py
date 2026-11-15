@@ -6,8 +6,8 @@ trajectories draped at surface height, adiabatic caveat annotation) and
 the draping MATH (trajectory z equals PE sampled at (x,y) plus the fixed
 lift) on a real einzel run. The 2-D overlay path is exercised too.
 """
+import _bootstrap  # noqa: F401  -- repo root on sys.path, before any ion_gym import
 from ion_gym.viz import viz_core as V
-import _bootstrap  # noqa: F401  -- repo root on sys.path
 import sys
 
 import numpy as np
@@ -72,7 +72,7 @@ def main():
     n3d = kinds.count("scatter3d")
     assert n3d >= len(res.results), "trajectories not draped"
     # title present; and the Mathieu caveat must be ABSENT on a DC lens
-    assert "einzel" in V.plotly_title(fig)   # title lives in meta (L-462 layout)
+    assert "einzel" in V.plotly_title(fig)   # title lives in meta
     # (amended: the caveat text was deliberately reworded in a
     # viz pass and no longer contains "Mathieu"; keying on the removed
     # word made the DC-absence check vacuous and the RF-presence check

@@ -1,4 +1,4 @@
-# quad_stl_rods -- pristine CAD frame (L-295)
+# quad_stl_rods -- pristine CAD frame
 
 These four rod meshes are stored exactly as CAD exports them: the
 quadrupole axis (the mean of the four rod centres) is at the ORIGIN.
@@ -10,10 +10,9 @@ STL route loads through -- applies it. Re-exporting these rods from CAD
 is therefore safe: as long as the array stays origin-centred, no hidden
 state exists to lose.
 
-History: before 2026-09-04 the translation was baked into the mesh bytes
-by the deck-authoring path, and the one time pristine exports shipped,
-half the quadrupole fell outside the domain and notebook 02 failed
-end-to-end. The bake path is deleted.
+Why it matters: if the translation were baked into the mesh bytes instead,
+a pristine re-export would land half the quadrupole outside the domain,
+and notebook 02 would fail end-to-end. No code path bakes it.
 
 ## Related folders
 

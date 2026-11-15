@@ -11,9 +11,9 @@ cross-checks). Geometry is a 2-D cartesian slice in the x-y plane; the
 solve is a single-slab 3-D solve (nz=1) so it reuses the validated
 solver3d kernel and its pinned conventions directly.
 
-Shape semantics match ion_playground exactly (rect top-left + w/h in mm;
-ellipse cx/cy/rx/ry; cutout subtracts) so an ion_playground einzel scene
-and this builder rasterize identically.
+Shape semantics match the earlier 2-D scene format exactly (rect top-left
++ w/h in mm; ellipse cx/cy/rx/ry; cutout subtracts) so an einzel scene in
+that format and this builder rasterize identically.
 """
 
 import math
@@ -27,6 +27,9 @@ from ion_gym.io.sim_spec import SimSpec
 from ion_gym.physics.raster2d import (
     plane_grid_views,
     electrode_mask,
+    refuse_empty_mask,
+    refuse_shared_nodes,
+    nodes_from_bases,
     el_masks_from_labels,
     planar_fold_axes,
     _fold_crop,
@@ -40,8 +43,9 @@ from ion_gym.physics.sim_build import generate_births
 from ion_gym.physics.symmetry import (verify_symmetry, verify_symmetry_shapes, reduction_summary)
 from ion_gym.physics.collision3d import (E_CHG, KG_AMU, hs_collision_step)
 from ion_gym.physics import sds as _sds_mod
-from ion_gym.physics.sds import (_diff_dist_steps,
+from ion_gym.physics.sds import (icdf_jump_steps, isotropic_vector,
                                  N_DIST_COLLISIONS as _SDS_NDC)
+from ion_gym.physics.numba_rng import call_rng_preserved
 
 
 
@@ -82,6 +86,17 @@ def _wave_py(g, t_us):
     return float(vv[i] + f * (vv[i + 1] - vv[i]))
 
 
+
+def drive_voltage(g, t_us):
+    """Applied voltage of one drive group at lab times t_us (array, us):
+    V(t) = amplitude_v * w(t) + offset_v, the sim_spec contract, with w(t)
+    from _wave_py, the Python mirror of the kernel's waveform evaluation.
+    For plots of the voltages the integrator applies; returns an array
+    shaped like t_us."""
+    t = np.asarray(t_us, float)
+    w = np.array([_wave_py(g, float(tt)) for tt in t.ravel()]).reshape(t.shape)
+    return float(g.amplitude_v) * w + float(getattr(g, "offset_v", 0.0))
+
 # ------------------------------------------------------------- field model
 # The excitation the bases are SOLVED at (solver3d / multigrid3d v_basis).
 # It lived as a default kwarg in two solvers and as a bare `/ 1e4` here: three
@@ -118,7 +133,7 @@ class PlanarModel:
     # peak is the no-argument call and a phase is refused. NOTE: this model
     # DOES carry chan_phi (its drive-channel list) -- sniffing chan_phi as
     # an "accepts a snapshot phase" marker is exactly what broke the RF
-    # planar field view (2026-09-18).
+    # planar field view.
     POTENTIAL_IMAGE_DEFAULT = "peak"
 
     def __init__(self, A, Bk, ele, Ex, Ey, mm_per_gu, spec, el_bands=None,
@@ -350,7 +365,7 @@ class PlanarModel:
     def has_drive(self):
         """True if this model carries any time-dependent drive. Declared
         by the model from its OWN data, read by pe_view.model_has_rf --
-        never sniffed from outside (2026-09-18). `drives` is always set:
+        never sniffed from outside. `drives` is always set:
         __init__ synthesizes it from Bk when only Bk is passed, so it is
         the complete answer (a separate Bk check would be redundant)."""
         return bool(self.drives)
@@ -419,7 +434,7 @@ def assemble_drive_groups(spec, bases, v_basis=V_BASIS):
       * every electrode contributes el.dc * basis to A;
       * an electrode in SEVERAL groups contributes its basis to each
         (membership order preserved; the old first-group-only read is
-        the L-455 defect this replaces);
+        the defect this replaces);
       * a group's offset_v is a STATIC shift of its members
         (V(t) = amplitude_v * w(t) + offset_v, sim_spec contract), so
         offset * basis folds into A exactly, for every waveform kind
@@ -520,29 +535,13 @@ def _geometry_key(spec):
     FIRST one's hit mask.  Two caches with two different notions of "the same
     geometry" is one cache too many.
     """
-    # ImportError ONLY.  Catching Exception here meant that if basis_cache.key
-    # RAISED, we silently computed a DIFFERENT key -- which is the exact defect
-    # the docstring above warns about: two notions of "the same geometry" is one
-    # cache too many.  A key that throws is a correctness bug, not a cache miss.
-    try:
-        from ion_gym.io import basis_cache
-    except ImportError:
-        pass                                # optional; fall through to local key
-    else:
-        return basis_cache.key(spec)
-    g = spec.geometry                       # fallback: never lose is_grid
-    parts = [g.width_mm, g.height_mm, g.mm_per_gu,
-             getattr(g, "depth_mm", 0.0), repr(getattr(g, "symmetry", None))]
-    for el in g.electrodes:
-        parts += [el.name, bool(getattr(el, "is_grid", False)),
-                  getattr(el, "stl", None), getattr(el, "basis", None)]
-        for s in el.shapes:
-            parts.append(s.type)
-            parts.extend(sorted(s.params.items()))
-            for c in s.children:
-                parts.append(c.type)
-                parts.extend(sorted(c.params.items()))
-    return repr(parts)
+    # basis_cache is part of this package: imported, never guarded. An
+    # `except ImportError` here fell back to a hand-rolled key -- the second
+    # notion of "the same geometry" the docstring above warns about -- so a
+    # broken install changed the key instead of failing. A key that throws
+    # is a correctness bug, not a cache miss.
+    from ion_gym.io import basis_cache
+    return basis_cache.key(spec)
 
 
 def planar_is_cached(spec):
@@ -553,16 +552,14 @@ def planar_is_cached(spec):
     process rebuilds fast too, so the spinner would be a lie)."""
     if (_geometry_key(spec), "float64") in _PLANAR_BASIS_CACHE:
         return True
-    # ImportError ONLY.  `except Exception: return False` here answered "will
-    # this spec need a solve?" with a confident NO whenever anything at all went
-    # wrong -- a broken key, an unreadable cache root -- and the UI believed it.
-    # A question we cannot answer must not be answered with a guess.
-    try:
-        from ion_gym.io import basis_cache
-        from ion_gym.io.paths import cache_root
-        import os
-    except ImportError:
-        return True                         # cannot know it is cached -> solve
+    # No handler. `except Exception: return False` here once answered "will
+    # this spec need a solve?" with a confident NO whenever anything at all
+    # went wrong, and its `except ImportError: return True` successor
+    # answered "cached" when ion_gym's own modules failed to import. A
+    # question we cannot answer must not be answered with a guess.
+    import os
+    from ion_gym.io import basis_cache
+    from ion_gym.io.paths import cache_root
     return os.path.exists(os.path.join(
         cache_root(), basis_cache.key(spec), "meta.json"))
 
@@ -688,6 +685,21 @@ def build_planar_model(spec: SimSpec, tol=1e-4, verbose=False,
                   f"solving cold")
     if cached is not None:
         bases, ele = cached
+        # ZERO-NODE RULE ON A CACHE HIT. No rasterization runs here, so the
+        # rule is checked on the solved bases: each basis is solved with
+        # its electrode's nodes held at the basis voltage, so an electrode
+        # with no nodes has an identically zero basis. Without this an
+        # entry banked by a build that skipped the rule would serve the
+        # geometry with that electrode missing -- the refusal must not
+        # depend on what the cache happens to hold.
+        for _idx, _b in bases.items():
+            refuse_empty_mask(g.electrodes[_idx - 1], np.asarray(_b) != 0,
+                              route="planar builder (cache hit)", pitch_mm=h)
+        # SHARED-NODE RULE ON A CACHE HIT, from the same bases: a node an
+        # entry banked by a build without the rule shares between two
+        # electrodes is held at the basis voltage in both bases.
+        refuse_shared_nodes(nodes_from_bases(bases, V_BASIS), g.electrodes,
+                            route="planar builder (cache hit)", pitch_mm=h)
         # A7 GATE ON THE CACHE-HIT PATH — the guarantee is uniform
         # across routes. The fold is
         # RE-DERIVED FROM THE SPEC through planar_fold_axes — the same
@@ -742,21 +754,16 @@ def build_planar_model(spec: SimSpec, tol=1e-4, verbose=False,
                     f"planar builder needs inline shapes; electrode "
                     f"{el.name!r} has none (STL planar path not wired)")
             m2 = electrode_mask(el, X, Y)
-            # THIN-ELECTRODE REFUSAL on an anchored grid (the
-            # surface-enhancement caveat): the shifted lattice can step
-            # clean over an electrode thinner than one grid unit, and a
-            # silently-empty mask flies a geometry with that electrode
-            # MISSING. Scoped to anchored axes only — un-anchored
-            # behaviour is deliberately unchanged (a global empty-mask
-            # policy is a separate decision, not smuggled in here).
-            if any(anchor) and not m2.any():
-                raise ValueError(
-                    f"electrode {el.name!r} rasterizes to ZERO nodes on "
-                    f"the anchored grid (anchor dx={anchor[0]:+g}, "
-                    f"dy={anchor[1]:+g}, pitch {h} mm) — it is thinner "
-                    f"than one grid unit and no node lands inside it. "
-                    f"Refine the pitch or thicken the electrode.")
+            # THIN-ELECTRODE REFUSAL, on every grid: an electrode no node
+            # lands in would be silently absent from the solve. (It was
+            # once scoped to anchored grids only; the release review
+            # showed the un-anchored case flies the same wrong geometry.)
+            refuse_empty_mask(el, m2, route="planar builder", pitch_mm=h)
             masks[idx] = m2[:, :, None]
+        # SHARED-NODE REFUSAL, the 3-D voxelizer's rule: a node two
+        # electrodes claim would hold the sum of their voltages.
+        refuse_shared_nodes({i: m[:, :, 0] for i, m in masks.items()},
+                            g.electrodes, route="planar builder", pitch_mm=h)
         # DECLARE-AND-VERIFY symmetry: prove each declared mirror/
         # translational plane against the actual masks BEFORE using it to
         # reduce the solve. A verified mirror plane becomes a mirror
@@ -815,17 +822,6 @@ def build_planar_model(spec: SimSpec, tol=1e-4, verbose=False,
                                 {"x": g.width_mm, "y": g.height_mm},
                                 report=True)
                                             # the fold happens by cropping
-        # Multigrid, not plain SOR: planar geometries have OPEN boundaries
-        # that make SOR crawl (the einzel took ~16.5k sweeps / 6.6 s per
-        # basis; multigrid needs ~114 fine sweeps / ~1 s and converges to
-        # the same field via the validated fine smoother). Falls back to SOR
-        # if multigrid is unavailable.
-        # ImportError ONLY.  This used to be `except Exception`, which meant
-        # that if multigrid THREW -- on one geometry, for one bug -- the field
-        # was silently recomputed by a DIFFERENT SOLVER and nobody was told.
-        # A certified number would then depend on whether an exception happened
-        # to fire.  "Falls back if multigrid is UNAVAILABLE" is an ImportError;
-        # anything else is a solver bug and must surface.
         # ENGINE: planar bases are
         # solved DIRECTLY — one sparse LU factorization per geometry
         # (laplace_factor, the ghost stencil), then one triangular
@@ -837,24 +833,15 @@ def build_planar_model(spec: SimSpec, tol=1e-4, verbose=False,
         # paths stay float64).
         from ion_gym.physics.solver2d import laplace_factor
         _factor = {}
-        # FOLD-PLANE BC (root fix of a 38 V y-fold
-        # defect): a fold plane needs the EVEN-REFLECTION ghost
-        # (phi_ghost = phi_inner, solver2d 'mirror'), NOT the open-edge
-        # ghost_linear (phi_ghost = phi_edge) — the earlier claim that
-        # the solver's edge ghost "is the mirror boundary" was false,
-        # and on a plane with transverse field curvature ghost_linear
-        # halves the second difference there (O(h^2 * phi'') plane
-        # error; invisible on curvature-flat planes, which is how the
-        # flat-plane fixture certified it). _fold_crop keeps
-        # [plane_node:], so folded axis 0 is the solver's z0 edge and
-        # folded axis 1 its u0 edge; outer edges keep ghost_linear so
-        # the folded problem matches the full-domain treatment exactly.
-        _fold_ghost = dict.fromkeys(("z0", "z1", "u0", "u1"),
-                                    "ghost_linear")
-        if 0 in fold:
-            _fold_ghost["z0"] = "mirror"
-        if 1 in fold:
-            _fold_ghost["u0"] = "mirror"
+        # EVERY EDGE REFLECTS: a fold plane needs the even-reflection
+        # ghost (phi_ghost = phi_inner, solver2d 'mirror') -- ghost_linear
+        # there halves the transverse second difference (a 38 V y-fold
+        # defect) -- and an open outer edge uses the same reflection, the
+        # second-order rule the 3-D solvers use, so a folded solve, the
+        # full-domain solve and a full-depth 3-D extrusion all agree.
+        # (_fold_crop keeps [plane_node:], so a fold plane is the solver's
+        # z0 or u0 edge; it needs no rule of its own.)
+        _fold_ghost = "mirror"
 
         def _solve(mm, only=None):
             metal = np.zeros(next(iter(mm.values())).shape[:2], bool)
@@ -907,16 +894,16 @@ def build_planar_model(spec: SimSpec, tol=1e-4, verbose=False,
         # MB) — harmless, overwritten by identical geometry, never loaded
         # as complete entries.
         bases3 = {}
-        _cache_ok = True
-        try:
-            from ion_gym.io import basis_cache
-            from ion_gym.io.fa_cache import load as _pl, store as _ps
-            from ion_gym.io.basis_cache import geometry_key_dict as _gkd
-        except ImportError:
-            _cache_ok = False               # no cache: solve everything
-        if not _cache_ok or not _bank64:
-            # ephemeral dtype (float32) or cache unavailable: straight
-            # solve, no partial banking — a declared, reported path.
+        # the caches are part of this package: imported, never guarded
+        # (a guarded import silently turned a broken install into "solve
+        # everything, bank nothing")
+        from ion_gym.io import basis_cache
+        from ion_gym.io.fa_cache import load as _pl, store as _ps
+        # partial bases are cached fields too: keyed with the solve code
+        from ion_gym.io.basis_cache import cache_key_dict as _gkd
+        if not _bank64:
+            # ephemeral dtype (float32): straight solve, no partial
+            # banking — a declared, reported path.
             bases3 = _solve(masks)
         else:
             for idx in sorted(masks):
@@ -987,34 +974,29 @@ def build_planar_model(spec: SimSpec, tol=1e-4, verbose=False,
         # BANK AS YOU GO: run tools BANK their work as it
         # completes. basis_cache.store had long existed with ZERO
         # callers — the disk cache was read-only from the solve path, so a
-        # killed process lost every solve it had finished. Same
-        # optional-import policy as the load side above.
+        # killed process lost every solve it had finished. basis_cache is
+        # imported above, unguarded.
         try:
-            from ion_gym.io import basis_cache
-        except ImportError:
-            pass                        # optional; L1 still holds the bases
-        else:
-            try:
-                if _bank64:
-                    basis_cache.store(spec, bases, ele)
-                import time as _time
-                if _bank64:
-                    print(f"[{_time.strftime('%H:%M:%S')}] planar "
-                          f"bases: stored to disk cache "
-                          f"({basis_cache.key(spec)})")
-            except (OSError, ValueError) as e:
-                # LOUD, not fatal. The cache is an accelerator, not an
-                # authority — but a silent write failure is a swallow.
-                # Narrowed (was `except Exception`): disk +
-                # serialization failures are the expected kinds; anything
-                # else surfaces.
-                # DEDUPED: a near-identical older store block sat
-                # directly below this one — the bases were stored TWICE per
-                # solve and the two copies had drifted (two owners of one
-                # job). This block is the ONE store.
-                print(f"planar bases: DISK CACHE STORE FAILED ({e!r}); "
-                      f"solve unaffected but NOT banked — this run's work "
-                      f"will be repeated next process")
+            if _bank64:
+                basis_cache.store(spec, bases, ele)
+            import time as _time
+            if _bank64:
+                print(f"[{_time.strftime('%H:%M:%S')}] planar "
+                      f"bases: stored to disk cache "
+                      f"({basis_cache.key(spec)})")
+        except (OSError, ValueError) as e:
+            # LOUD, not fatal. The cache is an accelerator, not an
+            # authority — but a silent write failure is a swallow.
+            # Narrowed (was `except Exception`): disk +
+            # serialization failures are the expected kinds; anything
+            # else surfaces.
+            # DEDUPED: a near-identical older store block sat
+            # directly below this one — the bases were stored TWICE per
+            # solve and the two copies had drifted (two owners of one
+            # job). This block is the ONE store.
+            print(f"planar bases: DISK CACHE STORE FAILED ({e!r}); "
+                  f"solve unaffected but NOT banked — this run's work "
+                  f"will be repeated next process")
 
     # assemble A (DC + drive offsets) + per-DRIVE-GROUP bases through
     # the ONE shared 2-D assembly (multi-membership, offset_v, 0 Hz all
@@ -1115,21 +1097,15 @@ def _wave_eval(kind, om, ph, duty, tab_t, tab_v, o0, o1, t):
 
 
 def planar_gas_flow(collisions, where):
-    """The declared gas flow for a PLANAR flight: (fx, fy, 0.0) mm/us from
-    collision3d.gas_flow. The planar route's gas acts in the plane only
-    (HS collides vx, vy; SDS damps vx, vy) and z is a field-free drift
-    with no gas coupling, so a nonzero z component is REFUSED by name
-    (L-563, PI ruling 2026-10-16) -- it used to be dropped with the rest
-    of the flow. `where` names the caller in the message."""
+    """The declared gas flow for a PLANAR flight: (fx, fy, fz) mm/us from
+    collision3d.gas_flow. The planar route's gas is three-dimensional (HS
+    collides the full velocity, SDS relaxes all three components), so the
+    z component is honoured as on r-z and 3-D. (It was refused while the
+    planar gas acted in the x-y plane only; before that, dropped.)
+    `where` names the caller in messages."""
     from ion_gym.physics.collision3d import gas_flow
     fx, fy, fz = gas_flow(collisions)
-    if fz != 0.0:
-        raise ValueError(
-            f"{where}: collisions.flow_mm_us has z = {fz:g} mm/us, but the "
-            f"planar route's gas acts only in the x-y plane (z is a "
-            f"field-free drift with no gas coupling). Set the z flow to 0, "
-            f"or fly a 3-D route, which models flow in all three axes.")
-    return fx, fy, 0.0
+    return fx, fy, fz
 
 
 @njit(cache=True, nogil=True)
@@ -1139,22 +1115,22 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
                 sigma, c_star, c_bar, sig1d, m_gas, rec, rec_every,
                 nch_flags, bnd_on, bnd_val, seed, z0, vz,
                 sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, sds_stats,
-                pl_col, pl_val, pl_sgn, pl_w, pl_kind, gfx, gfy):
-    """Planar Verlet + optional HS + N DRIVE CHANNELS, with a FIELD-FREE
-    axial drift along z. The transverse field is
+                pl_col, pl_val, pl_sgn, pl_w, pl_kind, gfx, gfy, gfz):
+    """Planar Verlet + optional HS + N DRIVE CHANNELS, with no FIELD along
+    z. The transverse field is
         E(x,y,t) = E_A + sum_k w_k(t) E_k
     with w_k evaluated by _wave_eval on the LAB clock (tob + t) — sin/cos
     quadrature pairs (one per frequency), square waves, and breakpoint
     tables all through the same channel list; this is the
     scripting equivalent for state-independent drive programs. z carries
-    no force, so z = z0 + vz*t exactly (ideal-guide limit). Set vz=0 for
-    a pure 2-D slice. Records [t,x,y,z,vx,vy,vz] + channels. Returns
+    no field force, so in vacuum z = z0 + vz*t exactly (ideal-guide
+    limit). Records [t,x,y,z,vx,vy,vz] + channels. Returns
     (nrec, kind, ncol).
 
-    (gfx, gfy): the in-plane bulk gas velocity (mm/us). The gas acts in
-    the plane only (HS collides vx, vy; SDS damps vx, vy), so both are
-    taken RELATIVE to the moving gas (L-563); the caller refuses a z
-    component, which this route has no gas coupling for."""
+    The GAS is three-dimensional, as on r-z and 3-D: HS collides the full
+    (vx, vy, vz), SDS relaxes all three components and jumps in 3-D, so
+    with gas on vz thermalises and z diffuses. (gfx, gfy, gfz): the bulk
+    gas velocity (mm/us); velocities are taken RELATIVE to it."""
     np.random.seed(seed)
     nx, ny = ExA.shape
     t = 0.0
@@ -1239,7 +1215,12 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
     ex, ey = _efield(x, y, tob)
     # record V/mm per the channel contract; _efield returns the V/m
     # basis (see _grad2d's 1e3), hence the 1e-3 at every record site.
-    _row(0, tob, x, y, z, vx, vy, ex * 1e-3, ey * 1e-3, ncol)
+    # fxr/fyr hold the FIELD at the current position for the record: under
+    # SDS ex/ey are overwritten with the damped acceleration, which the
+    # field channels once recorded instead of the field.
+    fxr = ex
+    fyr = ey
+    _row(0, tob, x, y, z, vx, vy, fxr * 1e-3, fyr * 1e-3, ncol)
     nrec = 1
     kind = 2
     face = -1                     # terminating bound face, -1 = none
@@ -1254,17 +1235,24 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
         ex, ey = _efield(x, y, tob + t)
         ex *= 1e-9 * acc
         ey *= 1e-9 * acc
+        # z carries no FIELD, but the gas acts on vz as on vx, vy
+        az = 0.0
         if sds_on:
-            # mobility drag relative to the moving gas (L-563)
+            # mobility drag relative to the moving gas
             tterm = sds_damping * dt
             factor = (1.0 - math.exp(-tterm)) / tterm
             ex = factor * (ex - (vx - gfx) * sds_damping)
             ey = factor * (ey - (vy - gfy) * sds_damping)
+            az = -factor * (vz - gfz) * sds_damping
         vx += 0.5 * ex * dt
         vy += 0.5 * ey * dt
+        vz += 0.5 * az * dt
         x += vx * dt
         y += vy * dt
+        z += vz * dt
         ex, ey = _efield(x, y, tob + t + dt)
+        fxr = ex
+        fyr = ey
         ex *= 1e-9 * acc
         ey *= 1e-9 * acc
         if sds_on:
@@ -1272,30 +1260,34 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
             factor = (1.0 - math.exp(-tterm)) / tterm
             ex = factor * (ex - (vx - gfx) * sds_damping)
             ey = factor * (ey - (vy - gfy) * sds_damping)
+            az = -factor * (vz - gfz) * sds_damping
         vx += 0.5 * ex * dt
         vy += 0.5 * ey * dt
-        z += vz * dt                       # field-free axial drift
+        vz += 0.5 * az * dt
         t += dt
         if sds_on:
-            # SDS random-walk diffusion (in-plane component of the isotropic
-            # 3-D jump: magnitude scaled by sqrt(2/3) so the 2-D diffusion
-            # coefficient stays correct).
-            dist_steps = _diff_dist_steps(sds_stats, sds_logmr)
+            # SDS random-walk diffusion: the isotropic 3-D jump, as on r-z
+            # and 3-D (its in-plane part gives 4 D dt, its z part 2 D dt)
+            dist_steps = icdf_jump_steps(sds_stats, sds_logmr)
             ncoll = sds_V / sds_mfp * dt
             r = math.sqrt(ncoll / _SDS_NDC) * dist_steps * sds_mfp
-            th = 2.0 * math.pi * np.random.random()
-            rr = r * 0.816496580927726
-            x += rr * math.cos(th)
-            y += rr * math.sin(th)
+            jx, jy, jz = isotropic_vector(r)
+            x += jx
+            y += jy
+            z += jz
             # NO ncol += 1: a diffusion jump is not a collision (it counted
             # one per step, so n_col equalled the step count); under SDS
             # the builder reports the count as absent
             # (sds.SDS_NO_COLLISION_COUNT).
         elif collide_on:
-            # the shared gas-frame HS step (collision3d); a 2-D gas, so the
-            # out-of-plane velocity and flow are 0 (as before)
-            vx, vy, _z, _hit = hs_collision_step(
-                vx, vy, 0.0, gfx, gfy, 0.0, dt, 1.0, T_k, P_pa, sigma,
+            # the shared gas-frame HS step (collision3d) with the FULL
+            # velocity: a 3-D gas, as on r-z and 3-D. It once passed vz = 0
+            # and dropped the z result (a "2-D gas"), so collisions shared
+            # energy over two axes only -- light ions ran cold and drifted
+            # fast (m <vy^2>/kT 0.87 for 28 u in N2, 0.50 for 4 u in Ar) --
+            # and vz was never slowed by the gas.
+            vx, vy, vz, _hit = hs_collision_step(
+                vx, vy, vz, gfx, gfy, gfz, dt, 1.0, T_k, P_pa, sigma,
                 c_star, c_bar, m_ion, m_gas, sig1d)
             if _hit:
                 ncol += 1
@@ -1428,16 +1420,17 @@ def _fly_planar(x, y, vx, vy, tob, m_ion, ExA, EyA, ExK, EyK,
             break
         step_rec = int(t / dt) % rec_every == 0
         if step_rec and nrec < rec.shape[0] - 1:
-            _row(nrec, tob + t, x, y, z, vx, vy, ex / (1e-6 * acc),
-                 ey / (1e-6 * acc), ncol)
+            _row(nrec, tob + t, x, y, z, vx, vy, fxr * 1e-3,
+                 fyr * 1e-3, ncol)
             nrec += 1
-    _row(nrec, tob + t, x, y, z, vx, vy, ex / (1e-6 * acc + 1e-30),
-         ey / (1e-6 * acc + 1e-30), ncol)
+    _row(nrec, tob + t, x, y, z, vx, vy, fxr * 1e-3,
+         fyr * 1e-3, ncol)
     nrec += 1
     return nrec, kind, ncol, face
 
 
-def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
+def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec,
+                       verbose=False):
     # PLANAR-SUPPORTED channels, in the KERNEL'S unpack order (the 13
     # flags _fly_planar destructures). REGRESSION GUARD: this list
     # once was `list(OPTIONAL_CHANNELS.keys())`, so every channel added to the
@@ -1460,7 +1453,7 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
             f"transporter's.)")
     if getattr(spec, "transporter", None) is not None:
         raise ValueError("the planar route does not implement the periodic "
-                         "transporter (CHARTER_transporter); remove the "
+                         "transporter; remove the "
                          "'transporter' block or fly a 3-D shapes route")
 
     chans = spec.integration.record_channels
@@ -1485,7 +1478,7 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
         raise ValueError("source.charge = 0: an uncharged ion has no "
                          "electric acceleration; state the charge state.")
     col = spec.collisions
-    # GAS through the one authority (A4, L-531): the same scalars every
+    # GAS through the one authority: the same scalars every
     # route takes. With gas on the values are identical to the old inline
     # derivation; in vacuum they are inert (every use in _fly_planar sits
     # under collide_on), so HS and vacuum flights are bit-identical.
@@ -1493,24 +1486,23 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
                                              resolve_collisions)
     from ion_gym.physics.ccs import ion_sigma_m2   # per-ion sigma
     g = gas_kernel_scalars(col)
-    # SDS (diffusion) collision model: the shared tables and per-ion
-    # parameters (sds.load_tables / sds_ion_params -- the same door r-z,
-    # 3-D and staged regions use; sds_active refuses an unknown model).
+    # SDS (diffusion) collision model: the shared jump statistics and
+    # per-ion parameters (sds.jump_statistics / sds_ion_params -- the same
+    # door r-z, 3-D and staged regions use; sds_active refuses an unknown
+    # model).
     sds_on = _sds_mod.sds_active(col)
-    _sds_stats = (_sds_mod.load_tables()[0] if sds_on
+    _sds_stats = (_sds_mod.jump_statistics() if sds_on
                   else np.zeros((5, 1002)))      # typed placeholder, unread
-    # DECLARED GAS FLOW (L-563, PI ruling 2026-10-16: modelled). HS and
-    # SDS both act in the plane, relative to the moving gas; the route's
-    # gas has no z coupling (z is the field-free drift), so a nonzero
-    # z flow is REFUSED by name rather than dropped.
+    # DECLARED GAS FLOW (modelled). HS and
+    # SDS act relative to the moving gas in all three axes, as on r-z and
+    # 3-D.
     _gfx, _gfy, _gfz = planar_gas_flow(col, "planar route")
     dt = spec.integration.dt_ns * 1e-3
     # Record buffer must hold every recorded step, or the trajectory gets
     # truncated mid-flight and the viewer draws a straight line from the
     # last recorded point to the final impact. Records = steps/rec_every,
     # plus the birth and final rows.
-    # THE DECK'S rec_every IS HONOURED AS DECLARED (PI ruling 2026-10-14,
-    # L-552). This used to raise rec_every silently whenever a flight
+    # THE DECK'S rec_every IS HONOURED AS DECLARED. This used to raise rec_every silently whenever a flight
     # would record more than a hidden 40,000 points, so the run recorded
     # at a spacing nobody asked for. A recording too large to hold is
     # refused at the build door instead, with the arithmetic and the
@@ -1578,18 +1570,29 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
     # is V/mm — convert here (see the
     # matching note in build_rz). _grad2d leaves the boundary row zero,
     # so each face is read ONE ROW IN (inset=1): read at the boundary it
-    # measured 0 on every deck and the hot-edge refusal never fired
-    # (L-286).
+    # measured 0 on every deck and the hot-edge refusal never fired.
     _edge_e = {"x_lo": 1e-3 * edge_field_max([_ex_c, _ey_c], 0, "lo", 1),
                "x_hi": 1e-3 * edge_field_max([_ex_c, _ey_c], 0, "hi", 1),
                "y_lo": 1e-3 * edge_field_max([_ex_c, _ey_c], 1, "lo", 1),
                "y_hi": 1e-3 * edge_field_max([_ex_c, _ey_c], 1, "hi", 1)}
     _AXX = 0.5 * (model.ele.shape[0] - 1) * model.mm_per_gu
     _AXY = 0.5 * (model.ele.shape[1] - 1) * model.mm_per_gu
+    # seed policy resolved ONCE per run, as the 3-D route does: the births
+    # were drawn from this same base, and capturing it here keeps every
+    # ion of this model on it even if the spec is built again before the
+    # ions are flown
+    from ion_gym.physics.ion_envelope import run_seed_base
+    _seed_base = run_seed_base(spec, verbose=verbose)
 
     def fly_fn(i):
         b = births_k[i]
         try:
+            from ion_gym.physics.birth_domain import refuse_birth_outside
+            refuse_birth_outside(
+                model.ele.shape, (b[0] / model.mm_per_gu,
+                                  b[1] / model.mm_per_gu),
+                ("x", "y"), model.mm_per_gu, f"ion {i} ",
+                f"({births[i, 0]:.3f}, {births[i, 1]:.3f}) mm")
             refuse_birth_in_metal(
                 model.ele, b[0] / model.mm_per_gu, b[1] / model.mm_per_gu,
                 model.mm_per_gu, spec, i,
@@ -1606,7 +1609,7 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
         # most ions of a multi-m/z run with a mass that did not match
         # their birth kinematics. The 3-D route already used mz_of.
         from ion_gym.physics.ion_envelope import per_ion
-        env = per_ion(spec, i)          # Tier 3: one mass+seed derivation
+        env = per_ion(spec, i, seed_base=_seed_base)   # one mass+seed derivation
         mz_i = env.mz
         m_i = mz_i
         acc_i = q_e * E_CHG / (m_i * KG_AMU)          # charge*e/(mass*amu)
@@ -1619,7 +1622,7 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
         else:
             sds_damping = sds_mfp = sds_V = sds_logmr = 0.0
         rec = np.empty((max_records, ncol_total))
-        n, kind, ncol, _bface = _fly_planar(
+        n, kind, ncol, _bface = call_rng_preserved(_fly_planar,
             b[0], b[1], b[3], b[4], b[6], m_i,
             model.ExA, model.EyA, model.ExK, model.EyK,
             model.ch_kind, model.ch_om, model.ch_ph, model.ch_duty,
@@ -1631,7 +1634,7 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
             g["c_bar"], g["sig1d"], g["m_gas"], rec, rec_every, nch,
             bnd_on, bnd_val, env.seed, b[2], b[5],
             sds_on, sds_damping, sds_mfp, sds_V, sds_logmr, _sds_stats,
-            pl_col, pl_val, pl_sgn, pl_w, pl_kind, _gfx, _gfy)
+            pl_col, pl_val, pl_sgn, pl_w, pl_kind, _gfx, _gfy, _gfz)
         traj = rec[:n].copy()
         if sds_on:
             # the collision-count rule (sds.SDS_NO_COLLISION_COUNT)
@@ -1686,8 +1689,8 @@ def make_planar_fly_fn(model: PlanarModel, births, spec: SimSpec):
 
 
 def unsupported_drive_features(spec):
-    """Declared drive features the PLANAR kernel does NOT apply: NONE,
-    as of 2026-09-16 (L-455). assemble_drive_groups honours multi-group
+    """Declared drive features the PLANAR kernel does NOT apply: NONE.
+    assemble_drive_groups honours multi-group
     membership and folds offset_v into the static field; the kernel
     evaluates sin, cos, square (with duty) and table (hold and linear)
     waveforms per channel, and 0 Hz drives are constants, not skips.
@@ -1705,7 +1708,7 @@ def build_planar_run(spec: SimSpec, verbose=False, solve_dtype=None):
         spec, verbose=verbose,
         solve_dtype=np.float64 if solve_dtype is None else solve_dtype)
     births = generate_births(spec)
-    fly_fn, cols = make_planar_fly_fn(model, births, spec)
+    fly_fn, cols = make_planar_fly_fn(model, births, spec, verbose=verbose)
     # STAGED-ASSEMBLY PACK. A staged assembly needs to fly an
     # ARBITRARY state through an already-solved region, which `fly_fn`
     # cannot do — it closes over this spec's own births by index.

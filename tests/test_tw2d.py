@@ -228,7 +228,7 @@ def _mk_duct_spec(q, gas=False, dt_ns=1.0, t_max_us=5.0, rec=5):
 
 
 def test_three_way_kernel_equivalence_and_charge():
-    """Gate D (PI-commissioned 2026-09-09, steps 1+2 of the kernel
+    """Gate D (steps 1+2 of the kernel
     comparison): three-way VACUUM equivalence — planar spec route vs
     tw2d vs extruded 3-D — on ONE solved square-TW spec, run at
     charge 1 AND charge 2. The same solved bases feed all three
@@ -333,7 +333,7 @@ def test_three_way_kernel_equivalence_and_charge():
             f"gate D q={q}: tw2d vs 3-D diverge (max dev {d_23:.3e} mm)")
         # CROSS-FAMILY pair (planar Verlet vs tw2d RK4): trajectories
         # differ by integrator truncation (measured 1.1e-2 mm at
-        # dt=1 ns on this drive, session 2026-09-09 — the finding this
+        # dt=1 ns on this drive — the finding this
         # gate surfaced). The honest contract is CONVERGENCE. NOTE the
         # order: the SQUARE channel's sign flips land between step
         # boundaries, degrading BOTH integrators' formal order at each
@@ -371,7 +371,7 @@ def test_three_way_kernel_equivalence_and_charge():
 
 
 def test_collisional_crn_equivalence_tw2d_vs_3d():
-    """Gate E (PI-commissioned 2026-09-09, the collision leg): tw2d vs
+    """Gate E (the collision leg): tw2d vs
     extruded 3-D WITH HS COLLISIONS under common random numbers. Both
     kernels seed the same numba RNG and call the same imported
     _collide/_mfp_mm, so with one seed the collision sequences must be
@@ -379,7 +379,7 @@ def test_collisional_crn_equivalence_tw2d_vs_3d():
     ulp-class (measured 4.4e-16 mm across 90 collisions in the probe —
     a single differing collision amplifies to mm scale, so the 1e-12
     bound is a razor). Runs at charge 1 AND charge 2, so the z>=2
-    collision-mass fix (issues.md 2026-09-09) is exercised end-to-end
+    collision-mass fix is exercised end-to-end
     on both routes. z headroom in the extrusion (nz=81) keeps thermal
     z drift inside the box for the full flight."""
     from ion_gym.physics.sim_build import build_run
@@ -444,7 +444,7 @@ def test_collisional_crn_equivalence_tw2d_vs_3d():
 
 
 def test_dict_collisions_reach_kernel_through_spec(monkeypatch):
-    """Gate F (L-531, A4): a collisions DICT reaches the kernel through the
+    """Gate F (A4): a collisions DICT reaches the kernel through the
     spec's own loader. Authored in Torr with no T_k, it must fly at that
     pressure and the spec's 273 K -- not the route's old P_pa default of
     0, which flew a gas-ON deck silently in vacuum at 298 K. A dict naming

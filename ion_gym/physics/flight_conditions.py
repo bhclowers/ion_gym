@@ -69,7 +69,10 @@ def set_flight_conditions(spec, *, voltages=None, drives=None, ion=None,
     ion        {mz_list=, charge=, ke_ev=(lo,hi), temperature_k=,
                 n_ions=, x0_mm=, y0_mm=, z0_mm=, direction=, r_mm=,
                 box_mm=, seed=}                 -- the source
-    gas        {enabled=, gas=, p_torr=, T_k=}  -- buffer gas
+    gas        {p_torr= (or P_torr=), enabled=, gas=, T_k=, model=,
+                sigma_model=, sigma_m2=, flow_mm_us=, sds_species=, ...}
+                                                -- buffer gas: any
+               CollisionSpec field; an unknown key is refused by name
     integration{dt_ns=, t_max_us=, rec_every=, max_records=}
 
     Returns the report lines. Raises FlightConditionError on an unknown
@@ -177,17 +180,34 @@ def set_flight_conditions(spec, *, voltages=None, drives=None, ion=None,
 
     if gas:
         c = spec.collisions
-        if "p_torr" in gas:
-            L.append(f"gas pressure: {c.P_torr!r} -> {float(gas['p_torr']):g} Torr")
+        # Every key is either the pressure (p_torr, or the deck's own name
+        # P_torr) or a CollisionSpec field; anything else is refused by
+        # name. It used to read five keys and DROP the rest silently --
+        # P_torr itself, sigma_model, sigma_m2, flow_mm_us (review API-2).
+        fields = set(c.__dataclass_fields__) - {"P_pa", "P_torr"}
+        unknown = sorted(k for k in gas
+                         if k not in fields and k not in ("p_torr", "P_torr"))
+        if unknown:
+            raise FlightConditionError(
+                f"gas has no field(s) {unknown}"
+                + (" (P_pa is deprecated: give p_torr)"
+                   if "P_pa" in unknown else "")
+                + f"; settable: {['p_torr'] + sorted(fields)}")
+        if "p_torr" in gas and "P_torr" in gas:
+            raise FlightConditionError(
+                "gas gives both p_torr and P_torr; give the pressure once")
+        torr = gas.get("p_torr", gas.get("P_torr"))
+        if torr is not None:
+            L.append(f"gas pressure: {c.P_torr!r} -> {float(torr):g} Torr")
             # ATOMIC: setting P_torr and nulling P_pa does NOT re-derive, and
             # a None P_pa reaches the kernel as an untypeable argument. The
             # spec owns the one door through that hazard.
-            c.set_pressure_torr(float(gas["p_torr"]))
-        for k, attr in (("enabled", "enabled"), ("gas", "gas"),
-                        ("T_k", "T_k"), ("model", "model")):
-            if k in gas:
-                L.append(f"gas {attr}: {getattr(c, attr)!r} -> {gas[k]!r}")
-                setattr(c, attr, gas[k])
+            c.set_pressure_torr(float(torr))
+        for k, val in gas.items():
+            if k in ("p_torr", "P_torr"):
+                continue
+            L.append(f"gas {k}: {getattr(c, k)!r} -> {val!r}")
+            setattr(c, k, val)
 
     if integration:
         i = spec.integration

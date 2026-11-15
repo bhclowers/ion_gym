@@ -28,7 +28,6 @@ known handler that has been read and judged, and the count may never grow
 without someone reading the new one.
 """
 import _bootstrap  # noqa: F401
-import ast
 import pathlib
 import sys
 
@@ -71,7 +70,7 @@ ALLOW = {
     # READ census, not to the observed count.
     ("pe_view.py", "Exception"): 4,
     ("viz_core.py", "Exception"): 0,    # loop-eater removed: collects+reports
-    # sim_app: the v145 audit read ALL its broad handlers one at a time.  Nine
+    # sim_app: an earlier audit read ALL its broad handlers one at a time.  Nine
     # were narrowed or root-caused away (five real defects: a degrade-to-
     # geometry-only that hid draw errors; a hardcoded-xy redraw on clear-runs
     # -- plane-capability leak, 4th copy; the DC-ladder gradient measured
@@ -126,7 +125,7 @@ ALLOW = {
     # self._err_status(...) because the assigned value is a Call. The
     # handlers have to be read.
     #
-    # 2026-10-15 (D8, L-541/L-566): the count had drifted to 37 on main
+    # Later the count had drifted to 37 on main
     # (the gate was red). Four were narrowed, each read: the view-slice
     # range (2-D models named, the rest raises to the redraw boundary),
     # the scene build (VizError/ValueError, reason on the status line),
@@ -134,7 +133,7 @@ ALLOW = {
     # the assembly callback stop (the shared _stop_periodic). Ratcheted
     # to the new count, as this allowlist requires.
     #
-    # 2026-10-21 (pre-cut fixes): +2, both read at write time. The
+    # Then +2, both read at write time. The
     # thermal-assess off-loop worker is the capture-and-forward pattern
     # already cited above (st["err"]/st["tb"] stashed on the worker, the
     # 150 ms poll renders type+message in the Analysis table and prints
@@ -144,53 +143,108 @@ ALLOW = {
     # <msg>" IN the pane it would otherwise have filled, so a failed
     # readout can never look like a valid σ. Neither is silent; neither
     # substitutes behaviour.
-    ("sim_app.py", "Exception"): 35,
+    #
+    # Batch 9 (every handler in the file read): 35 -> 31. Three
+    # signature helpers were narrowed to the serialisation errors they
+    # meet; the census also counts tuple/alias forms now. All 31 remaining
+    # bind and report the exception (checked by the gate, not by comment).
+    # 31 -> 32: SimApp._do_reset, the body of
+    # Reset, runs on the next tick with nothing above it to catch; it
+    # clears the spinner and opens the error dialog with the exception
+    # (_report_exception), so a failed Reset is reported, not logged
+    # only to the server console.
+    ("sim_app.py", "Exception"): 32,
+}
+
+# SILENT handlers (broad or narrow) whose body is only pass / continue /
+# a constant / `return <constant>` and that never touch the exception:
+# each is pinned by (file, enclosing function, caught types) -> (how many
+# such handlers that function may hold, the reason none is a swallow).
+# Identity, not a file-wide count, so one cannot be swapped for another;
+# an entry that no longer matches fails the gate (the list only shrinks).
+# Each was read and judged (batch 9).
+SILENT_ALLOW = {
+    ("pe_view.py", "PeSurfaceTab._stride_for",
+     ("AttributeError", "TypeError")):
+        (1, "model not built yet -> full resolution; a pe_surface failure "
+            "on a ready model raises to the compute boundary"),
+    ("pe_view.py", "_run_off_doc._poll", ("RuntimeError", "ValueError")):
+        (1, "stopping an already-stopped periodic callback is benign; the "
+            "result is delivered right after"),
+    ("sim_app.py", "SimApp._ensure_watchdog_pulse", ("RuntimeError",)):
+        (1, "no session loop to schedule on yet; the handle stays None and "
+            "every arming site retries until one lands"),
+    ("sim_app.py", "SimApp._sniff_assembly", ("TypeError", "ValueError")):
+        (1, "unreadable text is not an assembly; the normal loader then "
+            "gives the real diagnostic"),
+    ("sim_app.py", "SimApp._on_json_edited",
+     ("AttributeError", "KeyError", "TypeError", "ValueError")):
+        (1, "per-keystroke pitch sync of mid-edit (usually invalid) text; "
+            "the summary shows the box does not parse and Apply reports"),
+    ("sim_app.py", "SimApp._base_figure", ("VizError",)):
+        (1, "nothing drawn to measure: the declared extent stands"),
+    ("sim_app.py", "SimApp._domain_range",
+     ("AttributeError", "KeyError", "ValueError")):
+        (1, "a pre-build Scene falls through to the documented spec-extent "
+            "rule just below"),
+    ("sim_app.py", "SimApp._solve_then.poll",
+     ("AttributeError", "RuntimeError")):
+        (3, "clearing the spinner of a pane torn down mid-solve; the "
+            "solve's outcome is reported by the status lines around each"),
 }
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-
-
-def broad_handlers(path):
-    out = []
-    for n in ast.walk(ast.parse(path.read_text())):
-        if not isinstance(n, ast.ExceptHandler):
-            continue
-        name = "BARE" if n.type is None else ast.unparse(n.type)
-        if name in ("BARE", "Exception", "BaseException"):
-            body = n.body
-            silent = len(body) == 1 and isinstance(body[0], ast.Pass)
-            reraise = any(isinstance(x, ast.Raise) for x in ast.walk(n))
-            if reraise and not silent:
-                continue                    # re-raises: not hiding anything
-            out.append((n.lineno, name))
-    return out
+from tools.except_policy import scan_source  # noqa: E402 -- the scanner
 
 
 def main():
     bad, ok = [], 0
+    seen_silent = set()
     for f in PHYSICS:
+        # a module the gate cannot find is a FAILURE: a rename used to drop
+        # it out of the gate silently
         try:
             p = _bootstrap.locate(f)
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            bad.append(f"{f}: not found ({e}); update PHYSICS")
             continue
-        hs = broad_handlers(p)
+        broad, problems, silent = scan_source(p.read_text(), f)
         budget = sum(v for (fn, _), v in ALLOW.items() if fn == f)
-        if len(hs) > budget:
-            bad.append((f, hs, budget))
-        else:
+        over = len(broad) > budget
+        print(f"  {f:20s} broad handlers: {len(broad):2d}  allowed: "
+              f"{budget}{'   <-- OVER' if over else ''}")
+        for ln, k in broad:
+            print(f"        line {ln}: except {', '.join(k)}")
+        if over:
+            bad.append(f"{f}: {len(broad)} broad handlers, budget {budget}")
+        bad += [f"{f}: {msg}" for msg in problems]
+        per_key = {}
+        for ln, key in silent:
+            seen_silent.add(key)
+            per_key.setdefault(key, []).append(ln)
+        for key, lines in per_key.items():
+            allowed = SILENT_ALLOW.get(key, (0, ""))[0]
+            if len(lines) > allowed:
+                bad.append(f"{f}: line(s) {lines}: silent handler(s) in "
+                           f"{key[1]} (except {', '.join(key[2])}), "
+                           f"{len(lines)} > {allowed} pinned -- report it, "
+                           f"narrow its job, or pin it in SILENT_ALLOW with "
+                           f"the reason")
+        if not (over or problems):
             ok += 1
-        print(f"  {f:20s} broad handlers: {len(hs):2d}  allowed: {budget}"
-              f"{'   <-- OVER' if len(hs) > budget else ''}")
-        for ln, k in hs:
-            print(f"        line {ln}: except {k}")
+    for key in sorted(set(SILENT_ALLOW) - seen_silent):
+        bad.append(f"SILENT_ALLOW entry {key} matches no handler; remove it")
 
     print()
     if bad:
-        print("EXCEPT POLICY: FAIL -- a broad handler in the physics path can "
-              "silently substitute a different solver, key or answer.")
+        for b in bad:
+            print(f"  !! {b}")
+        print("EXCEPT POLICY: FAIL -- a handler in the physics/display path "
+              "can hide a failure or substitute a different answer.")
         return 1
-    print(f"EXCEPT POLICY: PASS ({ok} physics modules clean; "
-          f"allowlist budget {sum(ALLOW.values())}, and it may only shrink)")
+    print(f"EXCEPT POLICY: PASS ({ok} modules clean; broad budget "
+          f"{sum(ALLOW.values())}, {len(SILENT_ALLOW)} pinned silent "
+          f"handlers; both may only shrink)")
     return 0
 
 

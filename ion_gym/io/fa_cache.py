@@ -24,14 +24,13 @@ Layout:
         Ez.npy, Eu.npy # V/m on the mirror-extended grid -- for the kernel
         Z.npy, Ue.npy  # axes (Ue is the extended transverse axis)
 
-Nothing here imports numba; it just produces memmappable arrays. FieldNumba
-gains a .from_cache()/.cached() path that consumes them.
+Nothing here imports numba; it just produces memmappable arrays, which
+the builders' jitted kernels read in place.
 """
 
 import hashlib
 import json
 import os
-import shutil
 import tempfile
 import numpy as np
 
@@ -46,7 +45,7 @@ CACHE_VERSION = 2                       # bump to invalidate all entries
 
 def _root(root):
     """The cache root a call uses: the caller's, else paths.cache_root()
-    resolved NOW (never frozen at import -- L-551)."""
+    resolved NOW (never frozen at import)."""
     return str(cache_root()) if root is None else root
 
 
@@ -96,7 +95,7 @@ def _entry_complete(dest):
     """True when every array meta.json lists is on disk. Unreadable
     meta.json counts as incomplete (the entry cannot be served)."""
     try:
-        with open(os.path.join(dest, "meta.json")) as f:
+        with open(os.path.join(dest, "meta.json"), encoding="utf-8") as f:
             names = list((json.load(f).get("arrays") or {}))
     except (OSError, ValueError, AttributeError):
         return False
@@ -114,7 +113,7 @@ def store(spec, arrays, root=None):
             return key                               # already cached
         # meta.json present but an array it lists is not: a partial entry
         # (e.g. a pre-fix in-place import that crashed). Served as complete
-        # it would fail every load; replaced by this solve instead (L-537)
+        # it would fail every load; replaced by this solve instead
         fail = remove_tree(dest)
         if fail:
             raise CachePurgeIncomplete(0, 0, fail)
@@ -123,6 +122,7 @@ def store(spec, arrays, root=None):
     os.makedirs(root, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix=f".{key}.", dir=root)
     ok = False
+    lost_race = False
     try:
         manifest = {}
         for name, a in arrays.items():
@@ -131,7 +131,7 @@ def store(spec, arrays, root=None):
             manifest[name] = dict(shape=list(a.shape), dtype=str(a.dtype),
                                   sha_head=_sha_head(a))
         meta = dict(key=key, version=CACHE_VERSION, spec=spec, arrays=manifest)
-        with open(os.path.join(tmp, "meta.json"), "w") as f:
+        with open(os.path.join(tmp, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=1)
             f.flush()
             os.fsync(f.fileno())
@@ -142,13 +142,19 @@ def store(spec, arrays, root=None):
             os.replace(tmp, dest)
             ok = True
         except OSError:
-            if os.path.exists(os.path.join(dest, "meta.json")):
-                ok = True                            # someone else finished it
-            else:
+            if not os.path.exists(os.path.join(dest, "meta.json")):
                 raise
+            # someone else finished it: theirs is served, ours is a
+            # duplicate to remove (it used to be left behind -- a full field
+            # copy per lost race, invisible to entries(); review F9)
+            ok = lost_race = True
     finally:
-        if not ok and os.path.isdir(tmp):
-            shutil.rmtree(tmp, ignore_errors=True)
+        if (lost_race or not ok) and os.path.isdir(tmp):
+            fail = remove_tree(tmp)
+            if fail:
+                print(f"fa_cache: could not remove the unused temp copy "
+                      f"{tmp} ({len(fail)} path(s) failed, e.g. "
+                      f"{next(iter(fail.items()))}); clear_all removes it")
     return key
 
 
@@ -163,7 +169,7 @@ def load(spec_or_key, root=None, mmap=True, names=None):
     mpath = os.path.join(dest, "meta.json")
     if not os.path.exists(mpath):
         return None, None
-    meta = json.load(open(mpath))
+    meta = json.load(open(mpath, encoding="utf-8"))
     if meta.get("key") != key or meta.get("version") != CACHE_VERSION:
         return None, None
     out = {}
@@ -184,6 +190,13 @@ def load(spec_or_key, root=None, mmap=True, names=None):
             raise IOError(f"cache {key}: {name} shape/dtype mismatch "
                           f"(got {a.shape}/{a.dtype}, meta {m['shape']}/{m['dtype']}) "
                           f"-- truncated or corrupt entry")
+        # the head hash the docstring promises (it was recorded at store
+        # and never checked here, review F5); 4 KB, no copy of a memmap
+        if m.get("sha_head") is None or _sha_head(a) != m["sha_head"]:
+            raise IOError(f"cache {key}: {name} head hash "
+                          f"{'missing' if m.get('sha_head') is None else 'mismatch'}"
+                          f" -- corrupt entry; remove it (Cache tab) and "
+                          f"re-solve")
         out[name] = a
     return out, meta
 
@@ -228,7 +241,7 @@ def annotate(spec_or_key, name, label=None, root=None,
     recs = []
     if os.path.exists(ppath):
         try:
-            with open(ppath) as f:
+            with open(ppath, encoding="utf-8") as f:
                 recs = json.load(f)
             if not isinstance(recs, list):
                 raise ValueError(f"expected a list, got {type(recs).__name__}")
@@ -277,15 +290,15 @@ def entries(root=None):
         size, unsized = _tree_bytes(p)
         n_arr = sum(f.endswith(".npy") for _dp, _dn, fn in os.walk(p)
                     for f in fn)
-        # unsized_files > 0 means `bytes` is a LOWER BOUND (L-543: an
+        # unsized_files > 0 means `bytes` is a LOWER BOUND (an
         # unreadable file used to vanish from the count silently)
         rec = dict(key=name, bytes=size, unsized_files=unsized,
                    arrays=n_arr, mtime=os.path.getmtime(p), spec_name=None,
-                   shape=None, produced_by=[])
+                   shape=None, produced_by=[], problems=[])
         ppath = os.path.join(p, "provenance.json")
         if os.path.exists(ppath):
             try:
-                with open(ppath) as f:
+                with open(ppath, encoding="utf-8") as f:
                     precs = json.load(f)
                 if isinstance(precs, list):
                     rec["produced_by"] = [
@@ -300,12 +313,16 @@ def entries(root=None):
                     rec["has_spec_json"] = any(
                         isinstance(r, dict) and r.get("spec_json")
                         for r in precs)
-            except (OSError, ValueError):
-                pass                # descriptive only; row reported anyway
+            except (OSError, ValueError) as e:
+                # descriptive only, but an unreadable sidecar must not look
+                # like an absent one (the Cache tab would call the entry
+                # "pre-descriptor"): the row carries the reason
+                rec["problems"].append(
+                    f"provenance.json unreadable ({type(e).__name__}: {e})")
         meta_p = os.path.join(p, "meta.json")
         if os.path.exists(meta_p):
             try:
-                with open(meta_p) as f:
+                with open(meta_p, encoding="utf-8") as f:
                     meta = json.load(f)
                 spec = meta.get("spec", {}) or {}
                 rec["spec_name"] = (spec.get("name")
@@ -314,14 +331,16 @@ def entries(root=None):
                 if arrs:
                     any_a = next(iter(arrs.values()))
                     rec["shape"] = any_a.get("shape")
-            except (OSError, ValueError, KeyError):
-                pass                                 # report the rest anyway
+            except (OSError, ValueError, KeyError, AttributeError) as e:
+                # the rest of the row is still reported, with the reason
+                rec["problems"].append(
+                    f"meta.json unreadable ({type(e).__name__}: {e})")
         out.append(rec)
     return out
 
 
 class CachePurgeIncomplete(OSError):
-    """A purge that could not delete everything (L-543). Raised AFTER
+    """A purge that could not delete everything. Raised AFTER
     every deletable entry is gone, carrying what WAS removed and each path
     that was not, so the caller reports a partial purge as partial."""
 
@@ -344,7 +363,7 @@ def remove_tree(path):
     directory that could NOT be deleted ({} = fully gone; a missing tree
     is already gone). The reporting counterpart of
     shutil.rmtree(ignore_errors=True), which made failed deletes look
-    like successes (L-543)."""
+    like successes."""
     path = str(path)
     failures = {}
     if not os.path.lexists(path):
@@ -416,8 +435,8 @@ def clear_all(root=None):
     bytes_freed), counting ONLY entries actually deleted. If any entry
     could not be fully deleted, every other entry is still removed and
     then CachePurgeIncomplete (an OSError) is raised with the counts and
-    each failed path -- a failed delete is never counted as a purge
-    (L-543). Used by the app's 'clear cache' control."""
+    each failed path -- a failed delete is never counted as a purge.
+    Used by the app's 'clear cache' control."""
     root = os.path.expanduser(_root(root))
     if not os.path.isdir(root):
         return 0, 0

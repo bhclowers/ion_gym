@@ -252,7 +252,7 @@ def plane_grid_views(as_, bs_, what="grid"):
 
 def electrode_mask(el, X, Y):
     """Compose an ElectrodeSpec's shapes in order: additive shapes union
-    in, cutout shapes subtract out (ion_playground semantics).
+    in, cutout shapes subtract out.
 
     2-D ONLY: a shape carrying an `extrude` descriptor is REFUSED here —
     a planar (z-invariant) or r-z solve cannot honor a finite sub-range
@@ -282,6 +282,73 @@ def electrode_mask(el, X, Y):
         else:
             m |= _shape_mask(s, X, Y)
     return m
+
+
+# Every route's shared-node refusal ends with this: stacking a coincident
+# copy of an electrode to give it a second drive is refused, and listing
+# the drives on the one electrode is the supported way.
+SHARED_NODE_HINT = ("To drive one conductor with several drive groups, "
+                    "list them all in that electrode's rf_groups instead "
+                    "of stacking copies of it.")
+
+
+def refuse_shared_nodes(masks, electrodes, *, route, pitch_mm):
+    """Refuse when one node is claimed by more than one electrode.
+
+    `masks` is {electrode index (1-based): bool mask}. Every basis holds
+    its own electrode's nodes at the basis voltage, so a node in two masks
+    is metal in both bases and the assembled field ADDS their voltages
+    there: two touching 50 V plates made 100 V metal, and a 4 mm overlap
+    moved the mid-gap potential from 25.0 to 37.6 V. The 3-D shapes route
+    and the STL voxelizer already refuse a shared node; the planar and r-z
+    builders call this so every route follows the same rule."""
+    owner = None
+    for idx, m in sorted(masks.items()):
+        m = np.asarray(m, bool)
+        if owner is None:
+            owner = np.zeros(m.shape, np.int32)
+        clash = m & (owner != 0)
+        if clash.any():
+            node = tuple(int(v[0]) for v in np.where(clash))
+            other = int(owner[node])
+            raise ValueError(
+                f"{route}: electrode {idx} "
+                f"({getattr(electrodes[idx - 1], 'name', '?')!r}) overlaps "
+                f"electrode {other} "
+                f"({getattr(electrodes[other - 1], 'name', '?')!r}) at node "
+                f"{node} (+{int(clash.sum()) - 1} more) -- two conductors "
+                f"cannot own one node, and their voltages would add there. "
+                f"Leave a gap of at least one node ({pitch_mm:g} mm) "
+                f"between touching electrodes, or make them one electrode. "
+                f"{SHARED_NODE_HINT}")
+        owner[m] = idx
+
+
+def nodes_from_bases(bases, v_basis):
+    """{index: bool mask} of the nodes each solved basis holds at the
+    basis voltage -- that electrode's own nodes. Lets a cache hit, which
+    rasterizes nothing, be checked by the same rules as a fresh build."""
+    return {i: np.asarray(b) >= v_basis * (1.0 - 1e-9)
+            for i, b in bases.items()}
+
+
+def refuse_empty_mask(el, mask, *, route, pitch_mm):
+    """Refuse an electrode whose rasterized mask holds no node.
+
+    An electrode thinner than the pitch, or placed where no node lands,
+    rasterizes to an empty mask; the solve then runs without it and the
+    ions fly a geometry with that electrode MISSING, reporting a plausible
+    answer. The 3-D shapes route refuses the same case per shape
+    (build_shapes3d); the planar and r-z builders call this on every
+    electrode mask they solve with, so the rule holds on every route."""
+    if not np.asarray(mask).any():
+        raise ValueError(
+            f"{route}: electrode {getattr(el, 'name', '?')!r} rasterizes to "
+            f"ZERO nodes at pitch {pitch_mm:g} mm -- it would be silently "
+            f"absent from the solve. It is thinner than one grid unit or "
+            f"lies where no node lands (check its coordinates against the "
+            f"domain). Refine the pitch, thicken the electrode, or correct "
+            f"its position.")
 
 
 def el_masks_from_labels(ele, electrodes=None):
@@ -341,7 +408,9 @@ def _anchor_mm(spec, origin=(0.0, 0.0)):
     lattice that STARTS at the origin, so with origin (0,0) — every
     legacy spec — the arithmetic is byte-identical. Axes without a
     declared location anchor at 0.0. Deterministic in (plane_mm,
-    origin_mm, mm_per_gu) only, all already in the geometry cache key."""
+    origin_mm, mm_per_gu) only, all in the geometry cache key
+    (basis_cache.geometry_key_dict keys origin_mm whenever it is not
+    [0, 0], the unshifted lattice)."""
     g = spec.geometry
     h = float(g.mm_per_gu)
     sym = g.symmetry.normalized()
@@ -547,7 +616,7 @@ class BirthInMetal(ValueError):
     """An ion whose BIRTH lies inside metal. Raised by every route's birth
     refusal (this module's refuse_birth_in_metal, tracer3d's 3-D twin,
     tracer_tw2d). It is a fact about that ION, so a packet flight records
-    it as that ion's loss (staged_flight.fly_packet, PI ruling 2026-10-15)
+    it as that ion's loss (staged_flight.fly_packet)
     while every other refusal aborts the packet. Still a ValueError for
     every existing caller."""
 

@@ -16,7 +16,6 @@ Each rod is 8.67 mm across and 120 mm long (z from 0 to 120 mm), stored as a 100
 ## Where they are used
 
 - `examples/quadrupole_stl_rods_full_3-d.json`, the full 3-D quadrupole deck.
-- `internal/studies/digital_quad/decks/quadrupole_digital_3d.json`, the digital-drive variant.
 - `tests/test_stl_assembly.py` and `tests/test_stl3d.py`, which check that the files import untouched as four separate electrodes.
 
 ## Using them in the STL upload tab

@@ -293,7 +293,7 @@ class CellSpace:
 def pe_min_birth(spec, *, mz: Optional[float] = None,
                  margin_mm: float = 0.3):
     '''Move the ion birth point to the EFFECTIVE-POTENTIAL MINIMUM of
-    this candidate (pseudopotential + DC, median m/z by default),
+    this candidate (pseudopotential + DC, median mass by default, at the deck's charge),
     restricted to interior nodes at least margin_mm clear of metal.
     Root-cause fix: birth at the geometric channel
     center scored asymmetric-but-confining candidates infeasible as a
@@ -310,7 +310,11 @@ def pe_min_birth(spec, *, mz: Optional[float] = None,
         mz = mzs[len(mzs) // 2]                  # median species
     from scipy.ndimage import minimum_filter
     model = build_planar_model(spec)
-    xg, yg, pe, ele = model.pe_surface(mz=mz)
+    # the deck's own charge state: the DC term scales with q and the
+    # pseudopotential with q^2/m, so a z != 1 ion's minimum sits at a
+    # different DC/pseudo balance (pe_surface defaults to charge 1)
+    xg, yg, pe, ele = model.pe_surface(mz=mz,
+                                       charge=int(spec.source.charge))
     pe = np.asarray(pe, float)
     # pe_surface layout is [ix, iy] — pinned EMPIRICALLY on the
     # non-square SLIM baseline (a shape sniff is ambiguous
@@ -519,7 +523,7 @@ def run_screen(space: CellSpace, template, objective, bank_path: str, *,
     pts = sobol_points(space, n_points, sobol_seed)
     done = set()
     if os.path.exists(bank_path):
-        with open(bank_path) as f:
+        with open(bank_path, encoding="utf-8") as f:
             for line in f:
                 row = json.loads(line)
                 if row.get("kind") == "screen":
@@ -545,7 +549,7 @@ def run_screen(space: CellSpace, template, objective, bank_path: str, *,
                                   "fly_seed": fly_seed},
                     "space": space.to_dict(),
                     "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
-        with open(bank_path, "a") as f:
+        with open(bank_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
         n_new += 1
         if verbose:
@@ -572,7 +576,7 @@ def top_distinct(bank_path: str, n_basins: int, space: CellSpace, *,
     lo, hi = space.bounds()
     rows = []
     n_seen = 0
-    with open(bank_path) as f:
+    with open(bank_path, encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
             if r.get("kind") != "screen":
@@ -634,7 +638,7 @@ def reset_screen(bank_path: str) -> None:
     point, use a NEW bank filename instead of resetting."""
     n = 0
     if os.path.exists(bank_path):
-        with open(bank_path) as f:
+        with open(bank_path, encoding="utf-8") as f:
             n = sum(1 for _ in f)
     dst = _retire(bank_path)
     if dst is None:
@@ -666,7 +670,7 @@ def load_bank(path: str) -> list:
     read); an unparsable line anywhere else is corruption and refuses
     with its line number."""
     rows = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         lines = f.readlines()
     for i, line in enumerate(lines):
         if not line.strip():

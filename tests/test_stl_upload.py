@@ -20,9 +20,10 @@ import numpy as np
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
 import trimesh
 
+from ion_gym.io.paths import outputs_dir  # noqa: E402  scratch under the configured outputs root
 from ion_gym.io.stl_upload import (load_mesh_bytes, propose_sizing,
                         manifest_hash, save_bundle, load_bundle,
-                        spec_from_upload, SOLVER_VERSION)
+                        spec_from_upload, bundle_solver_version)
 
 
 def _stl_bytes(mesh):
@@ -79,20 +80,20 @@ def test_manifest_hash():
           "geometry/pitch/domain/symmetry/solver  OK")
 
 
-def test_bundle_roundtrip(tmp="/tmp/stl_bundle_test"):
-    import shutil
-    shutil.rmtree(tmp, ignore_errors=True)
+def test_bundle_roundtrip(tmp_path):
+    tmp = str(tmp_path / "bundle")
     a = _box((10, 4, 2), (0, 0, 0), "a")
     b = _box((10, 4, 2), (0, 8, 0), "b")
     s = propose_sizing([a, b], pitch=0.5)
-    bases = {"a": np.random.rand(8, 9).astype(np.float32),
-             "b": np.random.rand(8, 9).astype(np.float32)}
+    bases = {"a": np.random.rand(8, 9), "b": np.random.rand(8, 9)}
     save_bundle(tmp, '{"name":"t"}', [a, b], bases, s)
     man, meshes, loaded, fresh = load_bundle(tmp)
     assert fresh, "hash should certify an untouched bundle"
     assert sorted(loaded) == ["a", "b"]
+    # full precision: the bases come back bit-identical (float32 did not)
+    assert loaded["a"].dtype == np.float64 and man["basis_dtype"] == "float64"
     assert np.array_equal(loaded["a"], bases["a"])
-    assert man["solver_version"] == SOLVER_VERSION
+    assert man["solver_version"] == bundle_solver_version()
     # tamper: change recorded pitch -> stale
     import json
     from pathlib import Path
@@ -105,12 +106,35 @@ def test_bundle_roundtrip(tmp="/tmp/stl_bundle_test"):
     print("  bundle: round-trip bit-exact, fresh; tamper -> stale  OK")
 
 
-def test_quad_two_stl_end_to_end(tmp="/tmp/stl_quad_upload"):
-    """Charter first example: quad as TWO STLs, one per RF phase pair,
+def test_bundle_keeps_upper_case_meshes(tmp_path):
+    """The shipped meshes are spelled .STL; a case-sensitive glob dropped
+    them on reload, so the bundle read as stale and lost its meshes."""
+    m = trimesh.creation.box(extents=(10, 4, 2))
+    a = load_mesh_bytes("Rod_1.STL", _stl_bytes(m))
+    s = propose_sizing([a], pitch=0.5)
+    save_bundle(str(tmp_path), '{"name":"t"}', [a], {"Rod_1": np.ones((3, 3))},
+                s)
+    _, meshes, _, fresh = load_bundle(str(tmp_path))
+    assert [x.filename for x in meshes] == ["Rod_1.STL"] and fresh
+
+
+def test_bundle_solver_version_carries_the_solve_code():
+    from ion_gym.physics.solve_code import solve_code_key
+    assert bundle_solver_version().endswith(solve_code_key())
+
+
+def test_quad_two_stl_end_to_end(tmp=None):
+    """First example: quad as TWO STLs, one per RF phase pair,
     full cylinders R = 1.148*r0, no symmetry assumptions — through the
     validated build path."""
     import shutil
-    shutil.rmtree(tmp, ignore_errors=True)
+    from pathlib import Path
+    # resolved here, not as a default argument, so importing the module
+    # creates no directory; a stale run's files are cleared first
+    tmp = tmp or str(outputs_dir("tests", "stl_quad_upload"))
+    if Path(tmp).exists():
+        shutil.rmtree(tmp)
+    Path(tmp).mkdir(parents=True)
     r0, L = 3.84, 2.0
     R = 1.148 * r0
     rod_r = R  # rod radius: r_rod = 1.148*r0 (the dodecapole-minimizing ratio)
@@ -178,7 +202,7 @@ def test_dropper_accepts_all():
     import panel as pn  # noqa
     from ion_gym.io.paths import cache_root
     from ion_gym.io.stl_upload import StlUploadPanel
-    # L-568: the Clear control purges the field cache. Run it against a
+    # The Clear control purges the field cache. Run it against a
     # TEMPORARY cache and workdir -- it used to purge the real cache (and
     # the real uploads dir) of whoever ran the gate -- and check the
     # user's cache root lost nothing.

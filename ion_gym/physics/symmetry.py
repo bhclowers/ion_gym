@@ -195,7 +195,7 @@ def _electrical_id(el):
     ElectrodeSpec.group_names() (the one authority), compared as a set.
     This read getattr(el, "rf_group", None) -- a field folded away into
     rf_groups -- so every electrode reported None and mirror pairs on
-    opposite drives verified as symmetric (L-533). Read directly: an
+    opposite drives verified as symmetric. Read directly: an
     object without these fields is not an electrode and raises."""
     return (round(float(el.dc), _ROUND),
             tuple(sorted(el.group_names())),
@@ -313,7 +313,7 @@ def assert_mirror_field_symmetry(*, axis_index, plane_node, potentials,
                 f"{context}: plane node {p} is not the centre of axis "
                 f"{'xyz'[ax]} ({n} nodes) for {name} — the unfolded "
                 f"domain is not node-symmetric about its own plane "
-                f"(the L-213 class: extent and plane disagree)")
+                f"(extent and plane disagree)")
         if not np.array_equal(arr, np.flip(arr, axis=ax)):
             d = np.abs(arr - np.flip(arr, axis=ax))
             raise ValueError(
@@ -334,7 +334,7 @@ def assert_mirror_field_symmetry(*, axis_index, plane_node, potentials,
                 f"at {nz}/{row.size} nodes. A symmetric potential has "
                 f"an exactly-zero central difference on its own plane, "
                 f"so any nonzero here is the mirror machinery breaking "
-                f"symmetry (the L-212 artifact class); refusing.")
+                f"symmetry; refusing.")
 
 
 def reduction_summary(sym: SymmetrySpec):

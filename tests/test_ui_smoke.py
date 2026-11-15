@@ -56,7 +56,7 @@ def spec_planar():
     INLINE, deliberately: the fixture must not depend on any file that is not
     in the repo.  (The example this replaces, the STL funnel, pointed at
     funnel-1..17.stl in a directory that was never checked in, so it failed
-    everywhere except the machine that authored it.  It was removed in v144;
+    everywhere except the machine that authored it.  It was removed;
     this note records why a smoke fixture is never allowed to reach outside
     the tree.)
 
@@ -160,7 +160,7 @@ def run_for(label, make_spec):
     check("view planes x electrode fills/labels x aspect lock", toggles)
 
     def outlines_survive_fills_off():
-        """The v127 bug: turning fills OFF blanked the electrodes in xz/yz,
+        """The fills-off bug: turning fills OFF blanked the electrodes in xz/yz,
         because only the xy path drew an outline. A crash test cannot see
         that -- nothing raises, the metal just disappears. So COUNT the
         outlines: with fills off there must be zero fills and a nonzero
@@ -220,7 +220,7 @@ def run_for(label, make_spec):
           outlines_survive_fills_off)
 
     def drawn_extent_matches_axes():
-        """The v135 transposition: the xz view reported axes (z, x) but the
+        """The xz transposition bug: the xz view reported axes (z, x) but the
         electrode projection still branched on `la == "x"`, so it rendered the
         yz projection under xz's labels — a 140 mm ladder drawn up the 15 mm
         axis. Nothing raised; the picture was simply a lie.
@@ -354,7 +354,7 @@ def run_for(label, make_spec):
     # regression is invisible to every other test in this file.
     def config_structure():
         names = [t.name for t in app.w_cfgtabs]
-        assert names == ["Load", "Save", "Runs"], names
+        assert names == ["Deck", "Save", "Runs"], names
 
         def walk(o):
             yield o
@@ -479,7 +479,7 @@ def run_for(label, make_spec):
         app._afly_poll()                         # final drain after done
         msg = str(app.status.object)
         assert "failed" not in msg.lower(), f"assembly flight failed: {msg}"
-        # the outcome vocabulary is DETECTED (PI ruling 2026-10-16): a
+        # the outcome vocabulary is DETECTED: a
         # detection count, or the statement that no detector is declared
         assert ("detected" in msg or "no detector declared" in msg
                 or "fate" in msg), f"flight reported no outcome: {msg}"
@@ -528,10 +528,10 @@ for label, mk in FIXTURES:
 
 
 def run_station_and_retune_guards():
-    """Standalone section for the 2026-09-12 UI fixes (station
+    """Standalone section for the UI fixes (station
     write-through + retune-in-place). Tiny inline decks — nothing here
     may trigger a heavy solve. Each refusal path added by the fix gets
-    its adversarial check (chartered: a guard ships with its test)."""
+    its adversarial check (a guard ships with its test)."""
     from ion_gym.io.sim_spec import SimSpec
     from ion_gym.ui.sim_app import SimApp
     doc = {"name": "guard-tiny", "geometry": {
@@ -541,7 +541,7 @@ def run_station_and_retune_guards():
                     {"type": "rect", "x_mm": 1.0 + 2.0 * i, "y_mm": 1.0,
                      "width_mm": 1.0, "height_mm": 1.0}]}
                 for i in range(4)]},
-           # R2 (2026-10-15): physics keys are stated, at the values this
+           # R2: physics keys are stated, at the values this
            # fixture flew with as defaults before missing ones refused
            "source": {"x0_mm": 6.0, "y0_mm": 5.0, "mz_list": [100.0],
                       "n_ions": 2, "seed": 3, "distribution": "disc",

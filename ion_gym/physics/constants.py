@@ -1,7 +1,6 @@
 """Physical constants — the single authority for the package.
 
-CODATA 2018 / SI 2019 (PI ruling 2026-10-13, R1: "Move CODATA 2018
-everywhere"). Before this module the package carried three vintages at
+CODATA 2018 / SI 2019, everywhere. Before this module the package carried three vintages at
 once: the 1998 set in sds.py, the "source's value" kB/amu in
 collision3d.py that eight physics modules imported, and CODATA 2018 in
 beam_spec/traj_stats/tracer3d. Masses and energies therefore differed in

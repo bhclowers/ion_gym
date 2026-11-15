@@ -17,6 +17,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent))
+from ion_gym.io.paths import outputs_dir  # noqa: E402  scratch under the configured outputs root
 from ion_gym.io.stl_upload import load_mesh_bytes, propose_sizing, spec_from_upload
 
 PITCH = 0.4
@@ -30,9 +31,9 @@ def _specs():
     DC = {n[0]: 100.0, n[2]: 100.0, n[1]: -100.0, n[3]: -100.0}
     RF = {n[0]: "A", n[2]: "A", n[1]: "B", n[3]: "B"}
     s = propose_sizing(meshes, pitch=PITCH, margin_mm=2.0)
-    sp2 = spec_from_upload(meshes, DC, s, "/tmp/stl3d_2d", rf_groups=RF,
+    sp2 = spec_from_upload(meshes, DC, s, str(outputs_dir("tests", "stl3d_2d")), rf_groups=RF,
                            solve_3d=False)
-    sp3 = spec_from_upload(meshes, DC, s, "/tmp/stl3d_3d", rf_groups=RF,
+    sp3 = spec_from_upload(meshes, DC, s, str(outputs_dir("tests", "stl3d_3d")), rf_groups=RF,
                            solve_3d=True)
     # DECLARED seed: tob_span over an RF cycle is a random
     # draw that moves r_max/dz in a driven quad; the banked expectations
@@ -164,9 +165,9 @@ def test_rf_confinement_and_fates():
 def _isolated_cache():
     """Point the field cache (ION_GYM_CACHE, resolved at call time) at a
     temporary directory for the duration, then check the USER's cache root
-    lost nothing. L-568: this gate called fa_cache.clear_all() on the
+    lost nothing. This gate once called fa_cache.clear_all() on the
     real cache, deleting every banked basis on the machine that ran it
-    (PI standing rule: a cached 3-D solve must not be repeated
+    (standing rule: a cached 3-D solve must not be repeated
     needlessly)."""
     import contextlib
     import os
@@ -197,7 +198,7 @@ def test_cache_and_velocities():
     """Second build must be a cache HIT (no re-solve, bit-identical
     potential); trajectory velocity columns must be populated and
     energy-consistent (record-0 speed == birth KE). Runs on an ISOLATED
-    cache (L-568), so its first build is a guaranteed disk miss without
+    cache, so its first build is a guaranteed disk miss without
     purging anyone's cache."""
     with _isolated_cache():
         _cache_and_velocities()
@@ -226,7 +227,7 @@ def _cache_and_velocities():
     sp3.integration.t_max_us = 10.0
     sp3.integration.rec_every = 20
 
-    # (was fa_cache.clear_all() on the REAL cache -- L-568; the isolated
+    # (was fa_cache.clear_all() on the REAL cache; the isolated
     # cache above is empty, so this build is a miss)
     t0 = _t.time()
     model1, fly1, _, _ = build_run(sp3)
@@ -275,7 +276,7 @@ def test_refusals():
                         v_basis=1e4, tol=1e-3, stencil="ghost_linear",
                         omega=1.9)
     bases = {i: b / 1e4 for i, b in bases.items()}
-    # the rastered label grid, passed explicitly (L-518)
+    # the rastered label grid, passed explicitly
     ele = np.zeros(next(iter(masks.values())).shape, np.int16)
     for i, m in masks.items():
         ele[m] = i

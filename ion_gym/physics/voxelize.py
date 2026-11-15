@@ -254,14 +254,16 @@ def _dist_to_tris(tris, pts, chunk=800):
 
 # --------------------------------------------------------------- facade
 class ElectrodeOverlap(ValueError):
-    """Two electrodes' metal claims the same node. A TYPED refusal (L-529):
+    """Two electrodes' metal claims the same node. A TYPED refusal:
     stl_upload decided "overlap or other failure" by finding the word
     'overlaps' in the message. Carries the pair, one node and the count."""
 
     def __init__(self, a, b, node, n_nodes):
         self.a, self.b, self.node, self.n_nodes = int(a), int(b), node, n_nodes
+        from ion_gym.physics.raster2d import SHARED_NODE_HINT
         super().__init__(f"electrode {self.a} overlaps {self.b} at node "
-                         f"({','.join(str(v) for v in node)}) (+{n_nodes})")
+                         f"({','.join(str(v) for v in node)}) (+{n_nodes}). "
+                         f"{SHARED_NODE_HINT}")
 
 
 def voxelize_meshes(meshes, grid, surface_eps_gu=0.0):
@@ -289,9 +291,11 @@ def voxelize_stls(paths, grid, surface_eps_gu=0.0):
     """{index -> STL path (mm, full frame)} -> labeled grid. STLs are
     converted mm -> gu with the grid's spacing; no primitive provenance, so
     the caller chooses eps (the STL's own tessellation sets the floor)."""
+    from ion_gym.io.stl_resolve import require_sound_mesh
     meshes = {}
     for i, p in sorted(paths.items()):
         m = trimesh.load(p, force="mesh", process=True)
+        require_sound_mesh(m, f"STL {p}")
         m.apply_scale(1.0 / grid.mm_per_gu)
         meshes[i] = m
     return voxelize_meshes(meshes, grid, surface_eps_gu=surface_eps_gu)

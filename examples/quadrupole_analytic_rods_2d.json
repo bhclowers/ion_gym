@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "name": "Quadrupole (2-D analytic rods)",
- "notes": "Four-rod RF quadrupole built entirely from analytic circle shapes \u2014 no STL files. Rod radius 4.408 mm at r0 = 3.84 mm (rod/r0 = 1.148, the classic cylindrical approximation); RF 241.34 V zero-to-peak at 2.0 MHz puts m/z 100 at q = 0.40 (stable) and m/z 30 at q = 1.33 (unstable). Both masses are flown together: the stable mass oscillates bounded for the whole flight while the unstable mass grows and strikes a rod or the ejection window \u2014 the Mathieu stability demonstration in one flight. Same electrical design as the STL-rod transport example, so the two can be compared route-for-route.",
+ "notes": "Four-rod RF quadrupole built entirely from analytic circle shapes \u2014 no STL files. Rod radius 4.408 mm at r0 = 3.84 mm (rod/r0 = 1.148, the classic cylindrical approximation); RF 241.34 V zero-to-peak at 2.0 MHz puts m/z 100 at q = 0.40 (stable) and m/z 30 at q = 1.33 (unstable). Both masses are flown together: the stable mass oscillates bounded for the whole flight while the unstable mass grows and strikes a rod or the ejection window \u2014 the Mathieu stability demonstration in one flight. Same electrical design as the STL-rod transport example, so the two can be compared route-for-route. Detector station (transparent, on_hit pass) on z at 115.9 mm, ten grid pitches inside the declared axial extent; it feeds the Impact Analysis tab and changes no flight.",
  "geometry": {
   "width_mm": 27.8,
   "height_mm": 27.8,
@@ -167,7 +167,6 @@
   "gas": "N2",
   "T_k": 273.0,
   "P_torr": 1.0,
-  "sigma_m2": 2.27e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,
   "flow_mm_us": [
@@ -220,5 +219,15 @@
  "builder": "",
  "import_path": "",
  "scene": null,
- "_display_name": "Quadrupole (2D, analytic)"
+ "_display_name": "Quadrupole (2D, analytic)",
+ "stations": [
+  {
+   "name": "detector",
+   "kind": "detect",
+   "on_hit": "pass",
+   "axis": "z",
+   "pos_mm": 115.9,
+   "window": {}
+  }
+ ]
 }

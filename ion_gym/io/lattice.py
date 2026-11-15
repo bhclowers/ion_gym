@@ -79,7 +79,7 @@ def conformance_error(value_mm: float, mm_per_gu: float, *,
     return (
         f"{axis}-axis {what} {v:g} mm is not an integer number of cells "
         f"at mm_per_gu={h:g} ({q:.6g} cells). Lattice quantities are "
-        f"integer gu, exactly, on every route and axis (charter A7): "
+        f"integer gu, exactly, on every route and axis: "
         f"the extent is count x pitch, and the remainder of a physical "
         f"envelope is absorbed at the OUTER WALLS, never silently or at "
         f"a symmetry plane. The two nearest conforming {what}s are "

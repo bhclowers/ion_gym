@@ -54,7 +54,7 @@ def build_manifest(spec, *, stl_dir=None) -> dict:
     """{filename: sha256} over the STL files this spec references, hashed
     from the ACTUAL bytes on disk, for embedding as
     geometry.stl_manifest so future runs can verify them. THE one manifest
-    builder (L-546): cad.stl_channels.write_spec_json delegates here.
+    builder: cad.stl_channels.write_spec_json delegates here.
 
     stl_dir: where the files are; default resolve_stl_dir(spec). REFUSES,
     naming every file, when any referenced STL is missing -- a manifest
@@ -84,7 +84,7 @@ def preflight_stls(spec):
     # A relative dir with no recorded spec path is the CWD fallback --
     # legal, but it MUST say so: a bare "dir ." sent a user hunting file
     # placement when the real cause was a spec loaded from TEXT, which
-    # has no path to anchor against (2026-09-11 field report).
+    # has no path to anchor against (a field report).
     note = ""
     if not d.is_absolute() and getattr(spec, "_loaded_from", None) is None:
         note = (f" (= CWD fallback {(Path.cwd() / d).resolve()} -- the spec "
@@ -102,7 +102,7 @@ def preflight_stls(spec):
             continue
         if manifest and el.stl not in manifest:
             # a manifest that does not cover a file VERIFIES nothing about
-            # it: refused by name (L-546; it was counted "present and
+            # it: refused by name (it was counted "present and
             # matching manifest")
             unlisted.append(el.stl)
         elif el.stl in manifest and _sha256(fp) != manifest[el.stl]:
@@ -368,27 +368,66 @@ def load_mesh(spec, el, *, stl_dir=None):
             f"reference -- parametric shapes declare their own positions "
             f"and never pass through mesh ingest")
     m = trimesh.load(str(d / el.stl), force="mesh", process=True)
+    require_sound_mesh(
+        m, f"electrode {getattr(el, 'name', '?')!r} mesh {d / el.stl}")
     off = placement_offset(spec)
     if off.any():
         m.apply_translation(off)
     return m
 
 
-def parse_stl_bytes(data: bytes):
+def parse_stl_bytes(data: bytes, name="uploaded STL"):
     """STL BYTES -> trimesh mesh, as authored (CAD frame, no placement):
-    the byte-side ingest point (L-546). The upload panel parses dropped
-    bytes, sizes them and previews them through here; it called
-    trimesh.load itself in three places. A mesh read from a deck's file
-    with its declared placement goes through load_mesh instead."""
+    the byte-side ingest point. The upload panel parses dropped bytes,
+    sizes them and previews them through here. A mesh read from a deck's
+    file with its declared placement goes through load_mesh instead.
+    `name` labels the refusal when the bytes are not a sound mesh."""
     import io as _io
     trimesh = _require_trimesh()
-    return trimesh.load(_io.BytesIO(data), file_type="stl", force="mesh",
-                        process=True)
+    m = trimesh.load(_io.BytesIO(data), file_type="stl", force="mesh",
+                     process=True)
+    require_sound_mesh(m, name)
+    return m
+
+
+def mesh_soundness_errors(m):
+    """Reasons a loaded mesh cannot stand for an electrode ([] if none).
+
+    trimesh does not raise on a bad STL: an empty, truncated, garbage or
+    random-bytes file loads as a mesh with no triangles, and NaN vertices
+    are dropped with their triangles. Voxelized, such a mesh gives zero
+    metal nodes, and an open surface (holes) fills the wrong volume -- a
+    box with two faces removed measured nearly three times the metal --
+    so the solve runs on a geometry the file does not describe."""
+    import numpy as np
+    errs = []
+    if len(m.faces) == 0:
+        errs.append("it has no triangles (the file is empty, truncated or "
+                    "not an STL)")
+        return errs
+    if not np.isfinite(np.asarray(m.vertices, float)).all():
+        errs.append("it has non-finite vertex coordinates")
+    if not m.area > 0:
+        errs.append("its triangles have zero total area (degenerate)")
+    if not m.is_watertight:
+        errs.append("its surface is open (not watertight), so its inside "
+                    "is undefined and voxelizing it fills the wrong volume")
+    return errs
+
+
+def require_sound_mesh(m, where):
+    """Refuse, naming `where`, a mesh mesh_soundness_errors objects to.
+    Every mesh-ingest door applies this before any voxelization."""
+    errs = mesh_soundness_errors(m)
+    if errs:
+        raise ValueError(
+            f"{where}: not a usable electrode mesh -- " + "; ".join(errs)
+            + ". Re-export a closed solid from CAD.")
 
 
 def _require_trimesh():
-    """Import trimesh with an actionable message. THE one definition
-    (L-546): build_stl._require_trimesh (imported by notebook 02) and
+    """Import trimesh with an actionable message. THE one definition:
+    build_stl._require_trimesh (imported by notebook 02) and
     stl_upload delegate here."""
     try:
         import trimesh

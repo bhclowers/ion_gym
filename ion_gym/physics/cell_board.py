@@ -35,7 +35,7 @@ lifting the restriction is a deliberate search-space decision, not a
 default.
 
 Template-based emission: geometry/RF/DC are REPLACED on a deep copy of
-a caller-supplied template SimSpec; integration, collisions, source m/z
+a caller-supplied template SimSpec; integration, collisions, source masses
 set and bounds are INHERITED from the template. The source is
 re-centered to the channel interior.
 """
@@ -61,7 +61,7 @@ RAIL_MIN_MM = 0.4         # minimum ELECTRODE width (fabrication
 RF_MIN_V = 50.0           # |a| below this = RF off (declared dead zone)
 RF_MAX_V = 300.0          # amplitude ceiling
 FREQ_MIN_HZ = 0.5e6       # RF frequency search band (every space's
-FREQ_MAX_HZ = 2.5e6       # default; was retyped in each bounds(), L-552)
+FREQ_MAX_HZ = 2.5e6       # default; was retyped in each bounds())
 
 WALLS = ("bottom", "top", "left", "right")
 
@@ -235,7 +235,7 @@ def _validate_wall(name: str, wall: WallParam, span_mm: float,
                 and r.gap_after_mm > p.min_feature_mm + 1e-9):
             raise CellBoardInfeasible(
                 "{0} wall rail {1} gap {2:.4f} mm > isolation gap {3} mm"
-                " — exposed dielectric charges up (PI 2026-07-28); "
+                " — exposed dielectric charges up; "
                 "gaps are exactly the isolation cut".format(
                     name, i, r.gap_after_mm, p.min_feature_mm))
         if abs(r.rf_signed_v) > RF_MAX_V:
@@ -663,7 +663,7 @@ class MirrorPairSpace:
         if n_rf_pairs < 1:
             raise CellBoardInfeasible(
                 "no RF pair — an all-DC board has no dynamic trap "
-                "(PI 2026-07-29: require >=1 RF pair)")
+                "(require >=1 RF pair)")
         # geometric symmetry is enforced HERE by construction (cell is
         # built mirror-symmetric); mirror_lr stays True for the tb fold.
         return CellBoardParam(
@@ -1039,7 +1039,7 @@ class PlanarCarpetSpace:
                  rf_amp_hi_v=RF_MAX_V, freq_lo_hz=FREQ_MIN_HZ,
                  freq_hi_hz=FREQ_MAX_HZ):
         self.gap_mm = gap_mm
-        # the RF amplitude and frequency search band are ARGUMENTS (L-552:
+        # the RF amplitude and frequency search band are ARGUMENTS (once
         # literals inside bounds()); defaults are the module's named band,
         # so every existing caller searches exactly the same box
         if not (0.0 <= rf_amp_lo_v < rf_amp_hi_v):

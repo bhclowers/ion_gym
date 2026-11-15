@@ -301,16 +301,27 @@ def retire_check(name):
             continue
         try:
             t = ast.parse(q.read_text())
-        except SyntaxError:
-            continue
+        except SyntaxError as e:
+            # as in audit(): a file that does not parse could be an
+            # importer this check cannot see, so the answer would be wrong
+            raise SystemExit(f"K5 CHECK ABORTED: {qrel} does not parse: "
+                             f"{e}") from e
+        # The module is named by its LAST dotted part: package imports
+        # (ion_gym.physics.<name>) are the normal case, and matching the
+        # first part only saw a bare top-level module, so every package
+        # module came back "safe to retire".
         for n in ast.walk(t):
             if isinstance(n, ast.ImportFrom) and n.module:
-                if n.module.split(".")[0] == name:
+                if n.module.split(".")[-1] == name:
                     used = [a.name for a in n.names]
                     hits.append({"importer": str(qrel), "symbols": used})
+                elif any(a.name == name for a in n.names):
+                    # from ion_gym.physics import <name>
+                    hits.append({"importer": str(qrel),
+                                 "symbols": ["<module>"]})
             elif isinstance(n, ast.Import):
                 for a in n.names:
-                    if a.name.split(".")[0] == name:
+                    if a.name.split(".")[-1] == name:
                         hits.append({"importer": str(qrel),
                                      "symbols": ["<module>"]})
     return {"target": str(rel), "defines": sorted(syms), "importers": hits}
@@ -365,7 +376,7 @@ def main():
             print(f"  {x['importer']} <- {x['source']}: {x['names']}")
         print(f"  {len(s2)} site(s)")
         print("\n=== SEVERITY 1 — LAYERING: core/example reaching UP into "
-              "projects/examples (the PI's rule) ===")
+              "projects/examples (the layering rule) ===")
         for x in lay:
             print(f"  {x['importer']} <- {x['source']}: {x['names']}")
         print(f"  {len(lay)} site(s)")

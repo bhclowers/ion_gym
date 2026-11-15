@@ -31,6 +31,7 @@ from ion_gym.physics.build_planar import (electrode_mask,        # shape rasteri
 from ion_gym.physics.symmetry import (verify_symmetry, verify_symmetry_shapes, reduction_summary)
 from ion_gym.physics.collision3d import (E_CHG, KG_AMU)
 from ion_gym.physics.tracer_rz import _fly_rec_full   # THE r-z tracer
+from ion_gym.physics.numba_rng import call_rng_preserved
 
 
 _RZ_BASIS_CACHE = {}
@@ -98,7 +99,7 @@ class RZModel:
             ele, getattr(spec.geometry, 'electrodes', None))
         self.ele = ele
         self.EzA, self.EuA = EzA, EuA
-        # DRIVE CHANNELS (L-455; supersedes the single rf_V*sin*B fold):
+        # DRIVE CHANNELS (supersedes the single rf_V*sin*B fold):
         # EzK/EuK are (K, nz, 2nr-1) per-GROUP aware fields with the
         # group amplitude baked in; the kernel weights each with the
         # UNIT waveform (build_planar._wave_eval). `drives` keeps the
@@ -146,7 +147,7 @@ class RZModel:
     def has_drive(self):
         """True if this model carries any time-dependent drive. Declared
         by the model from its OWN data (`drives`, always set in __init__),
-        read by pe_view.model_has_rf -- never sniffed (2026-09-18)."""
+        read by pe_view.model_has_rf -- never sniffed."""
         return bool(self.drives)
 
     def potential_image(self, rf_phase=None):
@@ -288,6 +289,17 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
                 print(f"rz bases: disk cache hit ({ckey})")
     if cached is not None:
         bases, ele = cached
+        # ZERO-NODE RULE ON A CACHE HIT: checked on the solved bases (an
+        # electrode with no nodes has an identically zero basis), so the
+        # refusal does not depend on what the cache happens to hold.
+        from ion_gym.physics.raster2d import (nodes_from_bases,
+                                              refuse_empty_mask,
+                                              refuse_shared_nodes)
+        for _idx, _b in bases.items():
+            refuse_empty_mask(g.electrodes[_idx - 1], np.asarray(_b) != 0,
+                              route="rz builder (cache hit)", pitch_mm=h)
+        refuse_shared_nodes(nodes_from_bases(bases, 1e4), g.electrodes,
+                            route="rz builder (cache hit)", pitch_mm=h)
     else:
         if masks_override is not None:
             masks = {i: np.asarray(m, bool) for i, m in
@@ -337,19 +349,33 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
             if verbose and (report or mreport):
                 print("symmetry verified:", reduction_summary(sym))
 
+        # THIN-ELECTRODE REFUSAL, the same rule as planar and 3-D: an
+        # electrode no node lands in would be silently absent from the
+        # solve. Checked on injected masks too, which are solved alike.
+        from ion_gym.physics.raster2d import (refuse_empty_mask,
+                                              refuse_shared_nodes)
+        for idx, m in masks.items():
+            refuse_empty_mask(g.electrodes[idx - 1], m, route="rz builder",
+                              pitch_mm=h)
+        # SHARED-NODE REFUSAL, the planar and 3-D rule: a node two
+        # electrodes claim would hold the sum of their voltages.
+        refuse_shared_nodes(masks, g.electrodes, route="rz builder",
+                            pitch_mm=h)
         metal = np.zeros((nz, nr), bool)
         for m in masks.values():
             metal |= m
         # solve one basis per electrode: that electrode at 1e4 V, all
         # other metal at 0 — the fast-adjust bases. Direct sparse solve
         # (exact; no omega/convergence concerns).
-        # FACTOR ONCE (L-439): every basis shares one matrix (same stencil,
+        # FACTOR ONCE: every basis shares one matrix (same stencil,
         # same metal union; only the boundary VALUES differ), so the LU is
         # built once and each basis is a back-solve, as build_planar does.
         # This re-factored per basis. Measured on a toy 4-ring deck: A,
         # EzA and EuA bit-identical, build 4.4x faster.
+        # open edges (z ends, r_max) reflect, as on every route; the axis
+        # keeps its own on-axis stencil
         solve = laplace_factor(metal, h, symmetry="cylindrical",
-                               edge_ghost="ghost_linear")
+                               edge_ghost="mirror")
         bases = {}
         for idx, m in masks.items():
             val = np.zeros((nz, nr))
@@ -402,7 +428,7 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
     # assemble A (DC + drive offsets) + per-GROUP drive channels. DC and
     # drives are independent: every electrode's dc always applies; drive
     # membership is via EVERY named group (the first-group-only read and
-    # the single signed-B fold were the L-455 defect this replaces). A
+    # the single signed-B fold were the defect this replaces). A
     # group's offset_v is a STATIC shift of its members (V(t) =
     # amplitude_v * w(t) + offset_v), so it folds into A exactly, for
     # every waveform kind and even when amplitude_v is 0.
@@ -414,8 +440,13 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
     # amp*(v1 - v0) to the gate basis G, applied from tau on. Exactly
     # parallel to the sin*B channel; ONE tau per model (a second distinct
     # tau refuses with a diagnostic -- single-gate tracer, same doctrine
-    # as the single-B fold). dc holds the PRE-gate state; dc + amp*(v1-v0)
-    # is the post-gate state. Longer tables refuse: not a step.
+    # as the single-B fold). The drive model is the planar one, V(t) =
+    # dc + amp*w(t) + offset_v with w the table value, so the PRE-gate
+    # state dc + amp*v0 + offset_v folds into A and the post-gate state
+    # is that plus amp*(v1 - v0). (The first value and the offset were
+    # once dropped here, so a table [10, 30] with offset 5 drove its
+    # electrode at dc before the gate on r-z and at dc + 15 on planar.)
+    # Longer tables refuse: not a step.
     G = np.zeros((nz, nr))
     tau_gate = -1.0
     for idx, el in enumerate(g.electrodes, start=1):
@@ -444,6 +475,8 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
                     f"{tt[1]} us). The single-gate tracer switches ONCE; "
                     "put all gated electrodes on tables sharing one tau.")
             tau_gate = tt[1]
+            A = A + (gr.amplitude_v * tv[0]
+                     + float(getattr(gr, "offset_v", 0.0))) * fa
             G = G + gr.amplitude_v * (tv[1] - tv[0]) * fa
         for gname in el.group_names():
             if gname not in gmap:
@@ -452,7 +485,7 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
                     f"not in geometry.rf_groups ({sorted(gmap)})")
             drv = gmap[gname]
             if drv.waveform == "table":
-                continue          # table groups are the gate, handled above
+                continue          # the gate, folded above with its offset
             drv.validate()
             off = float(getattr(drv, "offset_v", 0.0))
             if off:
@@ -502,8 +535,8 @@ def build_rz_model(spec: SimSpec, verbose=False, masks_override=None):
 
 
 def unsupported_drive_features(spec):
-    """Declared drive features the r-z kernel does NOT apply: NONE, as of
-    2026-09-16 (L-455). The kernel flies per-group channels — every sin
+    """Declared drive features the r-z kernel does NOT apply: NONE.
+    The kernel flies per-group channels — every sin
     and square group at its own amplitude, frequency, phase and duty,
     with offset_v folded into the static field and multi-group
     membership honoured — plus the 2-point hold-table GATE. General
@@ -525,7 +558,7 @@ def _tab_off0(model):
     return np.zeros(model.EzK.shape[0] + 1, np.int64)
 
 
-def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
+def make_rz_fly_fn(model: RZModel, births, spec: SimSpec, verbose=False):
     """(fly_fn, col_names) reusing the funnel's validated r-z tracer.
     ele mask is mirror-extended (funnel convention)."""
     # The r-z kernel produces exactly these optional channels, in
@@ -538,7 +571,7 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
                    "e_axial_tint", "ke_tint")
     if getattr(spec, "transporter", None) is not None:
         raise ValueError("the r-z route does not implement the periodic "
-                         "transporter (CHARTER_transporter); remove the "
+                         "transporter; remove the "
                          "'transporter' block or fly a 3-D shapes route")
 
     unsupported = [c for c in spec.integration.record_channels
@@ -547,8 +580,8 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
         raise ValueError(
             f"r-z tracer cannot record channel(s) {unsupported}; the r-z "
             f"kernel produces {list(rz_channels)}. (The kernel state is "
-            f"full 3-D Cartesian, so ke_x/ke_y/ke_z ARE available "
-            f"[2026-08-19]; the FIELD, however, is solved as (axial, "
+            f"full 3-D Cartesian, so ke_x/ke_y/ke_z ARE available; "
+            f"the FIELD, however, is solved as (axial, "
             f"radial) on the half-plane, so e_x/e_y/e_z are not "
             f"produced -- record e_axial/e_radial instead.)")
     chans = [c for c in OPTIONAL_CHANNELS
@@ -556,7 +589,7 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
     col_names = BASE_CHANNELS + chans
     # the per-ion mass/accel are chosen inside fly_fn so a single run can
     # mix species (an empty mz_list is refused by SimSpec.validate)
-    # GAS through the one authority (A4, L-531): the same scalars every
+    # GAS through the one authority: the same scalars every
     # route takes; vacuum gives P = 0 (collisionless) and inert thermal
     # placeholders. Values are identical to the old inline derivation,
     # so hard-sphere flights are bit-identical.
@@ -564,19 +597,19 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
                                              resolve_collisions)
     from ion_gym.physics.ccs import ion_sigma_m2   # per-ion sigma
     from ion_gym.physics.sds import (sds_active, sds_ion_params,
-                                     load_tables, blank_collision_channel)
+                                     jump_statistics, blank_collision_channel)
     col = spec.collisions
     g = gas_kernel_scalars(col)
     mg, T, P = g["m_gas"], g["T_k"], g["P_pa"]
     c_star, c_bar, sig1d = g["c_star"], g["c_bar"], g["sig1d"]
-    # SDS on r-z (L-519; PI 2026-10-14: implemented, not refused).
+    # SDS on r-z (implemented, not refused).
     # sds_active refuses an unknown model name.
     sds_on = sds_active(col)
-    sds_stats = (load_tables()[0] if sds_on
+    sds_stats = (jump_statistics() if sds_on
                  else np.zeros((5, 1002)))   # typed placeholder, unread
     # the declared gas flow (mm/us, x axial on this route) for HS AND SDS:
     # it reached the kernel only under SDS, so hard-sphere r-z flew a
-    # declared flow as still gas (L-563, PI ruling 2026-10-16: modelled)
+    # declared flow as still gas (it is modelled now)
     from ion_gym.physics.collision3d import gas_flow
     vg = list(gas_flow(col))
     ee = np.concatenate([model.ele[:, :0:-1], model.ele],
@@ -635,6 +668,9 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
                "x_hi": 1e-3 * edge_field_max([_ez_c, _eu_c], 0, "hi"),
                "r_hi": 1e-3 * edge_field_max([_ez_c, _eu_c], 1, "hi")}
     _nx_gu = model.EzA.shape[0]
+    # seed policy resolved ONCE per run (the births' base), as on 3-D
+    from ion_gym.physics.ion_envelope import run_seed_base
+    _seed_base = run_seed_base(spec, verbose=verbose)
 
     def fly_fn(i):
         b = births[i]
@@ -642,6 +678,12 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
                                               BirthInMetal)
         _r = math.hypot(b[1], b[2])
         try:
+            from ion_gym.physics.birth_domain import refuse_birth_outside
+            refuse_birth_outside(
+                model.ele.shape, (b[0] / model.mm_per_gu,
+                                  _r / model.mm_per_gu),
+                ("x", "r"), model.mm_per_gu, f"ion {i} ",
+                f"(x={b[0]:.3f}, r={_r:.3f}) mm")
             refuse_birth_in_metal(
                 model.ele, b[0] / model.mm_per_gu, _r / model.mm_per_gu,
                 model.mm_per_gu, spec, i,
@@ -658,7 +700,7 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
         # the reproducibility seed. Both the acceleration scaling and
         # the recorded KE depend on mass.
         from ion_gym.physics.ion_envelope import per_ion
-        env = per_ion(spec, i)
+        env = per_ion(spec, i, seed_base=_seed_base)
         m_i = env.mz
         acc_i = q_e * E_CHG / (m_i * KG_AMU)
         # SDS per ion: this ion's mass and real charge (ion_params damps
@@ -680,7 +722,7 @@ def make_rz_fly_fn(model: RZModel, births, spec: SimSpec):
                      / max(spec.integration.rec_every, 1)) + 8
         n_rows = min(max(n_rows, 16), 4_000_000)
         rec = np.empty((n_rows, len(col_names)))
-        n, kind, ncol, _bface = _fly_rec_full(
+        n, kind, ncol, _bface = call_rng_preserved(_fly_rec_full,
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], m_i,
             model.EzA, model.EuA, model.EzK, model.EuK,
             model.ch_kind, model.ch_om, model.ch_ph, model.ch_duty,
@@ -780,6 +822,6 @@ def build_rz_run(spec: SimSpec, verbose=False):
     """SimSpec (rz) -> (model, fly_fn, col_names, births). Independent."""
     model = build_rz_model(spec, verbose=verbose)
     births = generate_births(spec)
-    fly_fn, cols = make_rz_fly_fn(model, births, spec)
+    fly_fn, cols = make_rz_fly_fn(model, births, spec, verbose=verbose)
     model.fly_fields = rz_fly_fields(model, spec)
     return model, fly_fn, cols, births

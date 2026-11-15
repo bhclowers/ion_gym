@@ -89,7 +89,7 @@ def main():
     from ion_gym.io.sim_spec import SimSpec
     from pathlib import Path as _P
     # THE quad fixture (STL rods + deck, generated once from the retired
-    # examples/stl_demos generator; D6c, 2026-08-18 pattern)
+    # examples/stl_demos generator)
     qspec = SimSpec.from_json(str(_P(__file__).resolve().parent / "fixtures"
                                   / "stl_quad" / "quad_stl_transport.json"))
     qm, qf, qc, qb = build_stl_run(qspec, ground_border=True)
@@ -194,7 +194,7 @@ def main():
     app._model, app._cols = qm, qc
     app.w_showfield.value = True
     app.w_fieldmode.value = "PE surface (effective)"
-    # The PE m/z widget lives on the PE tab. A second copy on the
+    # The PE ion-mass widget (w_mz, mass in Da) lives on the PE tab. A second copy on the
     # Display tab was removed as a duplicate, and app.w_pe_mz went
     # with it; the draw path reads self._pe_tab.w_mz, so the gate
     # sets the SAME widget the renderer reads.

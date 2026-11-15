@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "name": "SLIM 3D",
- "notes": "SLIM tetramer, full 3-D, authored natively as inline extruded shapes (no geometry files). Axes: x = transport (37 mm), y = board gap (mirror axis; half-domain 0..2.05 mm with grid.mirror='y' giving two boards and a 2.75 mm gap between inner faces at y = \u00b11.375 mm), z = board width (13 mm, five rungs). RF rails confine across the gap; travelling DC rungs carry ions along x. | 2026-09-15 (L-448): rec_every 20 -> 37. At dt_ns=1 over t_max_us=3600 this wanted 180,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- so this deck was recording only the first 2,000 us of the flight. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 180,002 records per ion.",
+ "notes": "SLIM tetramer, full 3-D, authored natively as inline extruded shapes (no geometry files). Axes: x = transport (37 mm), y = board gap (mirror axis; half-domain 0..2.05 mm with grid.mirror='y' giving two boards and a 2.75 mm gap between inner faces at y = \u00b11.375 mm), z = board width (13 mm, five rungs). RF rails confine across the gap; travelling DC rungs carry ions along x. RECORDING: rec_every 37. At dt_ns=1 over t_max_us=3600, rec_every 20 would want 180,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- only the first 2,000 us of the flight would be recorded. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 180,002 records per ion. Detector station (transparent, on_hit pass) on x at 36.076 mm, ten grid pitches inside the downstream board end (36.576 mm); it feeds the Impact Analysis tab and changes no flight. Detector window: window y = [3.15, 9.144] mm between the guard electrodes, z = +/-1.375 mm between the board faces (z mirror at 0).",
  "geometry": {
   "width_mm": 37.050000000000004,
   "height_mm": 12.350000000000001,
@@ -2712,7 +2712,6 @@
   "gas": "N2",
   "T_k": 298.15,
   "P_torr": 2.5,
-  "sigma_m2": 2.27e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,
   "flow_mm_us": [
@@ -2764,5 +2763,24 @@
  "builder": "",
  "import_path": "",
  "scene": null,
- "_display_name": "SLIM (3D)"
+ "_display_name": "SLIM (3D)",
+ "stations": [
+  {
+   "name": "detector",
+   "kind": "detect",
+   "on_hit": "pass",
+   "axis": "x",
+   "pos_mm": 36.076,
+   "window": {
+    "y": [
+     3.15,
+     9.144
+    ],
+    "z": [
+     -1.375,
+     1.375
+    ]
+   }
+  }
+ ]
 }

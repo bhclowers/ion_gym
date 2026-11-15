@@ -7,22 +7,22 @@ their unit bases into that channel's field). Waveform evaluation REUSES
 tracer3d._wave_eval (K_SIN/K_COS/K_SQUARE/K_TAB_*) — the phase/frequency
 conventions are pinned in test_tw2d.py and never re-derived here.
 
-Why this exists (measured, v83): per-ion fly 0.01 s in 2-D vs 9.2 s through
-the 3-D channel kernel (662x) — roll-over sweeps and optimizer loops need
+Why this exists (measured on an early version): per-ion fly 0.01 s in
+2-D vs 9.2 s through the 3-D channel kernel (662x) — roll-over sweeps and optimizer loops need
 the 2-D kernel. A stepped multi-phase SQUARE wave cannot fold into one
 quadrature pair, so each group is its own channel here.
 
-RE-STAMP (2026-09-09, v510, like-for-like on the Gate D/E duct with
+RE-STAMP (like-for-like on the Gate D/E duct with
 identical dynamics certified by those gates; container timings, ratios
-portable): 3-D/tw2d = 2.3x vacuum, 1.7x HS — the v83 662x does NOT
+portable): 3-D/tw2d = 2.3x vacuum, 1.7x HS — the earlier 662x does NOT
 reproduce on the current tree for this case (the 3-D kernel has been
-heavily optimized since v83; whether production-scale decks widen the
+heavily optimized since; whether production-scale decks widen the
 ratio is unmeasured). planar/tw2d = 0.78x vacuum, 0.84x HS: the
 spec-routed planar (Verlet) route is ~20% FASTER than this kernel on
 the identical case. tw2d's remaining distinct value: RK4 bit-parity
 with the 3-D kernel (Gates D/E) and the lean direct-call API.
 Numbers + operating point are banked with the kernel-benchmark record
-in the development tree. Supersession is a PI ruling (L-427).
+in the development tree.
 
 Conventions (from the contract):
   * RFGroupSpec.frequency_hz is the WAVEFORM frequency f_waveform;
@@ -45,6 +45,7 @@ from ion_gym.physics.tracer3d import (_wave_eval,
                       K_SIN, K_COS, K_SQUARE, E_CHG, AMU)
 from ion_gym.physics.collision3d import (gas_kernel_scalars,
                                          hs_collision_step)
+from ion_gym.physics.numba_rng import call_rng_preserved
 
 
 # ------------------------------------------------------------- interpolation
@@ -100,7 +101,7 @@ def _fly_tw2d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
     K = ch_kind.shape[0]
     # m_ion_amu (true ion mass, Da) is a PARAMETER — formerly
     # back-derived as (E_CHG/qm)/AMU, correct only at charge=1
-    # (issues.md 2026-09-09; mirrors the tracer3d fix).
+    # (mirrors the tracer3d fix).
     ncol = 0
     if collide_on:
         np.random.seed(seed)
@@ -178,7 +179,7 @@ def _fly_tw2d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
 
         if collide_on:
             # the shared gas-frame HS step against the declared flow
-            # (gfx, gfy, gfz) mm/us (L-563); m/s <-> mm/us as before
+            # (gfx, gfy, gfz) mm/us; m/s <-> mm/us as before
             spx = vx * 1e-3; spy = vy * 1e-3; spz = vz * 1e-3
             nvx, nvy, nvz, _hit = hs_collision_step(
                 spx, spy, spz, gfx, gfy, gfz, dt_s, 1e6, T_k, P_pa,
@@ -230,8 +231,7 @@ def _fly_tw2d(qm, m_ion_amu, x0, y0, z0, vx0, vy0, vz0, tob_us, dt_s, t_max_s,
 
 # ------------------------------------------------------------- field pack
 def fly_tw2d_ion(spec, fields, i, **kw):
-    """Spec-authority front door for fly_tw2d (charter conformance,
-    2026-09-09): the ion's MASS comes from sim_build.mz_of(spec, i) and
+    """Spec-authority front door for fly_tw2d: the ion's MASS comes from sim_build.mz_of(spec, i) and
     its CHARGE from spec.source.charge — the same single authorities
     every spec-routed builder uses — instead of free-floating direct
     arguments. All other fly_tw2d keywords pass through unchanged.
@@ -312,16 +312,22 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
     default). mz_Da carries the ion MASS in Da (same convention as the
     3-D, r-z, and SDS routes); q/m = charge*e/(mass*amu). This route
     formerly HARD-CODED q = +1e — the same defect the 3-D kernel's
-    charge-state note records as fixed there (issues.md 2026-09-09)."""
+    charge-state note records as fixed there."""
     # birth-in-metal refusal, THIS route's impact predicate (the 4-corner
     # cell rule) so the refusal boundary equals the impact boundary.
     # build_tw2d_fields normalizes a missing mask to all-False, in which
     # case nothing can impact and this naturally never fires.
     _ele = np.ascontiguousarray(fields["ele"])
     _h = float(fields["h_mm"])
+    who = f"{ion_label} " if ion_label else ""
+    from ion_gym.physics.birth_domain import refuse_birth_outside
+    refuse_birth_outside(
+        _ele.shape[:2], (float(r0_mm[0]) / _h, float(r0_mm[1]) / _h),
+        ("x", "y"), _h, who,
+        f"(x={float(r0_mm[0]):.3f}, y={float(r0_mm[1]):.3f}) mm "
+        f"(local frame)")
     if _in_metal_2d(_ele, float(r0_mm[0]) / _h, float(r0_mm[1]) / _h,
                     _ele.shape[0], _ele.shape[1]):
-        who = f"{ion_label} " if ion_label else ""
         from ion_gym.physics.raster2d import BirthInMetal
         raise BirthInMetal(
             f"{who}birth at (x={float(r0_mm[0]):.3f}, "
@@ -334,7 +340,7 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
             "State the charge state (source.charge) rather than flying a "
             "neutral through an electrostatic field.")
     qm = int(charge) * E_CHG / (mz_Da * AMU)
-    # The one gas authority (L-531, R3): missing fields take the spec's
+    # The one gas authority: missing fields take the spec's
     # values; vacuum resolves nothing.
     from ion_gym.physics.sds import sds_active
     if sds_active(collisions):
@@ -350,7 +356,7 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
     from ion_gym.physics.collision3d import resolve_collisions
     sigma = ion_sigma_m2(resolve_collisions(collisions), mz_Da, charge)
     c_star, c_bar, sig1d, mg = g["c_star"], g["c_bar"], g["sig1d"], g["m_gas"]
-    # declared gas flow, modelled in the HS step (L-563; it was dropped)
+    # declared gas flow, modelled in the HS step (it was once dropped)
     from ion_gym.physics.collision3d import gas_flow
     gfx, gfy, gfz = gas_flow(collisions)
     nmax = int(min(max_records,
@@ -358,7 +364,7 @@ def fly_tw2d(fields, mz_Da, r0_mm, v0_mm_us, tob_us=0.0, dt_ns=1.0,
     xs = np.empty(nmax); ys = np.empty(nmax); zs = np.empty(nmax)
     ts = np.empty(nmax)
     vxs = np.empty(nmax); vys = np.empty(nmax); vzs = np.empty(nmax)
-    nrec, kind, ncol = _fly_tw2d(
+    nrec, kind, ncol = call_rng_preserved(_fly_tw2d,
         qm, float(mz_Da), float(r0_mm[0]), float(r0_mm[1]),
         float(r0_mm[2]) if len(r0_mm) > 2 else 0.0,
         float(v0_mm_us[0]) * 1e3, float(v0_mm_us[1]) * 1e3,

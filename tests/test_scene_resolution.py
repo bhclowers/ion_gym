@@ -238,7 +238,7 @@ p3 = propose_sizing_scene(sc.at_resolution(0.4), pitch=0.4,
                           min_feature_mm=0.5)
 gate("S5.warns", any("smeared" in w for w in p3.warnings),
      "under-resolved feature (0.5 mm at 0.4 mm/gu) is warned about")
-# L-565 (PI-approved contract change 2026-10-15): a scene's grid is the
+# Contract change: a scene's grid is the
 # STORED/FOLDED frame, so its declared mirror is already cut away -- the
 # estimate reports it and solves the stored grid as-is. This gate used to
 # assert a further 4x credit, which under-quoted mirrored scenes.

@@ -19,7 +19,7 @@ courtesy ghost with a 270-degree cutaway; planar gets xy + perspective
 with the display-only ghost slab.  Anything the viewer cannot draw
 faithfully is written into the legend, never silently dropped.
 
-three.js is pinned at r170 (PI ruling 2026-10-24), the same pin as the
+three.js is pinned at r170, the same pin as the
 Slice 1 probe. r169 made TransformControls a Controls object rather than
 an Object3D, so the gizmo joins the scene through its helper,
 scene.add(gizmo.getHelper()). r170 is the last release that ships one
@@ -50,13 +50,13 @@ DEFAULT_HEIGHT = 620
 # the version + integrity authority (the release gate checks the
 # hashes); updating is a deliberate, separate step
 # (release tooling ASKS about updates, never applies them).
-# If those files are missing (PI ruling 2026-10-15): TRY the jsdelivr CDN
+# If those files are missing: TRY the jsdelivr CDN
 # of the SAME version -- every file the viewer needs is probed first --
 # and use it with a visible warning; if the CDN cannot be reached either,
 # REFUSE, stating both causes. Never a silent fallback, never a blank
 # canvas.
 #
-# RESOLVED ON FIRST USE, NOT AT IMPORT (L-550): importing this module used
+# RESOLVED ON FIRST USE, NOT AT IMPORT: importing this module used
 # to read and base64-encode every vendored file and could warn; the map
 # is now built when the viewer first renders (Panel's _process_importmap
 # hook) and cached.
@@ -133,7 +133,7 @@ def resolve_importmap():
     manifest = _VENDOR_DIR / "VENDOR_MANIFEST.json"
     missing = [str(p) for p in [manifest, *files.values()] if not p.is_file()]
     if not missing:
-        ver = _json.loads(manifest.read_text()).get("version", "unknown")
+        ver = _json.loads(manifest.read_text(encoding="utf-8")).get("version", "unknown")
         if ver != THREE_VERSION:
             raise ViewerUnavailable(
                 f"vendored three.js is version {ver!r} but the viewer is "
@@ -188,8 +188,8 @@ class EditorViewer(JSComponent):
                           "path) keying the JS-side camera memo: the "
                           "perspective pose survives the post-Apply "
                           "viewer rebuild for the SAME document and "
-                          "resets on a document switch (PI "
-                          "2026-08-26: editing must not move the view)")
+                          "resets on a document switch (editing "
+                          "must not move the view)")
 
     @classproperty
     def _importmap(cls):
@@ -217,7 +217,7 @@ class EditorViewer(JSComponent):
     const LATHE_SEG     = 48;
     const LATHE_SWEEP   = 1.5 * Math.PI;   // 270 deg cutaway, view only
 
-    // CAMERA MEMO (PI 2026-08-26: editing an electrode must not
+    // CAMERA MEMO (editing an electrode must not
     // move the 3-D view — a reset camera makes it hard to see whether
     // the change was accepted). Each commit swaps in a NEW component
     // instance, but this ESM module is a page-lifetime singleton, so
@@ -248,7 +248,7 @@ class EditorViewer(JSComponent):
     export function render({ model }) {
       const pay = model.payload || {};
       const scene2 = pay.scene || {}, prims = pay.prims || {};
-      // PAYLOAD FRAME (2026-09-12, the x-extrusion fix): which WORLD
+      // PAYLOAD FRAME (the x-extrusion fix): which WORLD
       // axis each viewer axis displays. Python resolves it
       // (policy.viewer_frame via prims.frame); a payload without one
       // is the identity — the pre-frame contract. The geometry itself
@@ -261,18 +261,18 @@ class EditorViewer(JSComponent):
         ? prims.frame.axes : ['x', 'y', 'z'];
       const W2V = {};                       // world name -> viewer axis
       FRAME.forEach((w, i) => { W2V[w] = 'xyz'[i]; });
-      // stretch policy (PI 2026-08-25): canvas_w is only the
+      // stretch policy: canvas_w is only the
       // pre-layout FALLBACK; a ResizeObserver below re-fits the
       // canvas to its container on every width change.
       const MIN_W = 480;
       let W = Math.max(MIN_W, model.canvas_w || 940);
-      // VERTICAL STACK (PI 2026-08-25): perspective on top,
+      // VERTICAL STACK: perspective on top,
       // every other view below it, each full width — horizontal
       // packing was what pushed the perspective off-screen.
       const PERSP_H = model.canvas_h || 440;
       const ORTHO_H = 260;
       // H must exist BEFORE the renderer (renderer.setSize uses
-      // it): v419 shipped a temporal-dead-zone crash ('Cannot
+      // it): an earlier version shipped a temporal-dead-zone crash ('Cannot
       // access H before initialization') by computing it after the
       // views. Row plan from the policy's viewport list, filtered
       // to the known set; the views loop below still reports any
@@ -294,7 +294,7 @@ class EditorViewer(JSComponent):
 
       try {
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0xf4f4f2);  // light (PI 2026-08-25: dark hid electrodes)
+        scene.background = new THREE.Color(0xf4f4f2);  // light (dark hid electrodes)
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setPixelRatio(window.devicePixelRatio || 1);
         renderer.setSize(W, H);
@@ -310,7 +310,7 @@ class EditorViewer(JSComponent):
         const gStored = new THREE.Group();
         const gGhost = new THREE.Group();
 
-        // QUARTER CUTAWAY (PI 2026-09-06: "extends across the entire
+        // QUARTER CUTAWAY ("extends across the entire
         // assembly"): Python sends prims.quarter_cut = {x_mm, y_mm}
         // (the drawn metal's bbox centre) and BOTH material factories
         // carry two clipping planes with clipIntersection, so the
@@ -353,7 +353,7 @@ class EditorViewer(JSComponent):
             } else if (oop.kind === 'declared_depth') {
               // symmetric fallback: centre the slab on z=0 over the
               // declared depth (extrude3d.py, which this cited, was
-              // deleted 2026-08-30 as an orphan)
+              // deleted as an orphan)
               const d = oop.depth_mm;
               mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shp,
                 { depth: d, bevelEnabled: false }), mat);
@@ -458,7 +458,7 @@ class EditorViewer(JSComponent):
                      'shape x/y are the in-plane (' + FRAME[0] + ', ' +
                      FRAME[1] + ') coordinates.');
 
-        // SELECTED-ELECTRODE HIGHLIGHT (PI 2026-08-25): emissive
+        // SELECTED-ELECTRODE HIGHLIGHT: emissive
         // tint on every mesh of the selected electrode, including its
         // mirror ghosts, driven LIVE by the synced param — no rebuild.
         const HILITE = new THREE.Color(0x2266ff);
@@ -507,11 +507,11 @@ class EditorViewer(JSComponent):
             ' (field build ' + cont.build_s + ' s)');
         }
 
-        // FLIGHT TRAJECTORIES (L-197): world-frame polylines banked by
+        // FLIGHT TRAJECTORIES: world-frame polylines banked by
         // the last-flight slot. Base layer 0 — visible in the
         // perspective AND every ortho view (contours stay layer 2 by
-        // their 2-D-views ruling). STYLE comes from the payload (PI
-        // 2026-08-26: scheme + width + opacity are user controls);
+        // their 2-D-views ruling). STYLE comes from the payload
+        // (scheme + width + opacity are user controls);
         // drawn as Line2 fat lines because WebGL ignores
         // LineBasicMaterial.linewidth on essentially every platform —
         // a plain width knob would be a dead control. LineMaterial
@@ -528,8 +528,8 @@ class EditorViewer(JSComponent):
             st.opacity === undefined ? 0.85 : st.opacity));
           const solid = new THREE.Color(st.color || '#c83c3c');
           const nP = fl.paths.length;
-          // COLORMAP LUTs (PI 2026-08-26: "add a few more color
-          // schemes too (maybe plasma or similar)") — 8-anchor linear
+          // COLORMAP LUTs (plasma and similar color
+          // schemes) — 8-anchor linear
           // interpolations of the matplotlib maps; one `ramp(t)` serves
           // the per-ion ramp AND every parameter ramp (speed/time/KE),
           // so "colormap" means the same thing in every mode.
@@ -539,7 +539,7 @@ class EditorViewer(JSComponent):
             'viridis': [[68,1,84],[70,50,127],[54,92,141],[39,127,142],
                         [31,161,135],[74,194,109],[159,218,58],[253,231,37]],
           };
-          const cmap = st.cmap || 'cool-warm';
+          const cmap = st.cmap || 'plasma';   // = flight_view.DEFAULT_CMAP
           const ramp = (t) => {
             t = Math.min(1, Math.max(0, t));
             const lut = LUTS[cmap];
@@ -667,7 +667,7 @@ class EditorViewer(JSComponent):
             orbit.target.copy(ctr);
             // camera memo: restore this document's banked pose so a
             // post-Apply rebuild shows the SAME view (see CAM_MEMO).
-            // Backed by localStorage (PI 2026-09-07: a hard refresh of
+            // Backed by localStorage (a hard refresh of
             // the /flight tab reset the perspective): the in-module
             // memo dies with the page, so on a miss the pose is read
             // back from localStorage under a namespaced key, and every
@@ -961,6 +961,6 @@ def view_document(path, width: int = DEFAULT_WIDTH,
         return pn.pane.Markdown(
             f"### Viewer refuses this document\n**{e}**\n\n"
             f"(Editor scope: parametric single-FA specs on the planar, "
-            f"r-z and shapes3d routes — L-193.)",
+            f"r-z and shapes3d routes.)",
             width=width)
     return viewer_for_session(session, width=width, height=height)

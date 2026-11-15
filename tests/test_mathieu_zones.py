@@ -1,6 +1,6 @@
 """Digital-drive stability zones against the published reference
 (Hu and Gundlach-Graham, Rapid Commun. Mass Spectrom. 38 (2024) e9753,
-Table 1). Requested by Brian 2026-10-21.
+Table 1).
 
 Pins physics.mathieu.meissner_half_trace — the exact two-segment
 one-period transfer matrix — to the paper's four operating zones: band

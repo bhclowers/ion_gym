@@ -1,6 +1,6 @@
-"""Figure-dispatcher retention harness — chartered by the PI 2026-09-29.
+"""Figure-dispatcher retention harness.
 
-The defect it guards against (L-516, field-confirmed the same night):
+The defect it guards against (field-confirmed):
 Bokeh retains a STOPPED periodic callback for the session's lifetime,
 so any closure chain riding the worker+poll pattern is immortal.
 Whatever those closures captured is pinned with them — measured live on
@@ -121,7 +121,7 @@ def _assert_freed(ref, who):
 # ---------------------------------------------------------------------------
 
 def _apply_with_prep_pack(delivered):
-    """The L-516 shape, built in its own scope: apply closes over a
+    """The leaking shape, built in its own scope: apply closes over a
     prep pack `p` holding the model — the exact capture the referrer
     walk named (SimpleNamespace.model). Only the weakref leaves this
     factory, so once the dispatcher drops its consumer refs nothing

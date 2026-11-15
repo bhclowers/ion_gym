@@ -12,7 +12,7 @@ point with two paths:
   (notebooks/panels/), which SHIPS: display it directly. The bank used to
   live under notebooks/out/_panels, regenerable state that no zip and no
   checkout carries, so this path never fired outside the tree that built
-  it and every notebook paid a live rebuild on open (PI 2026-09-22).
+  it and every notebook paid a live rebuild on open.
 * SELF-CONTAINED PATH — build the deck, fly a few example ions, and
   render through viz_core, exactly the content the bank carries,
   generated live. DISPLAY == SOLVER INPUT holds on both paths; the live
@@ -41,7 +41,7 @@ def show_instrument_panel(deck, *, banked=None, height=520, n_ions=24,
               is a BUNDLE, not a token few: three paths cannot show the
               spread a diffusive or space-charge-free device produces,
               and an intro figure that hides the spread misleads. On a
-              multi-m/z deck this is per m/z, so a 3-mass packet flies
+              multi-mass deck this is per mass, so a 3-mass packet flies
               3x this many. Cost at 24 is a few seconds on the measured
               decks (drift tube ~5 s, funnel ~15 s, the rest under 1 s).
     title   : overrides the scene title (default: deck name + operating

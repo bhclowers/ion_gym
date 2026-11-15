@@ -50,7 +50,7 @@ def check(name, fn):
 def _solved_bases():
     """Real 3-rod scene -> (unit bases (÷v_basis, as build_stl3d_run
     does), the rastered label grid). The label grid is passed to the
-    composer EXPLICITLY (L-518: production stashed it as an attribute on
+    composer EXPLICITLY (production once stashed it as an attribute on
     a plain dict, which always failed; this fixture's dict subclass hid
     that)."""
     rods = [(1, 3), (6, 3), (3.5, 5)]

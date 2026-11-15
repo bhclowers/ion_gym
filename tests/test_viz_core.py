@@ -344,7 +344,7 @@ def test_V5_report_writes_panels_and_an_index(tmp_path):
 
 
 # ======================================================================
-# V6..V10 -- the Q3 lessons, gated (v144).  Each of these was a thing the
+# V6..V10 -- the Q3 lessons, gated.  Each of these was a thing the
 # Q3 one-off script did BY HAND; each is now framework, so each needs a gate
 # or it will be re-implemented (or re-broken) by the next subsystem.
 # ======================================================================
@@ -477,8 +477,8 @@ def _rf_phase_spec(v_rf=150.0, f_rf_hz=2.4e6, mm_per_gu=0.25):
     def _rod(name, cx, cy, grp, col):
     # Gate repair: ElectrodeSpec's RF membership field is
         # `rf_groups` (a list) — this fixture still used the pre-rename
-        # singular `rf_group=` kwarg and V9 has been un-constructable in
-        # stock v206 since the schema change. Behavior asserted by the
+        # singular `rf_group=` kwarg and V9 had been un-constructable
+        # since the schema change. Behavior asserted by the
         # gate is unchanged.
         return ElectrodeSpec(name=name, dc=0.0, rf_groups=[grp], color=col,
             shapes=[ShapeSpec("rect", {"x_mm": cx - 0.6, "y_mm": cy - 0.6,
@@ -657,7 +657,7 @@ def test_V15_models_declare_their_planes_and_nothing_sniffs_a_signature():
     class Exploding:
         PLANES = ("xy", "xz", "yz")
         # the CURRENT pe_surface signature (t_us joined it with the lab-time
-        # view, L-562), so the call reaches the body and the TypeError
+        # view), so the call reaches the body and the TypeError
         # raised there is the one under test
         def pe_surface(self, mz=None, charge=1, plane="xy", t_us=0.0):
             raise TypeError("unsupported operand type(s) for *: 'NoneType'")
@@ -986,7 +986,7 @@ def _analysis_series():
 
 
 def test_V21_analysis_figure_groups_every_ion_by_name():
-    """L-548/L-530 (D3): the Analysis tab's figure. Colouring by fate or m/z
+    """The Analysis tab's figure. Colouring by fate or m/z
     is honoured in EVERY kind (single-stage trajectory mode drew one series),
     the unknown fate and the unknown m/z are named groups (they were dropped
     or given a stand-in), and no ion is lost from any grouping."""
@@ -1002,9 +1002,9 @@ def test_V21_analysis_figure_groups_every_ion_by_name():
         n = sum(int(np.isfinite(np.asarray(tr.x, float)).sum())
                 for tr in fig.data)
         assert n == sum(len(x.x) for x in s), (kind, n)
-        fig, _ = V.analysis_figure(s, kind=kind, group="m/z", **kw)
+        fig, _ = V.analysis_figure(s, kind=kind, group="mass", **kw)
         assert [tr.name for tr in fig.data] == [
-            "m/z 100", "m/z 1234.5678", "m/z unknown"], kind
+            "100 Da, 1+", "1234.5678 Da, 1+", "mass unknown"], kind
     # unknown kind / group refused by name, never drawn as something else
     with pytest.raises(ValueError, match="kind"):
         V.analysis_figure(s, kind="scatter", group="ion", **kw)
@@ -1026,7 +1026,7 @@ def test_V21_analysis_trace_cap_is_reported():
 
 
 def test_V21_mz_key_round_trips_the_flown_value():
-    """L-552 (D3): the selector offered '%g' labels (6 figures) and matched
+    """The m/z selector offered '%g' labels (6 figures) and matched
     them to the flown value within 1e-9, so m/z 1234.5678 could never be
     selected. The offered key IS the match key."""
     for mz in (100.0, 1234.5678, 0.001234, 56789.01234):
@@ -1035,7 +1035,7 @@ def test_V21_mz_key_round_trips_the_flown_value():
 
 
 def test_V22_hotspot_map_is_the_binned_maximum_at_the_stated_floor():
-    """L-548 (D4): the hot-spot map. Each cell is the MAXIMUM KE in it, the
+    """The hot-spot map. Each cell is the MAXIMUM KE in it, the
     count is cells >= the stated threshold (0 is a threshold, not blank),
     and a non-positive cell size is refused, not replaced."""
     pytest.importorskip("scipy")

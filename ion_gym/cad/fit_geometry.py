@@ -120,7 +120,7 @@ def _fit_circle(P, region=None):
                     best = (m, cx, cy, lo, hi)
         # a non-positive margin after the coarse pass is NOT final: the
         # finer passes may still find one (the infeasible case is refused
-        # below). A dead `if ...: pass` said this; L-556.
+        # below). A dead `if ...: pass` once said this.
     m, cx, cy, lo, hi = best
     if m <= 1e-9:
         return None

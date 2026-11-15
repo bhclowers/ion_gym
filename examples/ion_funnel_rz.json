@@ -1,7 +1,7 @@
 {
  "schema_version": 1,
  "name": "Ion Funnel (r-z)",
- "notes": "Stacked-ring ion funnel with a conductance-limit exit, r-z symmetric. Geometry of record: 18 ring electrodes, thickness 0.6 mm, gap 1.4 mm (pitch 2.0 mm), inner diameter tapering 12.5 mm down to 2.50 mm, wall (OD-ID)/2 = 2.00 mm on every ring. The last element is a DC-only conductance limit 'conductance_limit': orifice i.d. 2.5 mm, thickness 0.6 mm, faces at x = 37.7 and 38.3 mm, dc 25 V. Transmission = fate 3 at the bounding plane x = 38.4 mm, 0.1 mm behind the CL. Domain ends at x = 39 mm; open edges are Neumann, so the tail floats near the CL potential (no downstream stage or orifice gas jet modelled). RF confines radially while the DC ladder walks ions down the taper. The ladder is written in the weighted form (interp 'weights', dc_weight = (rung-1)/17), which gives exactly the linear 100 -> 75 V ladder; a drop concentrated at the exit is a change of weights (internal/studies/funnel_opt/funnel_dc.py). Collisions: hard sphere with per-ion cross sections from the N2 CCS fit (sigma_model 'ccs_fit', class 'all'). Solved at 0.05 mm/gu so every dimension above is exact on the lattice. | 2026-10-19 (L-577): solid exit plate replaced by the conductance limit and bounding plane of the funnel_opt study, ladder rewritten in the weighted form with unchanged voltages, collisions set to hard sphere with the CCS fit (Brian). | 2026-09-15 (L-448): rec_every 10 -> 16. At dt_ns=2 over t_max_us=3000 this wanted 150,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- so this deck was recording only the first 2,000 us of the flight. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 150,002 records per ion.",
+ "notes": "Stacked-ring ion funnel with a conductance-limit exit, r-z symmetric. Geometry of record: 18 ring electrodes, thickness 0.6 mm, gap 1.4 mm (pitch 2.0 mm), inner diameter tapering 12.5 mm down to 2.50 mm, wall (OD-ID)/2 = 2.00 mm on every ring. The last element is a DC-only conductance limit 'conductance_limit': orifice i.d. 2.5 mm, thickness 0.6 mm, faces at x = 37.7 and 38.3 mm, dc 25 V. Transmission = fate 3 at the bounding plane x = 38.4 mm, 0.1 mm behind the CL. Domain ends at x = 39 mm; open edges are Neumann, so the tail floats near the CL potential (no downstream stage or orifice gas jet modelled). RF confines radially while the DC ladder walks ions down the taper. The ladder is written in the weighted form (interp 'weights', dc_weight = (rung-1)/17), which gives exactly the linear 100 -> 75 V ladder; a drop concentrated at the exit is a change of weights. Collisions: hard sphere with per-ion cross sections from the N2 CCS fit (sigma_model 'ccs_fit', class 'all'). Solved at 0.05 mm/gu so every dimension above is exact on the lattice. RECORDING: rec_every 16. At dt_ns=2 over t_max_us=3000, rec_every 10 would want 150,002 records against max_records=100,000, and max_records TRUNCATES rather than thins -- only the first 2,000 us of the flight would be recorded. Thinning keeps the WHOLE flight at a lower sample rate; raising the cap instead keeps the rate and costs 150,002 records per ion. Detector station (transparent, on_hit pass) on x at 37.9 mm, ten grid pitches inside the terminal bound so recorded steps bracket the crossing; it feeds the Impact Analysis tab and changes no flight. Detector window: window y, z = +/-1.25 mm: the bore radius of the electrode nearest the plane (conductance_limit), as a square about the axis because station windows are rectangles.",
  "geometry": {
   "width_mm": 39.0,
   "height_mm": 9.6,
@@ -638,7 +638,6 @@
   "gas": "N2",
   "T_k": 273.0,
   "P_torr": 2.5,
-  "sigma_m2": 2.27e-18,
   "model": "hs",
   "gas_diam_nm": 0.366,
   "flow_mm_us": [
@@ -674,7 +673,25 @@
   "z_min": -50.0,
   "z_max": 50.0
  },
- "stations": [],
+ "stations": [
+  {
+   "name": "detector",
+   "kind": "detect",
+   "on_hit": "pass",
+   "axis": "x",
+   "pos_mm": 37.9,
+   "window": {
+    "y": [
+     -1.25,
+     1.25
+    ],
+    "z": [
+     -1.25,
+     1.25
+    ]
+   }
+  }
+ ],
  "view": {
   "mode": "2d",
   "planes": [

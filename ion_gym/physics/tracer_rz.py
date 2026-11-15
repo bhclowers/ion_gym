@@ -33,7 +33,7 @@ from ion_gym.physics.interp import _bilin
 from ion_gym.physics.raster2d import (_metal_nn)
 from ion_gym.physics.build_planar import _wave_eval   # THE 2-D waveform
 from ion_gym.physics.constants import E_CHG, KG_AMU
-from ion_gym.physics.sds import (_diff_dist_steps, _sphere_rand,
+from ion_gym.physics.sds import (icdf_jump_steps, isotropic_vector,
                                  N_DIST_COLLISIONS as _SDS_NDC)
 
 
@@ -64,8 +64,7 @@ def _write_row(rec, k, t, x, y, z, vx, vy, vz, ez, er, ncol, m_ion, path,
         c += 1
     if cke:
         # KE in eV: 0.5 m v^2, v in mm/us = 1e3 m/s; m in kg = m_ion*AMU
-        # Constants from the authority (PI, 2026-10-14, R1b amended: CODATA
-        # across every builder). Closes the 2026-08-06 RATCHET FLAG; the
+        # Constants from the authority (CODATA across every builder). The
         # ported 1.6605402e-27 moved KE channels by +6.8e-7 relative.
         rec[k, c] = 0.5 * m_ion * KG_AMU * (sp * 1e3) ** 2 \
             / E_CHG
@@ -126,7 +125,7 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
     rec_every steps. E-field stored is in V/mm per the channel contract
     (basis arrays are V/m; the write scale converts). Returns (nrec, kind, ncol).
 
-    SDS (L-519; sds_on): the same model fly3d_sds and the planar kernel
+    SDS (sds_on): the same model fly3d_sds and the planar kernel
     fly. Each half-kick's acceleration is Stokes-damped toward the
     mobility drift relative to the gas flow (vgx, vgy, vgz; mm/us, x
     axial) on ALL THREE velocity components -- this kernel carries full
@@ -135,10 +134,10 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
     step including the jump. The hard-sphere collision test does not run
     under SDS (SDS has no discrete collisions; the builder reports n_col
     as absent). The HS step runs in the same gas-flow frame
-    (collision3d.hs_collision_step; L-563 -- it collided against still
+    (collision3d.hs_collision_step; it once collided against still
     gas whatever flow was declared); zero flow is bit-identical.
 
-    DRIVE CHANNELS (L-455): the field is
+    DRIVE CHANNELS: the field is
         E(x, r, t) = E_A + sum_k w_k(t) * E_k + step(t - tau_gate) * E_G
     with per-group basis fields EzK/EuK (amplitude baked in) and w_k the
     UNIT waveform build_planar._wave_eval evaluates — sin, cos,
@@ -254,18 +253,18 @@ def _fly_rec_full(x, y, z, vx, vy, vz, tob, m_ion, EzA, EuA, EzK, EuK,
         eat += ez * fscale * dt
         ket += ke_scale * sp * sp * dt
         if sds_on:
-            # SDS diffusion: the isotropic 3-D ICDF jump (fly3d_sds's
-            # step). The step's chord now runs xo -> post-jump position,
+            # SDS diffusion: the isotropic 3-D jump (the same step as the
+            # 3-D SDS kernel). The step's chord now runs xo -> post-jump position,
             # which is what the metal backtrack and the plane crossings
             # below interpolate along, so the arc length takes the same
             # chord (it already holds the pre-jump one).
             if sds_mfp > 0.0:
                 _pre = math.sqrt((x - xo) * (x - xo) + (y - yo) * (y - yo)
                                  + (z - zo) * (z - zo))
-                _dsteps = _diff_dist_steps(sds_stats, sds_logmr)
+                _dsteps = icdf_jump_steps(sds_stats, sds_logmr)
                 _nc = sds_V / sds_mfp * dt
                 _rj = math.sqrt(_nc / _SDS_NDC) * _dsteps * sds_mfp
-                _jx, _jy, _jz = _sphere_rand(_rj)
+                _jx, _jy, _jz = isotropic_vector(_rj)
                 x += _jx
                 y += _jy
                 z += _jz

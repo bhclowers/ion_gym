@@ -53,7 +53,7 @@ def write_births(path, rows, *, overwrite=False):
             f"a birth table is an experimental record and clobbering one "
             f"silently would make a flown result unreproducible.")
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w", newline="") as fh:
+    with open(p, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(COLUMNS)
         w.writerows(rows)

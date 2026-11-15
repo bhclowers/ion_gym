@@ -39,7 +39,7 @@ BASELINE_TISO = 0   # a test imports ONLY the project it owns
 
 
 def main():
-    # Charter: a missing dependency audit script is a clear failure, not a skip.
+    # A missing dependency audit script is a clear failure, not a skip.
     # Do NOT swallow the error; report it loudly so we know the gate is wedged.
     if not AUDIT.exists():
         print(f"AUDIT GATE: FAIL — {AUDIT} does not exist. "

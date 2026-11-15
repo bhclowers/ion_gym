@@ -1,8 +1,9 @@
 """Per-ion hard-sphere cross sections (physics.ccs) and the hard-sphere
-step advisory (collision3d.hs_step_note). Requested by Brian 2026-10-17.
-Updated 2026-10-24 for his rulings: the CCS fit is the default sigma
-model, the default refuses outside the fit's domain, sigma_model is
-written on every save, and extrapolation is a separate WARNING advisory.
+step advisory (collision3d.hs_step_note).
+The rules pinned here: the CCS fit is the default sigma
+model, sigma_model is written on every save, and extrapolation is a
+separate WARNING advisory. Outside the fit's gas and charge the flight
+falls back, loudly, to the static sigma_m2 (it was once refused).
 
 Fast: no field solve and no flight. Checks read the shipped coefficient
 table and SimSpecs loaded from shipped decks (geometry only, nothing
@@ -10,10 +11,12 @@ is solved), so the file needs no fixture of its own.
 """
 import copy
 import math
+import warnings
 from pathlib import Path
 
 import pytest
 
+from ion_gym.advisories import IonGymAdvisory
 from ion_gym.io.paths import repo_root
 from ion_gym.io.sim_spec import CollisionSpec, SimSpec
 from ion_gym.physics import ccs
@@ -36,12 +39,11 @@ def _gas_spec(sigma_model="ccs_fit", gas="N2", charge=1, mz_list=None,
 
 
 # The He decks pinned to sigma_model "fixed" when the CCS fit became the
-# default (PI ruling 2026-10-24). Paths are relative to the repo root.
+# default. Paths are relative to the repo root.
 PINNED_HE_DECKS = (
     "examples/drift_tube_mason_schamp.json",
     "examples/paul_trap_r-z_he_cooling.json",
     "examples/rf_drift_cell_allen_bush.json",
-    "internal/studies/drift_tube_v11/pack/drift_tube_spec.json",
     "notebooks/data/20_drift_tube_matrix/drift_winner_spec.json",
 )
 
@@ -57,14 +59,18 @@ def test_fixed_model_returns_sigma_m2_for_every_ion():
         assert ccs.ion_sigma_m2(col, mz, 1) == 3.0e-18
 
 
-def test_default_refuses_outside_the_fit_and_names_the_fix():
-    # a He deck that names no model gets the default fit, which refuses
+def test_default_falls_back_outside_the_fit_and_names_the_fix():
+    # a He deck that names no model gets the default fit, which does not
+    # apply: it validates, and the advisory names the sigma flown and the fix
     spec = _gas_spec()
     spec.collisions = CollisionSpec(enabled=True, gas="He", T_k=273.0,
                                     P_torr=2.5, model="hs")
-    errs = [e for e in spec.validate() if "ccs_fit" in e]
-    assert errs, spec.validate()
-    assert "default" in errs[0] and "fixed" in errs[0]
+    assert not [e for e in spec.validate() if "ccs_fit" in e]
+    notes = [a for a in spec.advisories() if "does not apply" in a]
+    assert len(notes) == 1, spec.advisories()
+    assert notes[0].startswith("WARNING")
+    assert "'He'" in notes[0] and "fixed" in notes[0]
+    assert "legacy default" in notes[0]     # 2.27e-18 was not chosen
 
 
 @pytest.mark.parametrize("rel", PINNED_HE_DECKS)
@@ -105,33 +111,75 @@ def test_fit_class_selects_its_own_row():
     assert ccs.ion_sigma_m2(col, 700.0, 1) == pytest.approx(want, rel=1e-12)
 
 
-def test_extrapolation_warns_and_returns_a_value(capsys):
-    ccs._EXTRAPOLATION_WARNED.clear()
+def _ccs_advisories(fn):
+    """The [CCS] advisories `fn` raises under Python's DEFAULT filter."""
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("default")
+        fn()
+    return [str(w.message) for w in seen
+            if issubclass(w.category, IonGymAdvisory)
+            and str(w.message).startswith("[CCS]")]
+
+
+def test_extrapolation_warns_and_returns_a_value():
     col = CollisionSpec(enabled=True, gas="N2", sigma_model="ccs_fit")
-    sigma = ccs.ion_sigma_m2(col, 5000.0, 1)
-    out = capsys.readouterr().out
-    assert sigma > 0.0
-    assert "[CCS] WARNING" in out and "EXTRAPOLATED" in out
-    # the identical warning is printed once per m/z per session
-    ccs.ion_sigma_m2(col, 5000.0, 1)
-    assert "[CCS] WARNING" not in capsys.readouterr().out
+    with pytest.warns(IonGymAdvisory, match="EXTRAPOLATED"):
+        assert ccs.ion_sigma_m2(col, 5000.0, 1) > 0.0
+    # the identical warning is stated once under the default filter
+    seen = _ccs_advisories(lambda: [ccs.ion_sigma_m2(col, 5000.0, 1)
+                                    for _ in range(3)])
+    assert len(seen) == 1 and "EXTRAPOLATED" in seen[0]
 
 
-def test_in_range_mz_prints_no_warning(capsys):
-    ccs._EXTRAPOLATION_WARNED.clear()
+def test_in_range_mz_raises_no_warning():
     col = CollisionSpec(enabled=True, gas="N2", sigma_model="ccs_fit")
-    ccs.ion_sigma_m2(col, 322.0, 1)
-    assert capsys.readouterr().out == ""
+    assert _ccs_advisories(lambda: ccs.ion_sigma_m2(col, 322.0, 1)) == []
 
 
-@pytest.mark.parametrize("gas,charge", [("He", 1), ("N2", 2), ("N2", -3)])
-def test_fit_outside_its_data_is_refused(gas, charge):
-    spec = _gas_spec(gas=gas, charge=charge)
-    errs = spec.validate()
-    assert any("ccs_fit" in e for e in errs), errs
+@pytest.mark.parametrize("charge", [2, -3])
+def test_a_multiply_charged_ion_takes_the_fit_at_its_mass(charge):
+    """The fit is of singly charged ions; for any charge the cross section
+    is the fit at the ion's MASS (mz_list holds mass), stated loudly."""
+    spec = _gas_spec(charge=charge)
     col = spec.collisions
-    with pytest.raises(ccs.CCSModelRefused):
-        ccs.ion_sigma_m2(col, 322.0, charge)
+    assert ccs.ion_sigma_m2(col, 322.0, charge) == ccs.ion_sigma_m2(col,
+                                                                    322.0, 1)
+    assert ccs.fallback_note(spec) is None
+    note = ccs.charge_note(spec)
+    assert note is not None and "upper estimate" in note
+    assert any(a == note for a in spec.advisories())
+    assert ccs.charge_note(_gas_spec(charge=1)) is None
+
+
+@pytest.mark.parametrize("gas,charge", [("He", 1), ("He", 2), ("Ar", -1)])
+def test_fit_outside_its_data_falls_back_to_sigma_m2(gas, charge):
+    spec = _gas_spec(gas=gas, charge=charge)
+    spec.collisions.sigma_m2 = 1.25e-18
+    assert not [e for e in spec.validate() if "ccs_fit" in e]
+    col = spec.collisions
+    with pytest.warns(IonGymAdvisory, match="does not apply"):
+        assert ccs.ion_sigma_m2(col, 322.0, charge) == 1.25e-18
+    # the same case (reason and sigma) is stated once under the default
+    # filter, whatever the ion's m/z
+    seen = _ccs_advisories(lambda: [ccs.ion_sigma_m2(col, m, charge)
+                                    for m in (322.0, 622.0)])
+    assert len(seen) == 1 and "does not apply" in seen[0]
+    # the advisory says what is flown; the fit's own notes stay silent,
+    # so the displayed value is the solver input
+    note = ccs.fallback_note(spec)
+    assert note is not None and "1.25e-18" in note
+    assert "legacy default" not in note
+    assert ccs.sigma_note(spec) is None
+    assert ccs.extrapolation_note(spec) is None
+    assert ccs.stated_sigma_note(spec) is None
+
+
+def test_no_fallback_inside_the_fit_or_under_fixed_or_sds():
+    assert ccs.fallback_note(_gas_spec()) is None
+    assert ccs.fallback_note(_gas_spec(gas="He", sigma_model="fixed")) is None
+    spec = _gas_spec(gas="He")
+    spec.collisions.model = "sds"
+    assert ccs.fallback_note(spec) is None
 
 
 def test_unknown_model_and_class_are_refused_by_name():
@@ -242,3 +290,17 @@ def test_mason_schamp_mobility_scalings_and_value():
     assert ccs.low_field_mobility_m2Vs(col, 3290.0, 1) < k_322
     with pytest.raises(ccs.CCSModelRefused):
         ccs.low_field_mobility_m2Vs(None, 322.0, 1)
+
+
+@pytest.mark.parametrize("z", [2, -2, 3])
+@pytest.mark.parametrize("sigma_model", ["ccs_fit", "fixed"])
+def test_mobility_scales_with_charge_at_the_same_mass(z, sigma_model):
+    """The argument is the MASS (what mz_list holds and every route flies):
+    at one mass the cross section and the reduced mass are the charge's
+    own, so K_z = |z| K_1 exactly. It used to multiply the mass by |z|
+    (review C-11), giving a heavier reduced mass for z != 1."""
+    col = CollisionSpec(enabled=True, gas="N2", T_k=300.0, P_torr=2.0,
+                        sigma_model=sigma_model, sigma_m2=1.784e-18)
+    k1 = ccs.low_field_mobility_m2Vs(col, 322.0, 1)
+    assert ccs.low_field_mobility_m2Vs(col, 322.0, z) == pytest.approx(
+        abs(z) * k1, rel=1e-12)

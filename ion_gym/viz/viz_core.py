@@ -379,7 +379,7 @@ def peak_potential_image(model):
     """The drive-PEAK snapshot of `model`'s potential, for ANY model:
     (x, y, img, ele) exactly as that model's potential_image returns.
 
-    Why this exists (2026-09-18, fix A of the planar field-view defect).
+    Why this exists (fix A of the planar field-view defect).
     The three model classes share the signature potential_image(rf_phase=
     None) but NOT its meaning:
 
@@ -390,8 +390,8 @@ def peak_potential_image(model):
 
     So "give me the peak" needs a different call per model, and sim_app
     used to decide which by SNIFFING an attribute -- first
-    getattr(model, "rf_V", 0), which broke silently when L-455 removed the
-    r-z scalar (funnel contours read DC-only); then, from L-463,
+    getattr(model, "rf_V", 0), which broke silently when a later change
+    removed the r-z scalar (funnel contours read DC-only); then,
     getattr(model, "chan_phi", None), on the stated assumption that
     PlanarModel carries neither marker. It does carry chan_phi -- it is
     the planar drive-channel list -- so every RF PLANAR deck (Quadrupole
@@ -486,7 +486,10 @@ def _drop_collinear(poly, tol=1e-9):
     n = len(P)
     for k in range(n):
         a, b, c = P[(k - 1) % n], P[k], P[(k + 1) % n]
-        if abs(np.cross(b - a, c - b)) > tol:
+        # z component of the 2-D cross product, written out: np.cross
+        # refuses 2-D vectors from numpy 2.5 (deprecated since 2.0)
+        u, w = b - a, c - b
+        if abs(u[0] * w[1] - u[1] * w[0]) > tol:
             keep.append(b)
     return np.asarray(keep) if len(keep) >= 3 else P
 
@@ -520,7 +523,7 @@ def view_extent(scene: Scene, view: str) -> tuple:
     # extent along z, so an axial view's data box collapses to zero width
     # and every consumer downstream — the zoom policy, the pane sizing,
     # the heatmap axes — silently produced a degenerate panel that looked
-    # broken rather than saying why. Pre-existing (v206 had no guard); the
+    # broken rather than saying why. Pre-existing (there was no guard); the
     # check lives HERE because view_extent is the one function both
     # renderers ask for a panel's box, so no consumer can forget it.
     span = max(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2], 1e-12)
@@ -742,13 +745,15 @@ def describe_fates(spec, model, summaries, max_named=3):
     # actually lived (four sessions against a 0.19-cell artifact, no
     # stats card in sight). One authority, appended as the last sentence;
     # a failure REPORTS instead of eating the fates account.
+    # stats is ion_gym's own module: imported, never guarded
+    from ion_gym.physics.stats import delivered_spread_text
     try:
-        from ion_gym.physics.stats import delivered_spread_text
         _tail.append(delivered_spread_text(spec))
-    except (ImportError, ValueError, AttributeError, TypeError, IndexError) as e:
-        # ImportError if stats import fails; others from delivered_spread_text
-        # (no births, missing symmetry, numpy operations). Charter: report.
-        _tail.append(f"(delivered spread unavailable: {e})")
+    except (ValueError, AttributeError, TypeError, IndexError) as e:
+        # from delivered_spread_text (no births, missing symmetry, numpy
+        # operations). Rule: report.
+        _tail.append(f"(delivered spread unavailable: "
+                     f"{type(e).__name__}: {e})")
     # grid pitch: planar/r-z models expose mm_per_gu, 3-D models h_mm —
     # the same either/or the rest of this module uses. Reading only one of
     # them silently produced h = 0 and attributed every strike to nothing.
@@ -782,7 +787,7 @@ def describe_fates(spec, model, summaries, max_named=3):
         """
         if h <= 0 or ele.size == 0:
             return ("vacuum", None)
-        # end point through the one summary accessor (L-530): an absent
+        # end point through the one summary accessor: an absent
         # coordinate is NOT read as 0.0 -- the strike is unlocatable
         end = [summary_value(su, k) for k in ("x_end", "y_end", "z_end")]
         if any(v is None for v in end[:max(ele.ndim, 2)]) or (
@@ -816,7 +821,7 @@ def describe_fates(spec, model, summaries, max_named=3):
 
     by_kind = collections.defaultdict(list)
     for su in summaries:
-        # a summary without a fate is UNKNOWN, never a timeout (L-530)
+        # a summary without a fate is UNKNOWN, never a timeout
         by_kind[summary_fate(su)].append(su)
     out = []
     for kind, group in sorted(by_kind.items()):
@@ -897,6 +902,29 @@ def _revolve_polys(polys, n_seg=72):
                     [x1, r1 * cs[j + 1], r1 * ss[j + 1]],
                     [x0, r0 * cs[j + 1], r0 * ss[j + 1]]]))
     return out
+
+
+def _drive_group(el):
+    """Outline-colour key for one electrode: its AC/RF group memberships
+    from ElectrodeSpec.group_names() (the one authority), joined with '+'
+    so an electrode on two groups gets its own key rather than borrowing
+    the first group's. None for an electrode on no group (DC only).
+
+    The three Body constructors in scene_from_simspec read
+    getattr(el, "rf_group", None), a field folded into rf_groups, so every
+    body reported group None and _body_colors drew every RF phase with the
+    same outline -- the defect symmetry._electrical_id had for the same
+    reason. Read directly: an object without group_names() is not
+    an ElectrodeSpec and raises."""
+    names = el.group_names()
+    return "+".join(names) if names else None
+
+
+def body_electrode_name(body_name):
+    """Electrode name from a Body name. scene_from_simspec names electrode
+    bodies with _drive_label, 'name [drive]', optionally followed by
+    ' (grid)', so the electrode name is the text before ' ['."""
+    return body_name.split(" [", 1)[0]
 
 
 def _drive_label(spec, el):
@@ -1077,7 +1105,7 @@ def scene_from_simspec(spec, model=None, *, field: str | None = "phi",
                         bodies.append(Body(
                             name=_drive_label(spec, el) + " (grid)",
                             polys=[loop], volt=float(el.dc),
-                            group=getattr(el, "rf_group", None),
+                            group=_drive_group(el),
                             kind="electrode", owner=spec.name,
                             outline=True, grid=True))
                 continue
@@ -1148,7 +1176,7 @@ def scene_from_simspec(spec, model=None, *, field: str | None = "phi",
                     polys = [np.c_[lp, np.full(len(lp), z0)] for lp in loops]
                 bodies.append(Body(name=_drive_label(spec, el), polys=polys,
                                    volt=float(el.dc),
-                                   group=getattr(el, "rf_group", None),
+                                   group=_drive_group(el),
                                    kind="electrode", owner=spec.name,
                                    outline=True))
                 continue
@@ -1178,7 +1206,7 @@ def scene_from_simspec(spec, model=None, *, field: str | None = "phi",
             bodies.append(Body(name=_drive_label(spec, el),
                                polys=[p for g in grps for p in g],
                                volt=float(el.dc),
-                               group=getattr(el, "rf_group", None),
+                               group=_drive_group(el),
                                kind="electrode",
                                owner=spec.name))
         if not np.array_equal(drawn, metal):
@@ -1297,7 +1325,7 @@ def scene_from_simspec(spec, model=None, *, field: str | None = "phi",
                        # deck of depth 2H = 7.5 mm: the box came out
                        # (-2H, 0) = (-7.5, 0.0) instead of (-H, +H), so
                        # the view framed the instrument hard against one
-                       # edge (L-437). The rule is now identical on all
+                       # edge. The rule is now identical on all
                        # three axes, which is what makes it hold for any
                        # mirrored axis or combination rather than for
                        # the one deck in front of us.
@@ -1386,14 +1414,15 @@ def _field_slab_arrays(model, field, *, mz=None, charge=1):
     Selectors, all read off the model the kernel was handed:
       'phi'              the static field, as flown
       'E' / '|E|'        its magnitude
-      'psi'              the SECULAR pseudopotential an ion of mass m/z feels:
+      'psi'              the SECULAR pseudopotential an ion of mass mz (Da) and charge z feels:
                          q*phi_DC + q*V_pseudo with V_pseudo = q E0^2/(4 m W^2)
                          (Dehmelt adiabatic form). This is the right layer for
                          an RF device -- 'phi' at phase 0 on an RF-only deck is
                          identically zero, a picture of nothing.
                          Requires the model to expose pe_surface,
-                         which is the same PE the pe_view route uses; m/z is
-                         supplied by the caller, never guessed.
+                         which is the same PE the pe_view route uses; the ion
+                         (mass and charge) is supplied by the caller, never
+                         guessed.
       'basis:<name>'     the DIMENSIONLESS response phi/V of ONE electrode with
                          every other grounded.  This is the definition of a
                          coupling coefficient, and it needs no second solve:
@@ -1421,9 +1450,10 @@ def _field_slab_arrays(model, field, *, mz=None, charge=1):
                 f"substitute a different quantity silently.")
         if mz is None:
             raise VizError(
-                f"field {field!r}: the pseudopotential depends on m/z "
-                f"(V_pseudo ~ 1/m), so it cannot be drawn without one. Pass "
-                f"mz= from the deck being rendered.")
+                f"field {field!r}: the pseudopotential depends on the ion "
+                f"(V_pseudo ~ q^2/m), so it cannot be drawn without one. Pass "
+                f"mz= (the ion MASS in Da) and charge= from the deck being "
+                f"rendered.")
         _x, _y, PE, _ele = model.pe_surface(mz=float(mz), charge=int(charge))
         PE = np.asarray(PE, float).copy()
         _ele = np.asarray(_ele)
@@ -1474,7 +1504,9 @@ def _field_slab_arrays(model, field, *, mz=None, charge=1):
         _fin = PE[np.isfinite(PE)]
         if _fin.size:
             PE = np.minimum(PE, float(np.percentile(_fin, 90.0)))
-        return PE.T, f"pseudopotential (eV, m/z {float(mz):g})"
+        from ion_gym.physics.ion_envelope import ion_label_both
+        return PE.T, (f"pseudopotential (eV, "
+                      f"{ion_label_both(float(mz), int(charge))})")
     if field == "phi":
         if _is3d:
             _x, _y, img, _e = model.potential_image()
@@ -2039,6 +2071,7 @@ STYLE = {
     "hatch":     "///",
     "dim":       "#c0392b",   # a STATED number
     "dim_derived": "#12806a",  # a number we INFERRED -- a different claim
+    "births":    "#000000",   # ion birth positions (deck_scheme)
 }
 
 
@@ -2062,8 +2095,8 @@ OKABE_ITO = ("#0072B2", "#E69F00", "#009E73", "#D55E00",
 
 
 def apply_house_style(palette=OKABE_ITO, font_family="sans-serif"):
-    """Set the notebook-wide matplotlib house style (Tufte-informed,
-    2026-09-11): colorblind-safe Okabe-Ito prop cycle, sans-serif
+    """Set the notebook-wide matplotlib house style (Tufte-informed):
+    colorblind-safe Okabe-Ito prop cycle, sans-serif
     text, top/right spines OFF (range-frame direction), no grid,
     frameless legends, outward ticks. Mutates matplotlib rcParams
     GLOBALLY — that is its job: one call, every subsequent figure
@@ -2217,7 +2250,7 @@ def wrap_title(text, fig=None, fontsize=10):
 
 # ------------------------------------------------ plotly figure text layout
 # Pixel budget for every piece of figure text. ONE place, so a header can
-# never be assembled from independently positioned parts again (L-462:
+# never be assembled from independently positioned parts again (once,
 # a 42 px top margin held a title with <br><sup> lines, a paper-y 1.045
 # time stamp, and a default-placed legend -- all three overlapped).
 PLOTLY_TEXT = dict(title_px=13, sub_px=10, foot_px=10, line_gap=1.45,
@@ -2352,6 +2385,284 @@ def layout_plotly_text(fig, *, title=None, subtitles=(), footers=(),
     return fig
 
 
+def ray_color(k):
+    """Colour of the k-th ion path in draw_view (plasma, cycling every 8),
+    exposed so a legend or caption names the colour the path is drawn in."""
+    import matplotlib.pyplot as plt
+    return plt.cm.plasma((k % 8) / 8.0)
+
+
+def draw_view(ax, scene: Scene, v: str, *, field: bool = True,
+              cmap: str | None = None, station_label_max: int = 8,
+              y_exag: float = 1.0, colors: tuple | None = None,
+              ray_colors=None):
+    """Draw ONE view of a Scene into a caller-supplied matplotlib Axes.
+
+    This is the per-panel body of render_mpl, lifted out unchanged so a
+    composite figure (a deck scheme, a report page) draws a view with the
+    same code render_mpl uses instead of a second copy of it. render_mpl
+    calls this for each of its panels.
+
+    ray_colors : optional list of colours for the ion paths, cycled in
+        path order; None keeps ray_color(k), the render_mpl default.
+    colors : (face, edge) from _body_colors(scene.bodies). render_mpl
+        passes its own so every panel of one figure shares one colour
+        assignment; None computes it here from the scene's bodies.
+    Returns the Axes.
+    """
+    from matplotlib.collections import PolyCollection
+    fig = ax.figure
+    cmap = cmap or STYLE["field"]
+    fmap = {f.plane: f for f in scene.fields}
+    cols, edges = colors if colors is not None else _body_colors(scene.bodies)
+    f = fmap.get(v) if field else None
+    if f is not None:
+        # FieldSlab.extent is the NODE SPAN (first..last node centre) —
+        # the convention its docstring declares and both other
+        # consumers use (the plotly heatmap's linspace(a0,a1,n) centres
+        # and the lineout sampler's (p-a0)/(a1-a0)*(n-1)). imshow's
+        # `extent` is the OUTER PIXEL EDGES, so passing the node span
+        # straight through drew the field half a cell off the bodies.
+        # Convert: expand by half a cell on each side.
+        # CONTOURS, not a filled gradient. A flood-filled field map
+        # dominates the picture and hides the geometry and the ion
+        # paths drawn over it; equipotentials carry the same
+        # information as lines you can see through, and their spacing
+        # reads as field strength directly. FieldSlab.extent is the
+        # NODE SPAN, which is exactly what the contour grid wants.
+        _a0, _a1, _b0, _b1 = f.extent
+        _nb, _na = np.shape(f.values)
+        _xs = np.linspace(_a0, _a1, _na)
+        _ys = np.linspace(_b0, _b1, _nb)
+        # Levels strictly INSIDE (vmin, vmax): auto levels land ON
+        # the electrode potentials (the field extremes), and a level
+        # AT an electrode's potential has nothing to trace but the
+        # metal's constant-phi region and its raster staircase — it
+        # degenerates into noise squiggles along every surface
+        # (measured on a tube-stack deck).
+        _vmin = float(np.nanmin(f.values))
+        _vmax = float(np.nanmax(f.values))
+        if _vmax > _vmin:
+            _lv = np.linspace(_vmin, _vmax, 18)[1:-1]
+        else:
+            # a constant field has no equipotential structure to
+            # draw; one interior level would be pure noise. Refuse
+            # the contours, keep the panel (metal + paths still
+            # carry the scene).
+            _lv = []
+        cset = (ax.contour(_xs, _ys, f.values, levels=_lv, cmap=cmap,
+                           linewidths=0.7, alpha=0.9, zorder=1)
+                if len(_lv) else None)
+        # colorbar sized to the DRAWN axes (same standing
+        # rule as candidate_field_figure): with aspect-equal panes a
+        # slot-fraction bar towers over the plot it annotates.
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        if cset is not None:
+            _cax = make_axes_locatable(ax).append_axes(
+                "right", size="3.5%", pad=0.08)
+            cb = fig.colorbar(cset, cax=_cax)
+            cb.set_label(f.quantity, fontsize=8)
+            cb.ax.tick_params(labelsize=7)
+        else:
+            # constant field: say so where the colorbar would be,
+            # rather than a silent blank.
+            ax.text(0.99, 0.01,
+                    f"{f.quantity}: constant ({_vmin:g})",
+                    transform=ax.transAxes, ha="right", va="bottom",
+                    fontsize=7, color="0.4")
+    no_field = bool(scene.fields) and field and f is None
+    for i, b in enumerate(scene.bodies):
+        # a SCHEMATIC body inside a solved scene is HATCHED, so the eye
+        # cannot mistake the drawn part for the solved part.
+        sk = b.stamp_in(scene) == SCHEMATIC
+        # ONE PolyCollection per body per view: every
+        # poly of a body carries the SAME style, and one Polygon
+        # artist per poly made artist count O(n_polys) — a revolved
+        # r-z body is tens of thousands of quads, and render_mpl
+        # stalled minutes-long on the orbitrap's 3 views. A
+        # collection draws the identical fills/edges/alpha/hatch in
+        # one artist. Style semantics unchanged, per-poly.
+        _qs = [project(p, v) for p in b.polys]
+        if getattr(b, "outline", False):
+            # OUTLINE body: boundary path only — the electrode
+            # reads as a line drawing over the field.
+            ax.add_collection(PolyCollection(
+                _qs, closed=True, facecolors="none",
+                edgecolors=edges[i], linewidths=1.4, zorder=3))
+        else:
+            # SEMI-TRANSPARENT: the field contours and the ion paths
+            # behind an electrode stay readable, and overlapping bodies
+            # in a projection remain distinguishable.
+            ax.add_collection(PolyCollection(
+                _qs, closed=True, facecolors=cols[i],
+                edgecolors=edges[i], linewidths=1.0, alpha=0.30,
+                hatch="///" if sk else None, zorder=3))
+    # METAL as a cut through this plane (semi-transparent), when the
+    # scene carries one. Drawn under the ion paths, over the contours.
+    _m = {mm.plane: mm for mm in getattr(scene, "metal", [])}.get(v)
+    if _m is not None:
+        _ma0, _ma1, _mb0, _mb1 = _m.extent
+        _mv = np.asarray(_m.values, float)
+        _mx = np.linspace(_ma0, _ma1, _mv.shape[1])
+        _my = np.linspace(_mb0, _mb1, _mv.shape[0])
+        ax.contourf(_mx, _my, (_mv > 0).astype(float),
+                    levels=[0.5, 1.5], colors=["#4c72b0"], alpha=0.30,
+                    zorder=3)
+        ax.contour(_mx, _my, (_mv > 0).astype(float), levels=[0.5],
+                   colors=["#26456e"], linewidths=0.8, zorder=3.1)
+    for r in scene.rays:
+        for k, p in enumerate(r.paths):
+            q = project(p, v)
+            ax.plot(q[:, 0], q[:, 1], lw=0.7, alpha=0.85, zorder=4,
+                    color=(ray_colors[k % len(ray_colors)] if ray_colors
+                           else ray_color(k)))
+    a0, a1, b0, b1 = view_extent(scene, v)
+    ax.set_xlim(a0, a1)
+    ax.set_ylim(b0, b1)
+    # y_exag > 1 MAGNIFIES the transverse axis, the convention the
+    # mirror-field literature uses (Verenchikov JASMS 2026 Fig. 2A/2C
+    # both state "vertical scale magnified"). A mirror is hundreds of mm
+    # long and a few mm tall on axis, so true scale renders the ion
+    # channel as a hairline and the equipotentials as a smear -- the
+    # panel is technically correct and shows nothing. The magnification
+    # is STAMPED on the panel below, never silent, because a reader
+    # measuring an angle or a gap off a distorted panel would be wrong.
+    ax.set_aspect("equal" if y_exag == 1.0 else float(y_exag))
+    if y_exag != 1.0:
+        ax.text(0.995, 0.02, f"vertical scale x{y_exag:g}",
+                transform=ax.transAxes, ha="right", va="bottom",
+                fontsize=7.5, color="#b03030",
+                bbox=dict(fc="white", ec="none", alpha=0.75, pad=1.5),
+                zorder=9)
+    # dimension callouts.  A DERIVED number is drawn in a different colour
+    # and tagged, because "the source states 2.5" and "I inferred 1.152
+    # from two things the source states" are different claims.
+    for d in scene.dims:
+        if d.view != v:
+            continue
+        col = "#00695c" if d.derived else "crimson"
+        ax.annotate("", xy=tuple(d.p1), xytext=tuple(d.p0),
+                    arrowprops=dict(arrowstyle="<->", color=col, lw=0.9),
+                    zorder=5)
+        # offset the label PERPENDICULAR to its own arrow.  Centring it on
+        # the midpoint puts the number on top of the line it measures and,
+        # on a crowded transverse section, on top of the next number too.
+        dx = float(d.p1[0]) - float(d.p0[0])
+        dy = float(d.p1[1]) - float(d.p0[1])
+        L = float(np.hypot(dx, dy)) or 1.0
+        span = max(a1 - a0, b1 - b0)
+        off = 0.018 * span
+        mx = 0.5 * (d.p0[0] + d.p1[0]) - off * dy / L
+        my = 0.5 * (d.p0[1] + d.p1[1]) + off * dx / L
+        ax.text(mx, my, d.label + ("  (derived)" if d.derived else ""),
+                color=col, fontsize=6.5, ha="center", va="center", zorder=6,
+                bbox=dict(fc="white", ec="none", alpha=0.72, pad=0.8))
+    # DECLARED KILL BOUNDS: dashed, in the interactive view's colour
+    # (#9467bd, sim_app's convention) so both surfaces speak one visual
+    # language. A bound on the view's horizontal axis draws as a
+    # vertical line and vice versa; a bound NORMAL to the view plane is
+    # the whole panel and cannot be drawn as a line, so it is skipped
+    # in that view (it still draws in the views that contain its axis).
+    # Axis letters from the _AXES authority — the view-name CHARS are
+    # not in (horizontal, vertical) order for xz/yz (Convention A puts
+    # the axial coordinate horizontal). Keying on v[0]/v[1] drew the
+    # z-bound as an out-of-range horizontal line in the axial views —
+    # the same array-vs-view order trap as the slab builder.
+    _bha, _bva = _LABEL[_AXES[v][0]], _LABEL[_AXES[v][1]]
+    for _bax, _bmm, _blab in scene.bound_marks:
+        if _bax == _bha:
+            ax.axvline(_bmm, color="#9467bd", lw=1.0, ls="--", zorder=4)
+            ax.text(_bmm, b1 - 0.04 * (b1 - b0), _blab, color="#9467bd",
+                    fontsize=6.0, ha="right", va="top", rotation=90,
+                    zorder=6,
+                    bbox=dict(fc="white", ec="none", alpha=0.72,
+                              pad=0.6))
+        elif _bax == _bva:
+            ax.axhline(_bmm, color="#9467bd", lw=1.0, ls="--", zorder=4)
+            ax.text(a0 + 0.04 * (a1 - a0), _bmm, _blab, color="#9467bd",
+                    fontsize=6.0, ha="left", va="bottom", zorder=6,
+                    bbox=dict(fc="white", ec="none", alpha=0.72,
+                              pad=0.6))
+    # DECLARED STATIONS: a station on the view's horizontal axis is a
+    # vertical SEGMENT at pos_mm spanning its window on the vertical
+    # axis (and vice versa) — solid and kind-coloured, so the
+    # detector reads as hardware with a finite face, not another
+    # infinite bound. No window on the in-panel axis -> full-extent
+    # dash-dot (honest: the deck declared no aperture in this plane).
+    # A station NORMAL to the panel is skipped here, like bounds.
+    # Labels are suppressed WHOLESALE above the threshold, never
+    # thinned: labelling every 5th plane would leave a reader to guess
+    # which line each name belongs to, which is worse than a note that
+    # states the whole ladder.
+    _st_label = len(scene.station_marks) <= station_label_max
+    for _st in scene.station_marks:
+        _sc = _STATION_COLORS.get(_st["kind"], "#2ca02c")
+        _sl = f"{_st['name']} ({_st['kind']} station)"
+        if not _st_label:
+            _sl = None
+        if _st["axis"] == _bha:
+            _w = _st["window"].get(_bva)
+            if _w:
+                ax.plot([_st["pos_mm"]] * 2, list(_w), color=_sc,
+                        lw=2.4, solid_capstyle="butt", zorder=5)
+            else:
+                ax.axvline(_st["pos_mm"], color=_sc, lw=1.4,
+                           ls="-.", zorder=5)
+            if _sl:
+                ax.text(_st["pos_mm"], (_w[1] if _w
+                                        else b1 - 0.08 * (b1 - b0)),
+                        _sl, color=_sc, fontsize=6.0, ha="center",
+                        va="bottom", zorder=6,
+                        bbox=dict(fc="white", ec="none", alpha=0.72,
+                                  pad=0.6))
+        elif _st["axis"] == _bva:
+            _w = _st["window"].get(_bha)
+            if _w:
+                ax.plot(list(_w), [_st["pos_mm"]] * 2, color=_sc,
+                        lw=2.4, solid_capstyle="butt", zorder=5)
+            else:
+                ax.axhline(_st["pos_mm"], color=_sc, lw=1.4,
+                           ls="-.", zorder=5)
+            if _sl:
+                ax.text((_w[0] if _w else a0 + 0.08 * (a1 - a0)),
+                        _st["pos_mm"], _sl, color=_sc, fontsize=6.0,
+                        ha="left", va="bottom", zorder=6,
+                        bbox=dict(fc="white", ec="none", alpha=0.72,
+                                  pad=0.6))
+        elif (_bha in _st["window"] and _bva in _st["window"]):
+            # station NORMAL to this panel: the head-on view of its
+            # face. With a window on BOTH panel axes the face is a
+            # drawable rectangle (the detector as the ions see it);
+            # drawn solid-outlined at the plane's colour with the
+            # plane coordinate stated. A windowless normal station
+            # is the whole panel and stays skipped, like bounds.
+            _wa, _wb = _st["window"][_bha], _st["window"][_bva]
+            from matplotlib.patches import Rectangle as _MplRect
+            ax.add_patch(_MplRect(
+                (_wa[0], _wb[0]), _wa[1] - _wa[0], _wb[1] - _wb[0],
+                fill=False, edgecolor=_sc, lw=2.0, zorder=5))
+            if _sl:
+                ax.text(_wa[0], _wb[1],
+                        f"{_sl} face, "
+                        f"{_st['axis']}={_st['pos_mm']:g} mm",
+                        color=_sc, fontsize=6.0, ha="left", va="bottom",
+                        zorder=6, bbox=dict(fc="white", ec="none",
+                                            alpha=0.72, pad=0.6))
+    la, lb = view_labels(v, scene)
+    ax.set_xlabel(la, fontsize=9)
+    ax.set_ylabel(lb, fontsize=9)
+    _cut = ""
+    if _m is not None and _m.at is not None:
+        _norm = ({"xy": "z", "xz": "y", "yz": "x"}).get(v, "")
+        _cut = f"\nslice at {_norm} = {_m.at:.2f} mm"
+    _nm = getattr(scene, "axis_names", ("x", "y", "z"))
+    _vname = _nm[_AXES[v][0]] + _nm[_AXES[v][1]]
+    ax.set_title(f"{_vname} view" + _cut
+                 + ("\n(no solved field in this plane)"
+                    if no_field else ""), fontsize=9)
+    return ax
+
+
 def render_mpl(scene: Scene, views=None, *, field: bool = True,
                path: str | None = None, dpi: int = DEFAULT_DPI, cmap: str | None = None,
                legend: bool = True, layout: str = "row",
@@ -2396,14 +2707,9 @@ def render_mpl(scene: Scene, views=None, *, field: bool = True,
                          f"caller asked for")
     _mpl_headless_if_needed()
     import matplotlib.pyplot as plt
-    from matplotlib.collections import PolyCollection
 
     cmap = cmap or STYLE["field"]
     vs = views_for(scene, views)
-    # height reserved at the bottom for the provenance notes (they are drawn
-    # from y=0.005 upward), used to place the legend band above them.
-    _notes_h = 0.012 * min(len(scene.notes), 6) + 0.020
-    _legend_h = 0.0
     # each panel is drawn true-scale, so give each one a WIDTH that matches
     # its own data aspect -- otherwise a wide view and a tall view forced
     # into equal boxes leave one of them a stripe in a sea of white.
@@ -2472,254 +2778,12 @@ def render_mpl(scene: Scene, views=None, *, field: bool = True,
                               width_ratios=ws,
                               height_ratios=[panel_h, 3.2] if nlo else [1.0])
         axes = [fig.add_subplot(gs[0, k]) for k in range(n)]
-    fmap = {f.plane: f for f in scene.fields}
     cols, edges = _body_colors(scene.bodies)
 
     for ax, v in zip(axes, vs):
-        f = fmap.get(v) if field else None
-        if f is not None:
-            # FieldSlab.extent is the NODE SPAN (first..last node centre) —
-            # the convention its docstring declares and both other
-            # consumers use (the plotly heatmap's linspace(a0,a1,n) centres
-            # and the lineout sampler's (p-a0)/(a1-a0)*(n-1)). imshow's
-            # `extent` is the OUTER PIXEL EDGES, so passing the node span
-            # straight through drew the field half a cell off the bodies.
-            # Convert: expand by half a cell on each side.
-            # CONTOURS, not a filled gradient. A flood-filled field map
-            # dominates the picture and hides the geometry and the ion
-            # paths drawn over it; equipotentials carry the same
-            # information as lines you can see through, and their spacing
-            # reads as field strength directly. FieldSlab.extent is the
-            # NODE SPAN, which is exactly what the contour grid wants.
-            _a0, _a1, _b0, _b1 = f.extent
-            _nb, _na = np.shape(f.values)
-            _xs = np.linspace(_a0, _a1, _na)
-            _ys = np.linspace(_b0, _b1, _nb)
-            # Levels strictly INSIDE (vmin, vmax): auto levels land ON
-            # the electrode potentials (the field extremes), and a level
-            # AT an electrode's potential has nothing to trace but the
-            # metal's constant-phi region and its raster staircase — it
-            # degenerates into noise squiggles along every surface
-            # (measured on a tube-stack deck).
-            _vmin = float(np.nanmin(f.values))
-            _vmax = float(np.nanmax(f.values))
-            if _vmax > _vmin:
-                _lv = np.linspace(_vmin, _vmax, 18)[1:-1]
-            else:
-                # a constant field has no equipotential structure to
-                # draw; one interior level would be pure noise. Refuse
-                # the contours, keep the panel (metal + paths still
-                # carry the scene).
-                _lv = []
-            cset = (ax.contour(_xs, _ys, f.values, levels=_lv, cmap=cmap,
-                               linewidths=0.7, alpha=0.9, zorder=1)
-                    if len(_lv) else None)
-            # colorbar sized to the DRAWN axes (same standing
-            # rule as candidate_field_figure): with aspect-equal panes a
-            # slot-fraction bar towers over the plot it annotates.
-            from mpl_toolkits.axes_grid1 import make_axes_locatable
-            if cset is not None:
-                _cax = make_axes_locatable(ax).append_axes(
-                    "right", size="3.5%", pad=0.08)
-                cb = fig.colorbar(cset, cax=_cax)
-                cb.set_label(f.quantity, fontsize=8)
-                cb.ax.tick_params(labelsize=7)
-            else:
-                # constant field: say so where the colorbar would be,
-                # rather than a silent blank.
-                ax.text(0.99, 0.01,
-                        f"{f.quantity}: constant ({_vmin:g})",
-                        transform=ax.transAxes, ha="right", va="bottom",
-                        fontsize=7, color="0.4")
-        no_field = bool(scene.fields) and field and f is None
-        for i, b in enumerate(scene.bodies):
-            # a SCHEMATIC body inside a solved scene is HATCHED, so the eye
-            # cannot mistake the drawn part for the solved part.
-            sk = b.stamp_in(scene) == SCHEMATIC
-            # ONE PolyCollection per body per view: every
-            # poly of a body carries the SAME style, and one Polygon
-            # artist per poly made artist count O(n_polys) — a revolved
-            # r-z body is tens of thousands of quads, and render_mpl
-            # stalled minutes-long on the orbitrap's 3 views. A
-            # collection draws the identical fills/edges/alpha/hatch in
-            # one artist. Style semantics unchanged, per-poly.
-            _qs = [project(p, v) for p in b.polys]
-            if getattr(b, "outline", False):
-                # OUTLINE body: boundary path only — the electrode
-                # reads as a line drawing over the field.
-                ax.add_collection(PolyCollection(
-                    _qs, closed=True, facecolors="none",
-                    edgecolors=edges[i], linewidths=1.4, zorder=3))
-            else:
-                # SEMI-TRANSPARENT: the field contours and the ion paths
-                # behind an electrode stay readable, and overlapping bodies
-                # in a projection remain distinguishable.
-                ax.add_collection(PolyCollection(
-                    _qs, closed=True, facecolors=cols[i],
-                    edgecolors=edges[i], linewidths=1.0, alpha=0.30,
-                    hatch="///" if sk else None, zorder=3))
-        # METAL as a cut through this plane (semi-transparent), when the
-        # scene carries one. Drawn under the ion paths, over the contours.
-        _m = {mm.plane: mm for mm in getattr(scene, "metal", [])}.get(v)
-        if _m is not None:
-            _ma0, _ma1, _mb0, _mb1 = _m.extent
-            _mv = np.asarray(_m.values, float)
-            _mx = np.linspace(_ma0, _ma1, _mv.shape[1])
-            _my = np.linspace(_mb0, _mb1, _mv.shape[0])
-            ax.contourf(_mx, _my, (_mv > 0).astype(float),
-                        levels=[0.5, 1.5], colors=["#4c72b0"], alpha=0.30,
-                        zorder=3)
-            ax.contour(_mx, _my, (_mv > 0).astype(float), levels=[0.5],
-                       colors=["#26456e"], linewidths=0.8, zorder=3.1)
-        for r in scene.rays:
-            for k, p in enumerate(r.paths):
-                q = project(p, v)
-                ax.plot(q[:, 0], q[:, 1], lw=0.7, alpha=0.85, zorder=4,
-                        color=plt.cm.plasma((k % 8) / 8.0))
-        a0, a1, b0, b1 = view_extent(scene, v)
-        ax.set_xlim(a0, a1)
-        ax.set_ylim(b0, b1)
-        # y_exag > 1 MAGNIFIES the transverse axis, the convention the
-        # mirror-field literature uses (Verenchikov JASMS 2026 Fig. 2A/2C
-        # both state "vertical scale magnified"). A mirror is hundreds of mm
-        # long and a few mm tall on axis, so true scale renders the ion
-        # channel as a hairline and the equipotentials as a smear -- the
-        # panel is technically correct and shows nothing. The magnification
-        # is STAMPED on the panel below, never silent, because a reader
-        # measuring an angle or a gap off a distorted panel would be wrong.
-        ax.set_aspect("equal" if y_exag == 1.0 else float(y_exag))
-        if y_exag != 1.0:
-            ax.text(0.995, 0.02, f"vertical scale x{y_exag:g}",
-                    transform=ax.transAxes, ha="right", va="bottom",
-                    fontsize=7.5, color="#b03030",
-                    bbox=dict(fc="white", ec="none", alpha=0.75, pad=1.5),
-                    zorder=9)
-        # dimension callouts.  A DERIVED number is drawn in a different colour
-        # and tagged, because "the source states 2.5" and "I inferred 1.152
-        # from two things the source states" are different claims.
-        for d in scene.dims:
-            if d.view != v:
-                continue
-            col = "#00695c" if d.derived else "crimson"
-            ax.annotate("", xy=tuple(d.p1), xytext=tuple(d.p0),
-                        arrowprops=dict(arrowstyle="<->", color=col, lw=0.9),
-                        zorder=5)
-            # offset the label PERPENDICULAR to its own arrow.  Centring it on
-            # the midpoint puts the number on top of the line it measures and,
-            # on a crowded transverse section, on top of the next number too.
-            dx = float(d.p1[0]) - float(d.p0[0])
-            dy = float(d.p1[1]) - float(d.p0[1])
-            L = float(np.hypot(dx, dy)) or 1.0
-            span = max(a1 - a0, b1 - b0)
-            off = 0.018 * span
-            mx = 0.5 * (d.p0[0] + d.p1[0]) - off * dy / L
-            my = 0.5 * (d.p0[1] + d.p1[1]) + off * dx / L
-            ax.text(mx, my, d.label + ("  (derived)" if d.derived else ""),
-                    color=col, fontsize=6.5, ha="center", va="center", zorder=6,
-                    bbox=dict(fc="white", ec="none", alpha=0.72, pad=0.8))
-        # DECLARED KILL BOUNDS: dashed, in the interactive view's colour
-        # (#9467bd, sim_app's convention) so both surfaces speak one visual
-        # language. A bound on the view's horizontal axis draws as a
-        # vertical line and vice versa; a bound NORMAL to the view plane is
-        # the whole panel and cannot be drawn as a line, so it is skipped
-        # in that view (it still draws in the views that contain its axis).
-        # Axis letters from the _AXES authority — the view-name CHARS are
-        # not in (horizontal, vertical) order for xz/yz (Convention A puts
-        # the axial coordinate horizontal). Keying on v[0]/v[1] drew the
-        # z-bound as an out-of-range horizontal line in the axial views —
-        # the same array-vs-view order trap as the slab builder.
-        _bha, _bva = _LABEL[_AXES[v][0]], _LABEL[_AXES[v][1]]
-        for _bax, _bmm, _blab in scene.bound_marks:
-            if _bax == _bha:
-                ax.axvline(_bmm, color="#9467bd", lw=1.0, ls="--", zorder=4)
-                ax.text(_bmm, b1 - 0.04 * (b1 - b0), _blab, color="#9467bd",
-                        fontsize=6.0, ha="right", va="top", rotation=90,
-                        zorder=6,
-                        bbox=dict(fc="white", ec="none", alpha=0.72,
-                                  pad=0.6))
-            elif _bax == _bva:
-                ax.axhline(_bmm, color="#9467bd", lw=1.0, ls="--", zorder=4)
-                ax.text(a0 + 0.04 * (a1 - a0), _bmm, _blab, color="#9467bd",
-                        fontsize=6.0, ha="left", va="bottom", zorder=6,
-                        bbox=dict(fc="white", ec="none", alpha=0.72,
-                                  pad=0.6))
-        # DECLARED STATIONS: a station on the view's horizontal axis is a
-        # vertical SEGMENT at pos_mm spanning its window on the vertical
-        # axis (and vice versa) — solid and kind-coloured, so the
-        # detector reads as hardware with a finite face, not another
-        # infinite bound. No window on the in-panel axis -> full-extent
-        # dash-dot (honest: the deck declared no aperture in this plane).
-        # A station NORMAL to the panel is skipped here, like bounds.
-        # Labels are suppressed WHOLESALE above the threshold, never
-        # thinned: labelling every 5th plane would leave a reader to guess
-        # which line each name belongs to, which is worse than a note that
-        # states the whole ladder.
-        _st_label = len(scene.station_marks) <= station_label_max
-        for _st in scene.station_marks:
-            _sc = _STATION_COLORS.get(_st["kind"], "#2ca02c")
-            _sl = f"{_st['name']} ({_st['kind']} station)"
-            if not _st_label:
-                _sl = None
-            if _st["axis"] == _bha:
-                _w = _st["window"].get(_bva)
-                if _w:
-                    ax.plot([_st["pos_mm"]] * 2, list(_w), color=_sc,
-                            lw=2.4, solid_capstyle="butt", zorder=5)
-                else:
-                    ax.axvline(_st["pos_mm"], color=_sc, lw=1.4,
-                               ls="-.", zorder=5)
-                if _sl:
-                    ax.text(_st["pos_mm"], (_w[1] if _w
-                                            else b1 - 0.08 * (b1 - b0)),
-                            _sl, color=_sc, fontsize=6.0, ha="center",
-                            va="bottom", zorder=6,
-                            bbox=dict(fc="white", ec="none", alpha=0.72,
-                                      pad=0.6))
-            elif _st["axis"] == _bva:
-                _w = _st["window"].get(_bha)
-                if _w:
-                    ax.plot(list(_w), [_st["pos_mm"]] * 2, color=_sc,
-                            lw=2.4, solid_capstyle="butt", zorder=5)
-                else:
-                    ax.axhline(_st["pos_mm"], color=_sc, lw=1.4,
-                               ls="-.", zorder=5)
-                if _sl:
-                    ax.text((_w[0] if _w else a0 + 0.08 * (a1 - a0)),
-                            _st["pos_mm"], _sl, color=_sc, fontsize=6.0,
-                            ha="left", va="bottom", zorder=6,
-                            bbox=dict(fc="white", ec="none", alpha=0.72,
-                                      pad=0.6))
-            elif (_bha in _st["window"] and _bva in _st["window"]):
-                # station NORMAL to this panel: the head-on view of its
-                # face. With a window on BOTH panel axes the face is a
-                # drawable rectangle (the detector as the ions see it);
-                # drawn solid-outlined at the plane's colour with the
-                # plane coordinate stated. A windowless normal station
-                # is the whole panel and stays skipped, like bounds.
-                _wa, _wb = _st["window"][_bha], _st["window"][_bva]
-                from matplotlib.patches import Rectangle as _MplRect
-                ax.add_patch(_MplRect(
-                    (_wa[0], _wb[0]), _wa[1] - _wa[0], _wb[1] - _wb[0],
-                    fill=False, edgecolor=_sc, lw=2.0, zorder=5))
-                if _sl:
-                    ax.text(_wa[0], _wb[1],
-                            f"{_sl} face, "
-                            f"{_st['axis']}={_st['pos_mm']:g} mm",
-                            color=_sc, fontsize=6.0, ha="left", va="bottom",
-                            zorder=6, bbox=dict(fc="white", ec="none",
-                                                alpha=0.72, pad=0.6))
-        la, lb = view_labels(v, scene)
-        ax.set_xlabel(la, fontsize=9)
-        ax.set_ylabel(lb, fontsize=9)
-        _cut = ""
-        if _m is not None and _m.at is not None:
-            _norm = ({"xy": "z", "xz": "y", "yz": "x"}).get(v, "")
-            _cut = f"\nslice at {_norm} = {_m.at:.2f} mm"
-        _nm = getattr(scene, "axis_names", ("x", "y", "z"))
-        _vname = _nm[_AXES[v][0]] + _nm[_AXES[v][1]]
-        ax.set_title(f"{_vname} view" + _cut
-                     + ("\n(no solved field in this plane)"
-                        if no_field else ""), fontsize=9)
+        draw_view(ax, scene, v, field=field, cmap=cmap,
+                  station_label_max=station_label_max, y_exag=y_exag,
+                  colors=(cols, edges))
 
     # The per-electrode legend is deliberately NOT drawn. On a real stack
     # it listed more entries than the figure had room for, and it named
@@ -2736,7 +2800,7 @@ def render_mpl(scene: Scene, views=None, *, field: bool = True,
     # _body_colors: groups and colours come from the bodies present.
     # Capped at 6 entries so the old too-many-entries failure cannot
     # recur; beyond that the caption remains the identity channel.
-    _legend_h = 0.0
+    _leg = None
     _grps_present = sorted({getattr(b, "group", None)
                             for b in scene.bodies
                             if getattr(b, "group", None)})
@@ -2748,13 +2812,13 @@ def render_mpl(scene: Scene, views=None, *, field: bool = True,
         _handles = [Patch(facecolor="none", edgecolor=_gidx[g],
                           linewidth=2.0, label=g)
                     for g in _grps_present]
-        _legend_h = 0.030 + 0.022 * ((len(_handles) + 2) // 3)
-        fig.legend(handles=_handles, loc="lower center",
-                   ncol=min(3, len(_handles)), fontsize=8,
-                   frameon=False,
-                   bbox_to_anchor=(0.5, _notes_h))
+        # placed after the caption is measured (below), in the TOP band
+        _leg = fig.legend(handles=_handles, loc="upper right",
+                          ncol=len(_handles), fontsize=8, frameon=False,
+                          bbox_to_anchor=(0.99, 0.99),
+                          borderaxespad=0.0, handlelength=1.6)
         # no legend title: the caption line already names the outline
-        # channel, and a title here collides with panel x-labels
+        # channel
     named = [b for b in scene.bodies if b.volt is not None]
 
     # ---- line-out row
@@ -2830,7 +2894,25 @@ def render_mpl(scene: Scene, views=None, *, field: bool = True,
                          color="#444", ha="left", va="top")
         fig.canvas.draw()
         _top = _band(t_cap).y0 - _pad
-    _bot = _band(t_notes).y1 + _pad
+    # THE GROUP LEGEND sits in the TOP band, right-aligned on the caption
+    # line (or under the title when there is no caption), and the top band
+    # is lowered to clear it. It was anchored in the bottom band at an
+    # ESTIMATED notes height, where it sat over the x tick labels and the
+    # x-axis title on every multi-group scene (latent until bodies carried
+    # their drive groups). The bottom band cannot be grown to make room:
+    # tight_layout cannot move axes that carry a make_axes_locatable
+    # colourbar, so the panels stay where the gridspec margins put them,
+    # and the top margin is the one with measured spare room.
+    if _leg is not None:
+        _ly = (_band(t_cap).y1 if named else _band(t_title).y0 - _pad)
+        _leg.set_bbox_to_anchor((0.99, _ly), transform=fig.transFigure)
+        fig.canvas.draw()
+        _top = min(_top, _band(_leg).y0 - _pad)
+
+    def _floor():
+        return _band(t_notes).y1 + _pad
+
+    _bot = _floor()
     # tight_layout places the axes BOX inside the rect, but with a colorbar
     # present its tick and axis labels can still hang below — which is how
     # the notes ended up under the x-axis labels. So converge on the real
@@ -2845,7 +2927,7 @@ def render_mpl(scene: Scene, views=None, *, field: bool = True,
                   for a in fig.axes]
         _lo = min(b.y0 for b in _boxes)
         _hi = max(b.y1 for b in _boxes)
-        _need_b = (_band(t_notes).y1 + _pad) - _lo
+        _need_b = _floor() - _lo
         _need_t = _hi - _top
         if _need_b <= 1e-3 and _need_t <= 1e-3:
             break
@@ -2874,7 +2956,10 @@ def render_mpl(scene: Scene, views=None, *, field: bool = True,
         if _grow > 0.05:
             _new_h = min(fig.get_figheight() + _grow, 24.0)
             fig.set_size_inches(fig_w, _new_h)
-            fig.tight_layout(rect=(0, _bot * (fig_h / _new_h),
+            # the notes are placed in figure FRACTIONS, so the resize moved
+            # them in inches; lay out against their measured top again
+            fig.canvas.draw()
+            fig.tight_layout(rect=(0, _floor(),
                                    1, 1 - (1 - _top) * (fig_h / _new_h)))
     if path:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -2908,11 +2993,11 @@ def distribution_compare(panels, *, title, operating_point, bins=30,
         and "ns" for a sample held in us).
     title : figure title (what is being compared).
     operating_point : REQUIRED string placed under the title — gas,
-        drive, m/z, seed; a distribution figure without its operating
+        drive, ion, seed; a distribution figure without its operating
         point is not a result.
     Returns the matplotlib figure; the caller saves/shows.
     """
-    # Agg only when no notebook/GUI backend is active (L-550: this forced
+    # Agg only when no notebook/GUI backend is active (this once forced
     # Agg unconditionally, switching a live notebook's backend)
     _mpl_headless_if_needed()
     import matplotlib.pyplot as plt
@@ -2999,7 +3084,7 @@ def resolution_anatomy(panels, *, title, operating_point, bins=60,
 
     Returns the matplotlib figure; the caller saves/shows.
     """
-    # Agg only when no notebook/GUI backend is active (L-550: this forced
+    # Agg only when no notebook/GUI backend is active (this once forced
     # Agg unconditionally, switching a live notebook's backend)
     _mpl_headless_if_needed()
     import matplotlib.pyplot as plt
@@ -3424,7 +3509,7 @@ def report(scenes, outdir, *, name="report", views=None, field=True):
                   f"![{sc.title}]({os.path.basename(p)})", ""]
         lines += [f"- {t}" for t in sc.notes] + [""]
     idx = os.path.join(outdir, "index.md")
-    with open(idx, "w") as fh:
+    with open(idx, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
     written.append(idx)
     return written
@@ -3591,7 +3676,7 @@ def true_scale_layout(fig, *, margin, px_width: int = 900,
     own, because the pane is the one sizing authority (M-VIZ-Z2).
 
     The legend sits in a band above the plot, sized from the number of
-    entries at a fixed entry width (PI ruling 2026-10-24). Entries beyond
+    entries at a fixed entry width. Entries beyond
     legend_max_rows rows are hidden from the legend, and the legend title
     states how many, so nothing is dropped silently.
 
@@ -4004,6 +4089,11 @@ def _exposed_mesh(occ, cell_mm, origin=(0.0, 0.0, 0.0)):
     return verts, tris
 
 
+# Block-pooling stride beyond which the solver-voxel view stops coarsening
+# and draws over its face budget (its legend names the stride used).
+_MAX_VOXEL_POOL_STRIDE = 16
+
+
 def _pool_any(occ, s):
     """Block-any pooling by stride s: presence-preserving decimation (a
     thin feature survives, unlike plain slicing)."""
@@ -4055,7 +4145,7 @@ def mesh_preview_figure(named_meshes, *, title, height=620, opacity=0.55,
     -- `i` the colour index, so an electrode keeps its colour whatever is
     skipped -- name on hover, aspectmode='data', axes in mm. Shared by
     cad_preview (a deck's files) and the STL upload panel (dropped bytes,
-    before any spec exists; L-548: it built its own figure)."""
+    before any spec exists; it once built its own figure)."""
     import plotly.graph_objects as go
     fig = go.Figure()
     for name, mesh, i in named_meshes:
@@ -4082,8 +4172,8 @@ def cad_preview(spec, *, height: int = 620, opacity: float = 0.55):
     truth, one colour per electrode, name on hover, aspectmode='data'.
 
     PROMOTED from sim_app's STL-upload preview so notebooks and the app
-    share one implementation; both now draw through mesh_preview_figure
-    (L-548), the uploader from its in-memory bytes before a spec exists.
+    share one implementation; both now draw through mesh_preview_figure,
+    the uploader from its in-memory bytes before a spec exists.
 
     This shows the MESH AS IMPORTED (CAD frame, mm). What the solver
     flies is the voxelized raster of it — voxel_views() shows that; the
@@ -4091,7 +4181,9 @@ def cad_preview(spec, *, height: int = 620, opacity: float = 0.55):
     """
     from ion_gym.io.stl_resolve import resolve_stl_dir, parse_stl_bytes
     stl_dir = resolve_stl_dir(spec)
-    named = [(el.name, parse_stl_bytes((stl_dir / el.stl).read_bytes()), i)
+    named = [(el.name, parse_stl_bytes((stl_dir / el.stl).read_bytes(),
+                                       name=f"electrode {el.name!r} mesh "
+                                            f"{stl_dir / el.stl}"), i)
              for i, el in enumerate(spec.geometry.electrodes)
              if getattr(el, "stl", None)]
     if not named:
@@ -4150,14 +4242,13 @@ def voxel_views(labels, h_mm, *, names=None, voltages=None,
     total_faces = 0
     for k, i in enumerate(ids):
         occ = (lab == i)
-        stride = 1
-        while True:
+        # coarsen until the faces fit, up to _MAX_VOXEL_POOL_STRIDE + 1
+        # (the stride is announced in the legend either way)
+        for stride in range(1, _MAX_VOXEL_POOL_STRIDE + 2):
             sub = _pool_any(occ, stride)
             # upper bound on exposed faces without building them
-            est = 6 * int(sub.sum())
-            if est <= max_faces // len(ids) or stride > 16:
+            if 6 * int(sub.sum()) <= max_faces // len(ids):
                 break
-            stride += 1
         cell = (h_mm * stride,) * 3
         verts, tris = _exposed_mesh(sub, cell, origin=o)
         total_faces += len(tris)
@@ -4583,7 +4674,7 @@ def field_slice_3d(fig, model, axis, index=None,
 
 def plane_of(la, lb):
     """The view plane from its two axis labels, ORDER-INDEPENDENT.
-    Convention A (v144) made the axial coordinate horizontal, so "xz"
+    Convention A made the axial coordinate horizontal, so "xz"
     hands you la="z", lb="x" — every branch that tested `la == "x"`
     to mean "the xz view" (or "the axial coordinate") silently picked
     the wrong picture after that change (funnel rings inside the xz
@@ -4792,18 +4883,14 @@ def el_mask_fills(fig, masks, h, coords, la, lb, *, alpha, fill, label,
                 # electrode's label at the plot centre, stacked and
                 # unreadable on dense decks — same defect the
                 # mpl path had.
-                try:
-                    from scipy.ndimage import label as _cclabel
-                    _lbl, _n = _cclabel(img)
-                    if _n > 1:
-                        _big = int(np.argmax(np.bincount(
-                            _lbl.ravel())[1:])) + 1
-                        _use = _lbl == _big
-                    else:
-                        _use = img
-                except ImportError:
-                    # scipy optional: fall back to the all-pixel mean
-                    # (single-body electrodes are unaffected either way)
+                # scipy is a core dependency: imported, never guarded
+                from scipy.ndimage import label as _cclabel
+                _lbl, _n = _cclabel(img)
+                if _n > 1:
+                    _big = int(np.argmax(np.bincount(
+                        _lbl.ravel())[1:])) + 1
+                    _use = _lbl == _big
+                else:
                     _use = img
                 ii, jj = np.where(_use)
                 fig.add_annotation(
@@ -5154,15 +5241,26 @@ def efield_heat(fig, model, z, r_full, img):
             opacity=0.55, showscale=False)
 
 
-def potential_contours(fig, z, r_full, img, n_contours):
-    """Blue equipotential line set — MOVED VERBATIM (Phase B)."""
+# Equipotential line colour scale: each line is coloured
+# by its potential on this scale, low to high. Named here so the choice
+# is stated once; the 3D Flight Viewer's trajectory default is the same
+# scale (flight_view.DEFAULT_CMAP).
+CONTOUR_COLORSCALE = "Plasma"
+
+
+def potential_contours(fig, z, r_full, img, n_contours, *,
+                       colorscale=CONTOUR_COLORSCALE):
+    """Equipotential line set, each line coloured by its level on
+    `colorscale` (coloring "lines": plotly takes the colour from the scale
+    and ignores line.color, so no single colour is declared)."""
     if n_contours > 0:
         fig.add_contour(
             x=z, y=r_full, z=img.T, showscale=False,
+            colorscale=colorscale,
             contours=dict(coloring="lines", start=float(img.min()),
                           end=float(img.max()),
                           size=max((img.max()-img.min())/n_contours, 1e-6)),
-            line=dict(width=1, color="#4c78a8"))
+            line=dict(width=1))
 
 
 def grid_overlays(fig, spec, la, lb, *, label=True):
@@ -5240,7 +5338,7 @@ def station_overlays(fig, spec, la, lb, *, label=True, autorange=None):
     with any number of stations. The matplotlib renderer has drawn these
     already; the plotly UI had no equivalent, which is why the
     detector was invisible in the View tab and detection statistics
-    could not be tied to anything on screen (L-63c).
+    could not be tied to anything on screen.
 
     Geometry rules, all read off the declaration:
       * station axis IN the view plane -> a segment ACROSS the other
@@ -5457,7 +5555,7 @@ def stats_figure(rows, *, kind="stations", height=300, title=None):
     return fig
 
 
-# ------------------------------------------------ analysis figure (L-548)
+# ------------------------------------------------ analysis figure
 # The app's Analysis tab drew these inline, twice (single-stage results and
 # assembly flights), with different grouping rules: fate colouring was
 # ignored in single-stage trajectory mode, an unknown fate fell out of every
@@ -5468,12 +5566,12 @@ def stats_figure(rows, *, kind="stations", height=300, title=None):
 ANALYSIS_MAX_ION_TRACES = 400     # per-ion traces: browser overhead per trace
 ANALYSIS_MAX_PTS_PER_TRACE = 5000  # decimation within one ion's trace
 ANALYSIS_KINDS = ("traj", "end", "hist")
-ANALYSIS_GROUPS = ("ion", "all together", "fate", "m/z")
+ANALYSIS_GROUPS = ("ion", "all together", "fate", "mass")
 UNKNOWN_MZ_COLOR = "#7f7f7f"
 
 
 def mz_key(mz) -> str:
-    """THE text identity of an m/z in the Analysis selector, legend and
+    """THE text identity of a mass in the Analysis selector, legend and
     filter. Options are offered under this key and matched by it, so a
     value is selectable exactly when it is offered (no tolerance)."""
     return f"{float(mz):.10g}"
@@ -5486,8 +5584,8 @@ class AnalysisSeries:
     x, y : 1-D arrays -- a trajectory (kind 'traj'), the end point as
            length-1 arrays ('end'), or the values to histogram in x ('hist',
            y unused and may be None).
-    mz   : the ion's own m/z, or None when it is not recorded (drawn under
-           'm/z unknown', never given a stand-in value).
+    mz   : the ion's own MASS in Da, or None when it is not recorded (drawn
+           under 'mass unknown', never given a stand-in value).
     fate : the ion's fate, labelled and coloured by the figure's fate_style.
     """
     ion: object
@@ -5526,7 +5624,9 @@ def analysis_series_csv(series, *, kind, x_name, y_name, meta=None,
         buf.write("# {0}: {1}\n".format(k, v))
     w = _csv.writer(buf, lineterminator="\n")
     hist = (kind == "hist")
-    w.writerow(["ion", "mz", "fate", x_name] + ([] if hist else [y_name]))
+    # "mass_da": the column holds the ion MASS (the per-ion "mz" key is a
+    # historical name); a header saying m/z mislabelled it
+    w.writerow(["ion", "mass_da", "fate", x_name] + ([] if hist else [y_name]))
     for ser in series:
         label, _colour = fate_style(ser.fate)
         mz_txt = "" if ser.mz is None else repr(float(ser.mz))
@@ -5553,18 +5653,22 @@ def _default_fate_style(fate):
     return fate_name(fate), fate_color(fate)
 
 
-def _analysis_groups(series, group, palette, fate_style):
-    """[(label, colour, [series...]), ...] for a colouring group."""
-    if group == "m/z":
+def _analysis_groups(series, group, palette, fate_style, charge=1,
+                     label_mode="mass"):
+    """[(label, colour, [series...]), ...] for a colouring group. Species
+    (group 'mass') are named by ion_envelope.ion_label in label_mode."""
+    from ion_gym.physics.ion_envelope import ion_label
+    if group == "mass":
         known = sorted({float(s.mz) for s in series if s.mz is not None})
         out = []
         for i, m in enumerate(known):
-            out.append((f"m/z {mz_key(m)}", palette[i % len(palette)],
+            out.append((ion_label(m, charge, label_mode),
+                        palette[i % len(palette)],
                         [s for s in series
                          if s.mz is not None and float(s.mz) == m]))
         unknown = [s for s in series if s.mz is None]
         if unknown:
-            out.append(("m/z unknown", UNKNOWN_MZ_COLOR, unknown))
+            out.append(("mass unknown", UNKNOWN_MZ_COLOR, unknown))
         return out
     if group == "fate":
         fates = sorted({s.fate for s in series},
@@ -5593,16 +5697,19 @@ def analysis_figure(series, *, kind, group, palette, x_label, y_label,
                     title, alpha=0.7, line_mode="lines", bins=20,
                     fate_style=None, height=460,
                     max_ion_traces=ANALYSIS_MAX_ION_TRACES,
-                    max_pts=ANALYSIS_MAX_PTS_PER_TRACE):
+                    max_pts=ANALYSIS_MAX_PTS_PER_TRACE, charge=1,
+                    label_mode="mass"):
     """The Analysis tab figure, from per-ion AnalysisSeries.
 
     Route-agnostic: it takes extracted numbers, never a deck or a model.
     kind  : 'traj' (every recorded point), 'end' (one point per ion) or
             'hist' (histogram of x; y ignored).
     group : 'ion' (a trace per ion in trajectory mode; one series
-            otherwise), 'all together', 'fate' or 'm/z' -- honoured in every
-            kind. Ions without an m/z form a named 'm/z unknown' group; an
-            unknown fate is a group like any other (fate_style labels it).
+            otherwise), 'all together', 'fate' or 'mass' -- honoured in
+            every kind. Ions without a recorded mass form a named 'mass
+            unknown' group; an unknown fate is a group like any other.
+    charge, label_mode : how group 'mass' names each species
+            (ion_envelope.ion_label: mass in Da or m/z, with the charge).
     fate_style : fate -> (label, colour); default ion_envelope's one table.
     Returns (fig, info); info['ion_traces_capped'] is True when
     group 'ion' in 'traj' hit max_ion_traces (the caller says so).
@@ -5619,7 +5726,8 @@ def analysis_figure(series, *, kind, group, palette, x_label, y_label,
     fig = go.Figure()
     info = {"ion_traces_capped": False}
     if kind == "hist":
-        groups = _analysis_groups(series, group, palette, fate_style)
+        groups = _analysis_groups(series, group, palette, fate_style,
+                                  charge, label_mode)
         for label, colour, members in groups:
             vals = (np.concatenate([np.asarray(s.x, float) for s in members])
                     if members else np.array([]))
@@ -5630,7 +5738,7 @@ def analysis_figure(series, *, kind, group, palette, x_label, y_label,
         fig.update_layout(barmode="overlay", yaxis_title="count")
     elif kind == "end":
         for label, colour, members in _analysis_groups(
-                series, group, palette, fate_style):
+                series, group, palette, fate_style, charge, label_mode):
             if not members:
                 continue
             fig.add_scattergl(
@@ -5658,7 +5766,7 @@ def analysis_figure(series, *, kind, group, palette, x_label, y_label,
         # one trace PER GROUP; NaN separators keep each ion's line from
         # joining the next ion's
         for label, colour, members in _analysis_groups(
-                series, group, palette, fate_style):
+                series, group, palette, fate_style, charge, label_mode):
             if not members:
                 continue
             cx = np.concatenate([np.append(_decimate(s.x, max_pts), np.nan)
@@ -5730,6 +5838,7 @@ def phase_portrait(results, cols, spec, *, axes=("x", "y"),
                             dpi=dpi)
     axs = np.atleast_1d(axs)
     from ion_gym.physics.stats import mz_of_results
+    from ion_gym.physics.ion_envelope import ion_label
     mzs = mz_of_results(spec, len(results))
     multi = len(set(mzs)) > 1
     for ax_name, ax in zip(axes, axs):
@@ -5747,7 +5856,7 @@ def phase_portrait(results, cols, spec, *, axes=("x", "y"),
             for m_da in sorted(set(mzs)):
                 s = sp_of == m_da
                 ax.scatter(u[s], v[s], s=2.0, alpha=0.5, linewidths=0,
-                           label="m/z {0:g}".format(m_da))
+                           label=ion_label(m_da, spec.source.charge))
             lines = []
             for m_da, blk in rep["species"].items():
                 tv = blk.get("T_var_" + ax_name)
@@ -6170,7 +6279,7 @@ def drive_summary(spec):
 
 def spec_run_table(spec) -> str:
     """Compact run-parameter table for one spec:
-    RF amplitude range + frequencies, DC range, m/z set, ion count,
+    RF amplitude range + frequencies, DC range, masses, ion count,
     and the timeout/integration parameters — the numbers the solver
     and flyer receive, in one glance. Returns a formatted string."""
     rfs = list(spec.geometry.rf_groups or [])
@@ -6195,9 +6304,10 @@ def spec_run_table(spec) -> str:
                                                max(dcs)))
     else:
         lines.append("  DC     : none biased (all 0 V)")
-    lines.append("  ions   : m/z {0}, n={1}, {2:g} e".format(
+    from ion_gym.physics.ion_envelope import charge_str
+    lines.append("  ions   : {0} Da, {2}, n={1}".format(
         "/".join("{0:g}".format(m) for m in (spec.source.mz_list or [])),
-        spec.source.n_ions, spec.source.charge))
+        spec.source.n_ions, charge_str(spec.source.charge)))
     lines.append("  gas    : {0} at {1:g} Torr, {2:g} K".format(
         spec.collisions.gas, spec.collisions.P_torr, spec.collisions.T_k))
     lines.append("  timing : t_max {0:g} us (timeout fate), dt {1:g} ns, "
@@ -6357,7 +6467,7 @@ HOTSPOT_DEFAULT_KT = 10.0   # default hot threshold, in kT of the deck's gas
 
 def hotspot_figure(x, y, ke_ev, *, threshold_ev, cell_mm, outlines=(),
                    title_suffix="", px_width=760):
-    """Hot-spot map (L-548: drawn inline in the app until D4): each spatial
+    """Hot-spot map (once drawn inline in the app): each spatial
     cell is the MAXIMUM KE any sample in it reached -- a lone hot sample
     cannot hide under overplotted cold ones -- floored at threshold_ev and
     topped at the true maximum (the extremes are the signal).
@@ -6559,8 +6669,9 @@ def assembly_stage_draw_mode(spec, rot_deg):
         cry, crz = math.radians(ry), math.radians(rz)
         cy_, sy_ = math.cos(cry), math.sin(cry)
         cz_, sz_ = math.cos(crz), math.sin(crz)
-        # world direction of LOCAL X under intrinsic X-Y-Z Euler: the
-        # first column of Rz@Ry@Rx does not involve the x-rotation.
+        # world direction of LOCAL X under the pose convention (extrinsic
+        # X-Y-Z, R = Rz@Ry@Rx, staged_flight._rot_matrix): the first
+        # column of R does not involve the x-rotation.
         a = (cz_ * cy_, sz_ * cy_, -sy_)
         k = max(range(3), key=lambda i: abs(a[i]))
         return ("drawn" if abs(abs(a[k]) - 1.0) <= 1e-9
@@ -7247,12 +7358,14 @@ def assembly_overview(stages, *, seams=None, trajs=None, traj_style=None, height
             f"lines/dots/lines+dots — drawn as lines")
         _draw_mode = "lines"
     _have_mz = any(_t.get("mz") is not None for _t in (trajs or []))
-    if _tmode == "m/z" and not _have_mz:
-        _style_notes.append("colour-by m/z: these traces carry no "
+    _zlab = _ts.get("charge")            # the assembly's charge state
+    _lmode = _ts.get("label_mode", "mass")
+    if _tmode == "mass" and not _have_mz:
+        _style_notes.append("colour-by mass: these traces carry no "
                             "per-ion mass (pre-fix flight or literal "
                             "packet) — coloured by fate")
         _tmode = "fate"
-    elif _tmode not in ("fate", "solid color", "m/z"):
+    elif _tmode not in ("fate", "solid color", "mass"):
         _style_notes.append(
             f"colour-by {_tmode!r} needs per-record data the assembly "
             f"traces do not carry — coloured by fate")
@@ -7267,8 +7380,8 @@ def assembly_overview(stages, *, seams=None, trajs=None, traj_style=None, height
         _lost = _t.get("fate") not in ("detected", "completed")
         if _tmode == "solid color":
             _colr = _tsolid
-        elif _tmode == "m/z":
-            # a trace WITHOUT a mass is grey (unknown m/z); it used to be
+        elif _tmode == "mass":
+            # a trace WITHOUT a mass is grey (unknown mass); it used to be
             # float(_t.get("mz", 0.0)), which raised on mz=None
             _m = _t.get("mz")
             _colr = ("#7f7f7f" if _m is None
@@ -7278,7 +7391,7 @@ def assembly_overview(stages, *, seams=None, trajs=None, traj_style=None, height
         else:
             # unreachable: every other mode was mapped to fate above, with
             # the reason in the title -- named so a new mode cannot land
-            # here as fate silently (L-554)
+            # here as fate silently
             raise VizError(f"assembly_overview: colour mode {_tmode!r} "
                            f"has no colour rule")
         _op_lost, _op_ok = min(1.0, _ta * 2.0), _ta
@@ -7315,11 +7428,13 @@ def assembly_overview(stages, *, seams=None, trajs=None, traj_style=None, height
     # and its operating point; nothing else.
     bits = [f"assembly · {len(stages)} stages"]
     bits.extend(_style_notes)
-    if _tmode == "m/z" and _mz_seen:
+    if _tmode == "mass" and _mz_seen:
+        from ion_gym.physics.ion_envelope import ion_label as _ion_label
         for _m in _mz_seen:
             _add(go.Scatter(x=[None], y=[None], mode="lines",
                             line=dict(color=_mz_col[_m], width=3),
-                            name=f"m/z {_m:g}", legendgroup="mz",
+                            name=_ion_label(_m, _zlab, _lmode),
+                            legendgroup="mz",
                             showlegend=True, hoverinfo="skip"),
                  panel=_first_drawn)
     if _n_traj:
@@ -7534,7 +7649,7 @@ def _rec_extent(rec, axis):
         cu, cv, ru, rv = ip
         return (cu - ru, cu + ru) if axis == u_ax else (cv - rv, cv + rv)
     # every kind that was not rect/polygon used to be measured AS an
-    # ellipse here (L-554); _deck_shapes3d emits only these three
+    # ellipse here; _deck_shapes3d emits only these three
     raise ValueError(f"_rec_extent: shape kind {kind!r} has no extent "
                      f"rule (known: rect, polygon, ellipse)")
 
@@ -7551,8 +7666,8 @@ def deck_multiview(spec, *, operating_point, planes=None,
     z-mirror the stored half is UNFOLDED (both halves drawn) so the
     xz/yz views show the physical device, with the unfold noted on
     the axis label. ``planes`` ({label: x_mm}) overlay on the
-    x-bearing views. Faithful mm aspect by default (ruled
-    2026-09-11); pass aspect="auto"/ratio to distort deliberately.
+    x-bearing views. Faithful mm aspect by default; pass
+    aspect="auto"/ratio to distort deliberately.
     ``trajectories=(results, cols)`` overlays each ion's recorded
     path on EVERY view (x-y, x-z, y-z projections of the same
     flight) — the doctrine's multi-axis flight-path clause; ions
@@ -7697,7 +7812,7 @@ def deck_multiview(spec, *, operating_point, planes=None,
                 elif kp == "ell":
                     ax.add_patch(_Ell((a, b), da, db, **style))
                 else:
-                    # was `else:` -> an ellipse for any patch kind (L-554)
+                    # was `else:` -> an ellipse for any patch kind
                     raise ValueError(f"deck_multiview: patch kind {kp!r} "
                                      f"has no drawing rule")
         ax.autoscale_view()
@@ -7779,21 +7894,21 @@ def deck_plane_preview(spec, *, planes, operating_point,
                        aspect="equal", rail_map=True):
     """Plan-view schematic of a deck's electrode footprints with named
     x-planes overlaid (birth / transporter emit / accept). Added
-    2026-09-09 for transporter-window verification: the caller passes
+    for transporter-window verification: the caller passes
     ``planes`` as {label: x_mm} and adjusts the window against what is
     DRAWN FROM THE SPEC ITSELF (display equals solver input — the
     rectangles are the spec's own shape parameters, nothing derived).
     Two views: the xy plan and a per-electrode x-extent rail map
     grouped by drive assignment. The rail map projects every shape
     onto x, which is meaningful ONLY when transport runs along a
-    single straight x-leg (its original transporter-window purpose,
-    2026-09-09) — on a multi-turn track it is chart junk (ruled
-    2026-09-11): pass rail_map=False there and the figure is the
+    single straight x-leg (its original transporter-window purpose)
+    — on a multi-turn track it is chart junk: pass rail_map=False
+    there and the figure is the
     plan alone. Returns the figure; no side effects.
     """
     # NO backend selection here: the renderer contract makes display
     # the CALLER's decision, and pinning Agg in a fresh Jupyter kernel
-    # silently disabled inline rendering (found 2026-09-10). Headless
+    # silently disabled inline rendering. Headless
     # environments auto-select Agg on their own.
     import matplotlib.pyplot as plt
 
@@ -7810,7 +7925,7 @@ def deck_plane_preview(spec, *, planes, operating_point,
     # constrained layout: the ONLY mpl layout engine that budgets an
     # outside legend + wrapped suptitle against an equal-aspect axes
     # without shrinking it into a corner (tight_layout + rect did
-    # exactly that, 2026-09-11)
+    # exactly that)
     if rail_map:
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize,
                                        sharex=True,
@@ -7819,7 +7934,7 @@ def deck_plane_preview(spec, *, planes, operating_point,
         fig, ax1 = plt.subplots(figsize=figsize,
                                 layout="constrained")
         ax2 = None
-    # FAITHFUL ASPECT by default (ruled 2026-09-11): an instrument's
+    # FAITHFUL ASPECT by default: an instrument's
     # xy plan renders in true mm proportions first; distortion is the
     # user's explicit choice (aspect="auto" or a numeric ratio), never
     # the renderer's. Applies to the plan only — the rail map's y is
@@ -7834,7 +7949,7 @@ def deck_plane_preview(spec, *, planes, operating_point,
                                     edgecolor="k", lw=0.3, alpha=0.8))
     if trajectories is not None:
         # ions IN the apparatus: (results, cols, axial_ch, transv_ch).
-        # Each results item may be (L-465, all three occur in the wild):
+        # Each results item may be (all three occur in the wild):
         #   * an object with .traj (the app's result records),
         #   * a (traj, summary) tuple exactly as fly(i) returns it,
         #   * a bare trajectory array.
@@ -7882,7 +7997,7 @@ def deck_plane_preview(spec, *, planes, operating_point,
         # in-axes top slot WITH a translucent backing: readable over
         # any plan content, and no external slot exists that never
         # collides (below-axis met the xlabel; the bare top met the
-        # title — Brian's markup, 2026-09-11)
+        # title)
         ax1.annotate(f"{lab} = {xv:g}",
                      xy=(float(xv), 0.99), xycoords=("data",
                                                      "axes fraction"),
@@ -7893,11 +8008,11 @@ def deck_plane_preview(spec, *, planes, operating_point,
                for g in groups]
     # legend OUTSIDE the data area (figure-level, budgeted by the
     # constrained engine): inside placement covered electrodes on
-    # dense plans (Brian's markup, 2026-09-11)
+    # dense plans
     fig.legend(handles=handles, fontsize=7, frameon=False,
                loc="outside right upper")
     # wrapped suptitle: long operating points overran fixed-width
-    # figures and clipped at the edges (Brian's markup, 2026-09-11)
+    # figures and clipped at the edges
     import textwrap
     fig.suptitle("\n".join(textwrap.wrap(
         f"deck plane preview — {operating_point}", width=64)),

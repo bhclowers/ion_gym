@@ -11,13 +11,13 @@ Turns a SimSpec (sim_spec.py) into the things a run needs:
 SCOPE (honest, staged — the schema is general; the builder grows to meet
 it rung by rung, each validated):
   * SOURCE generation: GENERAL now — point/disc/line/grid/file, thermal or
-    KE, m/z mix, tob spread. Geometry-agnostic.
+    KE, mass mix, tob spread. Geometry-agnostic.
   * FIELD assembly + fly: the CYLINDRICAL path (funnel/IMS) is wired and
     validated (reused the F-1 reference kernel via a voltage re-weighting;
     that kernel has since been removed along with its gates).
     PLANAR-2D and full-3D builders are stubbed with clear NotImplemented
     messages pointing at the validated pieces they'll compose (the 2-D
-    aware-field tracer, the native solver3d + mesh legs from v18). This
+    aware-field tracer, the native solver3d + mesh legs). This
     keeps the app honest: it runs what's proven and refuses what isn't,
     rather than silently producing an unvalidated field.
 
@@ -28,17 +28,18 @@ re-solve — instant, and exact (the fast-adjust property banked since
 Rung 1).
 """
 
+# The public names (docs/PUBLIC_API.md); everything else is internal.
+__all__ = ["build_run", "preflight", "build_route", "BuildRoute",
+           "build_needs_solve", "generate_births", "mz_of", "sizing_for"]
+
 import math
 
 import numpy as np
 
+from ion_gym.advisories import advise
 from ion_gym.io.sim_spec import SimSpec, set_pitch
 from ion_gym.physics.sizing import record_volume
 from ion_gym.physics.collision3d import E_CHG, KG_AMU, KB
-
-# Advisory texts already printed this process (see the advisory loop
-# in build_run): each unique text prints exactly once per session.
-_ADVISED: set = set()
 
 # Preview cost gate: the transport-view geometry
 # preview voxelizes a 3-D builder's electrodes BEFORE any solve. Above
@@ -51,7 +52,7 @@ PREVIEW_VOXEL_BUDGET = 30_000_000
 
 # Preview WORK budget for the shape rasterizer, in raster2d work units
 # (grid nodes x whole-grid passes per shape; a polygon costs two passes
-# per edge). Ruled 2026-10-30: ~10 s of preview is acceptable. Measured
+# per edge). ~10 s of preview is acceptable. Measured
 # on the build container: the Orbitrap at 0.02 mm/gu is 1.4e9 units and
 # took 10.4 s (~7.5e-9 s per unit), so 1e9 units is ~7.5 s there; other
 # machines differ by their numpy speed. Node count alone missed the
@@ -71,6 +72,11 @@ PREVIEW_PITCH_TRIES = 40
 # a bare 2.3548 in a function body is the kind of literal that drifts.
 FWHM_PER_SIGMA = 2.0 * math.sqrt(2.0 * math.log(2.0))
 
+# Bound on the truncated-Gaussian birth draw. gaussian_layout() keeps the
+# truncation at >= 1 sigma (>= 68% acceptance per draw), so this many
+# misses in a row is a broken layout, refused rather than looped on.
+GAUSSIAN_BIRTH_TRIES = 1000
+
 
 # ---------------------------------------------------------------- source
 def generate_births(spec: SimSpec):
@@ -83,17 +89,26 @@ def generate_births(spec: SimSpec):
     if s.distribution == "file":
         import os
         bf = s.births_file
-        if bf and not os.path.isabs(bf) and not os.path.exists(bf):
-            base = getattr(spec, "_loaded_from", None)
-            if base:
-                cand = os.path.join(os.path.dirname(base), bf)
-                if os.path.exists(cand):
-                    bf = cand
+        # A relative births_file belongs to the DECK it was loaded from,
+        # as STL paths do (stl_resolve). It used to be looked up in the
+        # working folder FIRST, so a same-named file there silently
+        # replaced the deck's ions (review R-07). A spec built in code (no
+        # deck) still reads relative to the working folder.
+        base = getattr(spec, "_loaded_from", None)
+        if bf and not os.path.isabs(bf) and base:
+            cand = os.path.join(os.path.dirname(os.path.abspath(base)), bf)
+            if not os.path.exists(cand):
+                raise FileNotFoundError(
+                    f"births_file {bf!r} is relative, so it is read beside "
+                    f"the deck: {cand} does not exist. Put the file next to "
+                    f"the deck or give an absolute path (the working folder "
+                    f"is not searched).")
+            bf = cand
         s = type(s).from_dict({**s.to_dict(), "births_file": bf})
         import csv
         REQUIRED = ("x", "y", "z", "vx", "vy", "vz")   # tob defaults to 0
         rows = []
-        with open(s.births_file) as fh:
+        with open(s.births_file, encoding="utf-8") as fh:
             rd = csv.DictReader(fh)
             have = set(rd.fieldnames or ())
             missing = [c for c in REQUIRED if c not in have]
@@ -117,11 +132,18 @@ def generate_births(spec: SimSpec):
             raise ValueError(
                 f"births_file {s.births_file!r} has {len(out)} rows but the "
                 f"spec declares n_ions={s.n_ions} x {max(1, len(s.mz_list))} "
-                f"m/z = {want}. Masses are assigned by contiguous block "
+                f"masses = {want}. Masses are assigned by contiguous block "
                 f"(ion i -> mz_list[i//n_ions]), so a mismatch mislabels "
                 f"every ion past the first block. Set n_ions to match the "
                 f"file, or regenerate the file.")
         return out
+
+    _zd = s.zero_direction_note()
+    if _zd:
+        # the same text as the advisory, so a caller of this generator who
+        # never sees advisories still hears it
+        import warnings
+        warnings.warn(_zd, stacklevel=2)
 
     n_per = s.n_ions
     n_mz = max(1, len(s.mz_list))
@@ -172,15 +194,25 @@ def generate_births(spec: SimSpec):
             for k in range(3):
                 if sig_g[k] <= 0.0:
                     continue
-                while True:
+                # bounded: at >= 68% acceptance, running out of tries
+                # means gaussian_layout let through what it should refuse
+                for _try in range(GAUSSIAN_BIRTH_TRIES):
                     dpos = rng.normal() * sig_g[k]
                     if abs(dpos) <= trc_g[k]:
                         break
+                else:
+                    raise RuntimeError(
+                        f"generate_births: no draw of the truncated "
+                        f"Gaussian on axis {'xyz'[k]} (sigma "
+                        f"{sig_g[k]:g} mm, truncation {trc_g[k]:g} mm) "
+                        f"fell inside the truncation in "
+                        f"{GAUSSIAN_BIRTH_TRIES} tries; gaussian_layout "
+                        f"should have refused this beam")
                 pos[k] += dpos
         else:
             # 'file' returned above (births_file); anything else is not a
             # distribution this generator knows. It used to fall through
-            # and be born as a POINT source at the centre (L-554).
+            # and be born as a POINT source at the centre.
             from ion_gym.io.sim_spec import SOURCE_DISTRIBUTIONS
             raise ValueError(
                 f"generate_births: source.distribution "
@@ -205,21 +237,12 @@ def generate_births(spec: SimSpec):
             sp = math.sqrt(2 * ke * E_CHG / m_kg) / 1000.0
             d = np.array(s.direction, float)
             _n = float(np.linalg.norm(d))
-            if _n == 0.0:
-                # Defence in depth behind SimSpec.validate(): the old
-                # `or 1.0` guard turned this contradiction (energy
-                # declared, no direction to put it in) into a zero
-                # directed velocity, so the deck's ke_lo..ke_hi never
-                # reached the solver and nothing said so. Refuse with
-                # the same fix the validator names.
-                raise ValueError(
-                    f"source.direction is the zero vector while "
-                    f"ke_lo..ke_hi = {s.ke_lo}..{s.ke_hi} eV declares a "
-                    f"directed beam — the energy has nowhere to point. "
-                    f"Give the beam a direction (e.g. [1.0, 0.0, 0.0]) "
-                    f"or declare ke_lo = ke_hi = 0 for births at rest.")
-            d = d / _n
-            v = v + sp * d
+            # A zero direction leaves the directed term at zero: the energy
+            # is IGNORED, announced once per generation above. The energy is
+            # still DRAWN, so the random stream -- and every later birth --
+            # is what every earlier flight of such a deck used.
+            if _n > 0.0:
+                v = v + sp * (d / _n)
         if s.temperature_k > 0:
             sig = math.sqrt(KB * s.temperature_k / m_kg) / 1000.0
             v = v + rng.normal(size=3) * sig
@@ -335,7 +358,7 @@ KNOWN_BUILDERS = ("stl3d", "scene3d", "shapes3d", "stl2d", "rz", "planar")
 # build_needs_solve: a cached 3-D build is still scheduled OFF the UI thread
 # when its drive compose (one full-grid gradient pass per drive group, plus
 # the static field) exceeds this many node-passes -- about two passes over a
-# multi-million-node grid, i.e. no longer "instant" (L-552: was a literal).
+# multi-million-node grid, i.e. no longer "instant" (was a literal).
 COMPOSE_HEAVY_NODE_PASSES = 5_000_000
 
 
@@ -380,6 +403,40 @@ def build_route(spec: SimSpec) -> BuildRoute:
     return BuildRoute("unwired", 3, coords)
 
 
+SOLID_3D_BUILDERS = ("stl3d", "scene3d", "shapes3d")
+
+
+def solved_3d_cache_key(spec: SimSpec):
+    """The disk-cache key dict under which a full 3-D route (STL, native
+    scene3d or extruded shapes) keeps its solved bases, or None for the
+    2-D routes (planar and r-z keep theirs in io.basis_cache). The same
+    key the builder uses, so it covers STL content and solver code."""
+    r = build_route(spec)
+    if r.builder not in SOLID_3D_BUILDERS:
+        return None
+    from ion_gym.physics.build_stl3d import _bases_cache_key
+    if r.builder == "scene3d":
+        from ion_gym.physics.build_scene3d import _geom_bytes
+        return _bases_cache_key(spec, geom_bytes=_geom_bytes,
+                                tag="scene3d-v1")
+    if r.builder == "shapes3d":
+        from ion_gym.physics.build_shapes3d import _geom_bytes
+        return _bases_cache_key(spec, geom_bytes=_geom_bytes,
+                                tag="shapes3d-v1")
+    return _bases_cache_key(spec)
+
+
+def solved_field_key(spec: SimSpec):
+    """The disk-cache key (hex) under which `spec`'s solved field is kept,
+    on any route: a full 3-D route's own key (solved_3d_cache_key), else
+    the planar/r-z key (io.basis_cache). It covers the geometry, the STL
+    contents and the solver code, so it is what a saved field is matched
+    by (io.field_io)."""
+    from ion_gym.io import basis_cache, fa_cache
+    kd = solved_3d_cache_key(spec)
+    return basis_cache.key(spec) if kd is None else fa_cache.spec_key(kd)
+
+
 def build_needs_solve(spec: SimSpec):
     """True if building this spec will actually SOLVE (cache miss).
 
@@ -391,7 +448,7 @@ def build_needs_solve(spec: SimSpec):
     # this function used to duplicate build_run's conditionals inline, which
     # is exactly how two answers to "what will this spec build?" drift apart).
     r = build_route(spec)
-    if r.builder in ("stl3d", "scene3d", "shapes3d"):
+    if r.builder in SOLID_3D_BUILDERS:
         # full 3-D STL, native scene3d, and native extruded shapes all
         # solve through build_stl3d's
         # multigrid bases and share fa_cache. Two costs matter here:
@@ -407,22 +464,11 @@ def build_needs_solve(spec: SimSpec):
         # channel compose with no spinner and no status to show for it.
         # So: slow if the bases miss OR the drive
         # composition will be heavy (more than one group on a large grid).
-        try:
-            from ion_gym.io import fa_cache
-            from ion_gym.physics.build_stl3d import _bases_cache_key
-            if r.builder == "scene3d":
-                from ion_gym.physics.build_scene3d import _geom_bytes
-                key = _bases_cache_key(spec, geom_bytes=_geom_bytes,
-                                       tag="scene3d-v1")
-            elif r.builder == "shapes3d":
-                from ion_gym.physics.build_shapes3d import _geom_bytes
-                key = _bases_cache_key(spec, geom_bytes=_geom_bytes,
-                                       tag="shapes3d-v1")
-            else:
-                key = _bases_cache_key(spec)
-        except ImportError:
-            return True               # cannot know it is cached -> solve
-        arrs, _ = fa_cache.load(key)
+        # These are ion_gym's own modules: imported, never guarded (an
+        # `except ImportError: return True` here answered a broken install
+        # with a guess).
+        from ion_gym.io import fa_cache
+        arrs, _ = fa_cache.load(solved_3d_cache_key(spec))
         if arrs is None:
             return True               # bases miss -> definitely slow
         # bases cached: still off-thread if the channel compose is heavy.
@@ -532,8 +578,8 @@ def preview_pitch(spec: SimSpec):
     Within both preview budgets: (spec's own pitch, None), and the
     preview is the solver's raster. Over either: the coarsest-needed
     pitch that fits, and a note saying the preview is drawn at that
-    pitch while the solve keeps its own (PI ruling 2026-10-30: draw
-    coarser and label it, rather than skip or block). Work scales as
+    pitch while the solve keeps its own (draw coarser and label it,
+    rather than skip or block). Work scales as
     pitch^-2 (the 2-D raster) and voxels as pitch^-3, so the first guess
     is exact up to set_pitch's lattice adjustment; the search then grows
     the pitch by PREVIEW_PITCH_STEP until it fits, and refuses with the
@@ -649,6 +695,30 @@ def has_3d_transport(spec: SimSpec):
                                          "shapes3d")
 
 
+def preflight(spec: SimSpec):
+    """The refusals build_run makes before it builds anything, after
+    resolving the derived values it resolves. Returns (recording_error or
+    None, [validate() refusals]); both empty means build_run proceeds to
+    build. `ion-gym validate` reads this, so a deck it passes is one
+    build_run accepts. Refusals that need the built geometry (a birth in
+    metal, an electrode with no nodes) are found only by building."""
+    # DC ladders are DERIVED voltages: resolve them before anything reads
+    # electrode.dc. Doing it here (one door, all builders) means a builder
+    # cannot forget, and a group member's dc can never be stale.
+    spec.resolve_dc_groups()
+    # An unset step (dt_ns None = derive from the drives) is resolved
+    # HERE, the same one-door way. It used to be a side effect of
+    # spec.advisories(), which must only report.
+    if spec.integration.dt_ns is None:
+        spec.integration.set_derived_dt(spec.derive_dt_ns())
+    # ONE DOOR for every route: a recording that cannot cover the
+    # declared flight is refused here, before anything is built, rather
+    # than truncating mid-flight on whichever builder happens to run.
+    from ion_gym.io.sim_spec import check_recording_capacity
+    return (check_recording_capacity(spec.integration) or None,
+            list(spec.validate()))
+
+
 def build_run(spec: SimSpec, verbose=False,
               solve_dtype=None, record_budget_gb=None):
     """(model, fly_fn, col_names, births). Dispatches on geometry
@@ -666,31 +736,39 @@ def build_run(spec: SimSpec, verbose=False,
         anything is built. To take a deliberately huge record, DECLARE
         it -- record_budget_gb=200 -- so the intent is in the call
         rather than hidden in a flag.
+
+    WHAT IT WRITES ON `spec`. The build resolves derived values onto the
+    spec it is given, and callers read them there afterwards:
+      * DC-ladder members' dc: the voltages their group derives
+        (resolve_dc_groups); a member's dc is never an input.
+      * integration.dt_ns, when null: the step derived from the drives
+        (a save still writes null).
+      * integration.record_channels: e_x/e_y/e_z when a non-r-z deck
+        records e_axial/e_radial (a save writes the channels the deck
+        asked for).
+      * source._drawn_seed, in random mode: the seed this build drew
+        (in memory only; io.run_provenance records it with a run).
+    Nothing else the deck says is changed; tests/test_build_run_writes.py
+    holds that over the shipped decks.
     """
-    # DC ladders are DERIVED voltages: resolve them before anything reads
-    # electrode.dc. Doing it here (one door, all builders) means a builder
-    # cannot forget, and a group member's dc can never be stale.
-    spec.resolve_dc_groups()
-    # An unset step (dt_ns None = derive from the drives) is resolved
-    # HERE, the same one-door way. It used to be a side effect of
-    # spec.advisories(), which must only report (L-554).
-    if spec.integration.dt_ns is None:
-        spec.integration.dt_ns = spec.derive_dt_ns()
-    # ONE DOOR for every route: a recording that cannot cover the
-    # declared flight is refused here, before anything is built, rather
-    # than truncating mid-flight on whichever builder happens to run.
-    from ion_gym.io.sim_spec import check_recording_capacity
-    _rec_err = check_recording_capacity(spec.integration)
+    # RANDOM SEED, ONE DRAW PER BUILD: a random-mode spec (source.seed
+    # null) draws its base once in resolve_run_seed and caches it on the
+    # spec, which births and every per-ion kernel seed then share. Clearing
+    # it here makes each build a fresh run, so building the same spec
+    # object twice no longer repeats the first run (pooled runs were
+    # duplicates); within a build, everything shares the one printed seed.
+    if spec.source.seed is None and hasattr(spec.source, "_drawn_seed"):
+        del spec.source._drawn_seed
+    _rec_err, errs = preflight(spec)
     if _rec_err:
         raise ValueError(_rec_err)
-    # SDS outside its regime WARNS rather than refuses (L-452): the note is
+    # SDS outside its regime WARNS rather than refuses: the note is
     # one of spec.advisories() below, so this print and the app's status
     # line carry the same text from one computation per spec.
-    errs = spec.validate()
     if errs:
         raise ValueError("invalid spec: " + "; ".join(errs))
     # RADIAL CHANNELS are DERIVED AFTER FLIGHT about the deck's axis
-    # (L-539, PI 2026-10-15: no kernel computes them; validate() above
+    # (no kernel computes them; validate() above
     # refused a missing axis). r-z keeps its kernel's values: its axis is
     # built in and they already are about it. Elsewhere the field channels
     # need the recorded field components, which are added here, announced.
@@ -699,29 +777,22 @@ def build_run(spec: SimSpec, verbose=False,
     _derive_radial = (spec.geometry.symmetry.coords != "rz"
                       and any(c in RADIAL_CHANNELS for c in _rc))
     if _derive_radial and any(c in ("e_axial", "e_radial") for c in _rc):
-        _add = [c for c in ("e_x", "e_y", "e_z") if c not in _rc]
+        # marked as added by the build: recorded, but not written back
+        # into the deck by a save
+        _add = spec.integration.add_derived_channels(("e_x", "e_y", "e_z"))
         if _add:
-            spec.integration.record_channels = _rc + _add
-            _msg = (f"[RECORD] e_axial/e_radial are derived after flight "
-                    f"from the field components: also recording {_add}")
-            if _msg not in _ADVISED:
-                _ADVISED.add(_msg)
-                print(_msg + " [printed once per session]")
-    # advisories are WARNINGS, not refusals: the
-    # configuration is legal but ill-advised; state the reason and
-    # proceed. Printed unconditionally the FIRST time — an advisory
-    # nobody sees is a silent guard — but ONCE per unique text per
-    # process (a sweep calls build_run per point, and the
-    # identical advisory would print dozens of times; a verbatim repeat
-    # carries no information). The suppression is declared on the first
-    # print, so nothing is silently withheld; a different pitch, deck,
-    # or operating point changes the text and prints anew.
+            advise(f"[RECORD] e_axial/e_radial are derived after flight "
+                   f"from the field components: also recording {_add}",
+                   stacklevel=2)
+    # advisories are WARNINGS, not refusals: the configuration is legal
+    # but ill-advised; state the reason and proceed. Raised as
+    # IonGymAdvisory against the caller's line, so Python's warning
+    # filter governs repeats (by default each text once per calling line:
+    # a sweep calling build_run per point states it once) and a caller
+    # can collect, silence or escalate them. SimSpec.advisories() keeps
+    # the full list, undeduplicated.
     for _adv in spec.advisories():
-        if _adv in _ADVISED:
-            continue    # stated verbatim earlier this process, with the
-                        # once-per-process policy declared on that print
-        _ADVISED.add(_adv)
-        print(f"[ADVISORY] {_adv} [printed once per session]")
+        advise(f"[ADVISORY] {_adv}", stacklevel=2)
     # RECORD-VOLUME GUARD, before a single basis is solved. Same estimate
     # and same ceilings the app quotes (physics.sizing.record_volume), so
     # a script and a click refuse at the same place for the same reason.
@@ -736,11 +807,9 @@ def build_run(spec: SimSpec, verbose=False,
             "this record deliberately, pass "
             "build_run(..., record_budget_gb=<GB>).")
     if _rv["tier"] == "warn":
-        _warn = ("[RECORD] " + "; ".join(x.replace("**", "")
-                                         for x in _rv["lines"]))
-        if _warn not in _ADVISED:
-            _ADVISED.add(_warn)
-            print(_warn + " [printed once per session]")
+        advise("[RECORD] " + "; ".join(x.replace("**", "")
+                                       for x in _rv["lines"]),
+               stacklevel=2)
     # ONE classification, all consumers: build_run dispatches on the SAME
     # BuildRoute the app is allowed to ask about (build_route above), so the
     # dimensionality the UI reports and the builder actually taken cannot
@@ -748,6 +817,14 @@ def build_run(spec: SimSpec, verbose=False,
     # correlate -- coords, depth_mm (the SOLVE domain's z extent), e.stl and
     # spec.builder are all declared fields.
     out = _dispatch_route(spec, verbose=verbose, solve_dtype=solve_dtype)
+    # TUNNELLING needs the built metal and births, so it is checked here,
+    # for every route, rather than among the spec's own advisories. The
+    # note rides on the model (the app lists it with the advisories).
+    from ion_gym.physics.tunnelling import tunnelling_note
+    _tn = tunnelling_note(spec, out[0], out[3])
+    out[0].build_advisories = [_tn] if _tn else []
+    if _tn:
+        advise(f"[ADVISORY] {_tn}", stacklevel=2)
     if not _derive_radial:
         return out
     model, fly, cols, births = out
@@ -777,7 +854,7 @@ def _dispatch_route(spec, *, verbose, solve_dtype):
         # 2-D cylindrical (funnel/IMS/round einzel). The funnel example
         # still reuses the shipped field array; a general r-z geometry solves its
         # own bases (the r-z builder rung).
-        return _build_cylindrical(spec)
+        return _build_cylindrical(spec, verbose=verbose)
     if r.builder == "stl2d":
         from ion_gym.physics.build_stl import build_stl_run
         # ground_border=None lets build_stl_run auto-decide from the
@@ -787,7 +864,8 @@ def _dispatch_route(spec, *, verbose, solve_dtype):
     if r.builder == "planar":
         # 2-D Cartesian slice (planar einzel, wedge pusher, PCB elements).
         from ion_gym.physics.build_planar import build_planar_run
-        return build_planar_run(spec, solve_dtype=solve_dtype)
+        return build_planar_run(spec, verbose=verbose,
+                                solve_dtype=solve_dtype)
     if r.builder == "scene3d":
         # analytic CSG, rasterize3d (NO tessellation)
         from ion_gym.physics.build_scene3d import build_scene3d_run
@@ -806,7 +884,7 @@ def _dispatch_route(spec, *, verbose, solve_dtype):
         f"stl={sum(1 for e in spec.geometry.electrodes if e.stl)}).")
 
 
-def _build_cylindrical(spec: SimSpec):
+def _build_cylindrical(spec: SimSpec, verbose=False):
     """Cylindrical (r-z) dispatch. Electrodes with INLINE SHAPES are
     solved natively by the r-z builder (build_rz) — no external solver.
 
@@ -820,11 +898,11 @@ def _build_cylindrical(spec: SimSpec):
     has_stl = any(e.stl for e in spec.geometry.electrodes)
     if has_shapes and not has_stl:
         from ion_gym.physics.build_rz import build_rz_run
-        return build_rz_run(spec)
+        return build_rz_run(spec, verbose=verbose)
     stl_names = [e.name for e in spec.geometry.electrodes if e.stl]
     raise ValueError(
         f"r-z build: electrodes reference STL files ({stl_names}) but the "
         f"STL->r-z rasterizer is not implemented, and the retired "
-        f"pre-solved-bases route (ledger #2, 2026-08-06) no longer exists. "
+        f"pre-solved-bases route no longer exists. "
         f"Author the electrodes as inline shapes in the (z, r) plane — see "
         f"examples/ion_funnel_rz.json.")

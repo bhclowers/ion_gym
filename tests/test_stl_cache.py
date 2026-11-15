@@ -27,7 +27,7 @@ from ion_gym.physics.build_stl import build_stl_run, _STL_BUILD_CACHE
 from ion_gym.io.sim_spec import SimSpec
 
 # THE quad fixture: four STL rods + their deck, generated once from the
-# retired examples/stl_demos generator (2026-08-18 pattern, D6c). A fresh
+# retired examples/stl_demos generator. A fresh
 # SimSpec per call, so an edit to one build never leaks into the next.
 QUAD = Path(__file__).parent / "fixtures" / "stl_quad" / \
     "quad_stl_transport.json"

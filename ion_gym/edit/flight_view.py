@@ -41,6 +41,14 @@ from ion_gym.edit.policy import EditRefusal
 from ion_gym.ui import last_flight
 
 DEFAULT_SHOW = 50          # matches assembly_overview's default path count
+# Default trajectory colormap. The viewer's JS
+# falls back to the same name when a style block omits cmap.
+DEFAULT_CMAP = "plasma"
+# Default trajectory colouring: kinetic energy on the
+# plasma scale. A record that cannot give KE (no recorded ke_ev, and no
+# single packet mass with t_us to derive it) falls back to the per-ion
+# ramp and the legend says why.
+DEFAULT_SCHEME = "ke"
 MAX_PTS_PER_PATH = 2000    # per-path record decimation for payload size
 
 
@@ -64,7 +72,7 @@ def _stage_prims(spec_dict: dict, name: str, offset):
     range lives along the extrude axis and shifts by that component.
     For a z-extruded stage this is byte-identical to the old
     (dx, dy, dz) application; for an x/y-extruded stage the old code
-    shifted the wrong components (found 2026-09-12). A refusal is
+    shifted the wrong components. A refusal is
     reported by the caller, never silent."""
     from ion_gym.edit.session import EditSession
     from ion_gym.edit.outline import render_primitives
@@ -86,7 +94,7 @@ def _stage_prims(spec_dict: dict, name: str, offset):
                 entry["extrude"] = {
                     "axis": entry["extrude"]["axis"],   # keep the axis:
                     # dropping it here silently re-framed every staged
-                    # deck as z (found 2026-09-12 in the x-extrusion fix)
+                    # deck as z (found in the x-extrusion fix)
                     "lo_mm": entry["extrude"]["lo_mm"] + dz,
                     "hi_mm": entry["extrude"]["hi_mm"] + dz}
     return prims["electrodes"]
@@ -153,7 +161,9 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
             off = pose.get("offset_mm", [0.0, 0.0, 0.0]) or [0, 0, 0]
             try:
                 route = _route_of(st["spec"])
-            except Exception as e:
+            except (ValueError, KeyError, TypeError) as e:
+                # what a malformed stage spec raises (EditRefusal is a
+                # ValueError); anything else is a bug and surfaces
                 stage_notes.append(f"stage {nm}: unreadable spec — "
                                    f"{type(e).__name__}: {e}")
                 continue
@@ -169,7 +179,7 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                 # banked coordinates regardless.
                 try:
                     els_p = _stage_prims(st["spec"], nm, off)
-                except Exception as e:
+                except (ValueError, KeyError, TypeError) as e:
                     stage_notes.append(f"stage {nm}: {type(e).__name__}: {e}")
                     continue
                 _xy = [p for el in els_p
@@ -198,7 +208,7 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                 stage_notes.append(
                     f"stage {nm}: planar — drawn as a DISPLAY-ONLY slab "
                     f"({_t:.2f} mm = 10% of its smaller in-plane "
-                    f"dimension, the L-193 convention); its z extent is "
+                    f"dimension, the editor's convention); its z extent is "
                     f"NOT declared geometry")
                 continue
             if route == "rz":
@@ -232,7 +242,7 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                 # shape it cannot express, and drawing its bounding annulus
                 # would show metal that is not there -- so it is NAMED in
                 # the stage note. It used to be skipped with no word, which
-                # made that metal simply absent from /flight (L-542).
+                # made that metal simply absent from /flight.
                 _not_drawn = []
                 for _ei, _el in enumerate(_g.get("electrodes", [])):
                     _solids = []
@@ -305,7 +315,7 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
             try:
                 electrodes.extend(_stage_prims(st["spec"], nm, _off2[:3]))
                 drew_any = True
-            except Exception as e:
+            except (ValueError, KeyError, TypeError) as e:
                 stage_notes.append(f"stage {nm}: {type(e).__name__}: {e}")
         if not drew_any and not record["paths"]:
             return None, (
@@ -425,9 +435,9 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
     # parameter — KE or velocity — as in the main view). Speed and
     # time are DERIVABLE from what the record banks (pts + t_us):
     # speed = |Δpts|/Δt per segment in mm/µs, assigned per point. KE is
-    # NOT drawable yet — it needs per-ion mass, which the record does
-    # not bank; that is a record-schema addition, not a coloring
-    # option, so it is absent rather than faked. A record without t_us
+    # drawn from the run's RECORDED ke_ev when every shown path carries
+    # it; otherwise it is derived from speed and the packet's single
+    # mass, and refused by name when there is none. A record without t_us
     # REFUSES the scheme by name and falls back to the per-ion ramp —
     # stated in the legend, never silent.
     _scheme = (style or {}).get("color_by", "")
@@ -436,7 +446,13 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
     _raw_vals = []
     if _want_param:
         _m = record.get("m_amu")
-        if any(p.get("t_us") is None for p in shown):
+        _ke_recorded = (_scheme == "ke" and bool(shown)
+                        and all(p.get("ke_ev") is not None for p in shown))
+        if _ke_recorded:
+            # the run RECORDED kinetic energy: draw it as recorded, for
+            # any mix of masses (no mass or t_us needed)
+            _raw_vals = [np.asarray(p["ke_ev"], float) for p in shown]
+        elif any(p.get("t_us") is None for p in shown):
             _param_note = (f"{_scheme} coloring unavailable: this "
                            f"record lacks t_us — using per-ion ramp")
             _want_param = False
@@ -444,7 +460,7 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
         elif _scheme == "ke" and _m is None:
             _param_note = ("KE coloring unavailable: this record banks "
                            "no single packet mass (mixed or undeclared "
-                           "m/z) — using per-ion ramp")
+                           "masses) — using per-ion ramp")
             _want_param = False
             style = dict(style); style["color_by"] = "ion"
         else:
@@ -464,6 +480,7 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
                                                                  KG_AMU)
                         v = (0.5 * _m * KG_AMU * (v * 1e3) ** 2) / E_CHG
                     _raw_vals.append(v)
+        if _want_param:
             _all = np.concatenate(_raw_vals) if _raw_vals else np.zeros(1)
             _vmin, _vmax = float(_all.min()), float(_all.max())
 
@@ -496,7 +513,8 @@ def _compose(record: dict, n_show: int, style: Optional[dict] = None,
     if _want_param and out_paths:
         _unit = {"time": "µs", "speed": "mm/µs", "ke": "eV"}[_scheme]
         legend += (f" · colored by {_scheme} {_vmin:.4g}–{_vmax:.4g} "
-                   f"{_unit} (blue→red, range over shown paths)")
+                   f"{_unit} ({(style or {}).get('cmap', DEFAULT_CMAP)} "
+                   f"scale, range over shown paths)")
     if _param_note:
         legend += f" · {_param_note}"
     if not out_paths:
@@ -550,12 +568,12 @@ def flight_page(title: str = "3D Flight Viewer") -> pn.Column:
                  "speed (mm/µs)": "speed",
                  "time (µs)": "time",
                  "kinetic energy (eV)": "ke"},
-        value="ion", width=170)
+        value=DEFAULT_SCHEME, width=170)
     w_cmap = pn.widgets.Select(
         name="colormap",
         options={"cool → warm": "cool-warm", "plasma": "plasma",
                  "viridis": "viridis"},
-        value="cool-warm", width=130)
+        value=DEFAULT_CMAP, width=130)
     # CHECKBOXES, not a 3-state mode: ghost and quarter are
     # checkboxes so they can be applied
     # simultaneously. Quarter clips the +x/+y quadrant out of EVERY

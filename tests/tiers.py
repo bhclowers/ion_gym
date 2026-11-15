@@ -18,8 +18,8 @@ TIERS
   1  STRUCTURAL  (~50 s)   Code contracts: does the software still mean what it
                            says?  Except-policy, provenance, viz, UI smoke,
                            cache keys, labels, rasters, orchestration.  Runs on
-                           EVERY edit.  All six defects of the v145 audit would
-                           have been caught here.
+                           EVERY edit.  All six defects of an earlier audit
+                           would have been caught here.
   2  PHYSICS     (~5 min)  Analytic and golden gates: solver convergence and
                            order, einzel goldens, multigrid, W1/W2/W3, Q3.  Runs
                            before any claim about a NUMBER.
@@ -29,7 +29,7 @@ TIERS
 
 THE TRAP THIS MUST NOT REPEAT
 -----------------------------
-v144: 32 of 38 validators were dark behind a green pytest, because a tier that
+Once, 32 of 38 validators were dark behind a green pytest, because a tier that
 is not run and NOT VISIBLE is indistinguishable from a tier that passed.  So:
 
   * THE NO-SILENCE RULE BINDS THE RUNNER TOO.  `run_gates.py --tier N` PRINTS every gate it
@@ -49,7 +49,7 @@ TIERS = {1: "STRUCTURAL", 2: "PHYSICS", 3: "INSTRUMENT"}
 # gate stem (no .py) -> tier
 GATE_TIER = {
     # ---- 1. STRUCTURAL: code contracts, no physics claim ----------------
-    # CLASSIFIED 2026-09-08 after the runner REFUSED to run at all: 12 of
+    # CLASSIFIED after the runner REFUSED to run at all: 12 of
     # the 38 discovered script gates had no entry here, and the refusal
     # fires before anything executes, so `run_gates.py --tier N` -- the
     # release gate included -- had been dead. Runtimes below are measured,
@@ -58,7 +58,7 @@ GATE_TIER = {
     "test_field_io":             1,   # 0 s  field save/load portability
     "test_cadquery_emit":        1,   # 0 s  CadQuery script emitter
     "test_jcad_mirror":          1,   # 2 s  jcad/STEP mirror placement
-                                      #      (L-528; skips w/o CadQuery)
+                                      #      (skips w/o CadQuery)
     # 1 s. Certifies a ROUTE CONTRACT (every route fills the declared
     # channels), which is structure, not a number. NOTE its docstring says
     # "tier 2 of the parity plan" -- that is the PARITY PLAN's numbering,
@@ -69,15 +69,26 @@ GATE_TIER = {
     "test_assembly_json":        1,   # 6 s  assembly JSON front end
     "test_except_policy":        1,
     "test_dependency_audit":     1,     # K1-K9 placement ratchet (AST scan, sub-second)
+    "test_shipped_text":         1,   # 0.4 s  shipped-text ratchet
+    "test_gate_import_order":    1,   # 0.1 s  script gates root sys.path before importing ion_gym
+    "test_package_manifest":     1,   # 0.1 s  wheel carries every package, data file and example deck
+    "test_package_metadata":     1,   # 0.1 s  pyproject and requirements.txt declare one environment
+    "test_ignore_rules":         1,   # 0.1 s  no tracked build metadata; public ignore keeps dev trees out
+    "test_runtime_imports":      1,   # 0.3 s  every third-party import is a declared dependency
     "test_provenance":           1,
     "test_ele_labels":           1,
     "test_polygon_raster":       1,
     "test_scene_resolution":     1,
     "test_ui_smoke":             1,
-    # 0.8 s measured. Edit-viewer frame contract (L-432): extrude-axis
+    # ~6 s. Dashboard layout of the
+    # 2026-11 cleanup: status bar, error dialog, history panel, vertical
+    # rail + split, Load/Deck/Save/Runs, Reset, r-z deck-axis mapping,
+    # marked-deck detector windows, /flight plasma default. No solves.
+    "test_ui_layout_smoke":      1,
+    # 0.8 s measured. Edit-viewer frame contract: extrude-axis
     # permutation, mirror clip, mixed-axis refusal, clamp mapping —
     # payload walks only, zero solves. The edit subsystem's FIRST
-    # standing gate (2026-09-12).
+    # standing gate.
     "test_edit_frame":           1,
     "test_fa_cache":             1,
     "test_stl_cache":            1,
@@ -88,7 +99,6 @@ GATE_TIER = {
     "test_export_frame_agnostic": 1,   # 113 s — the tier-1 outlier; see note
     "test_reproducible_fly":     1,
     "test_stl_assembly":         1,
-    "test_numba_equiv":          1,
     "test_per_ion_mass":         1,
 
     # ---- 2. PHYSICS: analytic / golden, certifies a NUMBER ---------------
@@ -156,12 +166,12 @@ GATE_TIER = {
     # for in tests/retired/RETIRED.md, and the live successors are classified
     # above: test_multifa_native_equiv (for the retired numba-equiv test +
     # validate_tof_multifa, GAP M-1). validate_collisions_c2 was itself
-    # retired (it lives in internal/tests_retired/), and its tracer_gas
-    # module was deleted 2026-10-16 (D13); its tier-3 entry that sat above
+    # retired (it lives in the development tree), and its tracer_gas
+    # module was deleted; its tier-3 entry that sat above
     # was a dead classification and is gone. validate_octupole /
     # test_octupole_rf have no successor (their tracer_rf2d was deleted
     # the same day) and are recorded as retired with their history.
-    # MOVED OUT 2026-09-08: validate_q3_2d went to internal/tests_q3/ with
+    # MOVED OUT: validate_q3_2d went to the development tree with
     # the Q3 study itself (an internal project that was shipping publicly).
     # Its classification goes with it. It is also the gate that made
     # `run_gates.py` structurally unable to pass: documented as Phase-1
@@ -196,7 +206,7 @@ def tier_of(stem: str) -> int:
         raise KeyError(
             f"gate {stem!r} is not classified in tests/tiers.py. Every gate "
             f"declares its tier; the runner does not guess. Defaulting it to "
-            f"tier 3 would silently exile it from every dev run (the v144 "
-            f"failure exactly); defaulting it to tier 1 would silently slow "
+            f"tier 3 would silently exile it from every dev run (the "
+            f"failure this registry exists to stop); defaulting it to tier 1 would silently slow "
             f"every dev run. Add it to GATE_TIER deliberately.")
     return GATE_TIER[stem]

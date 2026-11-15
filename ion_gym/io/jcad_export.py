@@ -1,8 +1,8 @@
-"""Native-shape decks -> JupyterCAD ``.jcad`` documents (L-466).
+"""Native-shape decks -> JupyterCAD ``.jcad`` documents.
 
 The REVERSE of the CAD->STL import path: a deck whose electrodes are
 declared as native shapes (rect / circular ellipse / cutout, with
-extrude descriptors) becomes a parametric JupyterCAD document the PI
+extrude descriptors) becomes a parametric JupyterCAD document a user
 can open, edit and re-export. Emitted against jcad schema 3.0.0 and
 validated (see spec_to_jcad's validate flag) by constructing the
 official pydantic model jupytercad_core ships, which carries
@@ -61,7 +61,7 @@ from pathlib import Path
 _AXIS_I = {"x": 0, "y": 1, "z": 2}
 
 # cylinder local axis is +Z; Placement (Axis, Angle) rotating +Z onto
-# each world axis. Verified numerically in the L-466 probe.
+# each world axis. Verified numerically.
 _CYL_ROT = {"z": ([0.0, 0.0, 1.0], 0.0),
             "x": ([0.0, 1.0, 0.0], 90.0),
             "y": ([1.0, 0.0, 0.0], -90.0)}
@@ -317,7 +317,7 @@ def _mirror_object(obj, axis):
     """Mirrored COPY of a jcad object about plane axis=0. Supported for
     the objects this module emits; anything else refuses.
 
-    PER-PRIMITIVE ALGEBRA (L-528), each from the primitive's own world
+    PER-PRIMITIVE ALGEBRA, each from the primitive's own world
     geometry, never from its rotation axis:
       Box (unrotated): the span along the mirrored axis flips about 0.
       Box rotated by theta about +z (the only rotation emitted): the
@@ -490,7 +490,7 @@ def spec_to_jcad(spec, path, *, expand_mirror=True, validate=True,
                 f"(an electrode name collides with a generated or mirrored "
                 f"object name); rename the electrode")
         seen.add(o["name"])
-    meta = {"generator": "ion_gym.io.jcad_export (L-466)",
+    meta = {"generator": "ion_gym.io.jcad_export",
             "deck": str(getattr(spec, "name", "") or ""),
             "units": "mm",
             "colors": colors,
@@ -511,7 +511,7 @@ def spec_to_jcad(spec, path, *, expand_mirror=True, validate=True,
                 "unvalidated") from err
         IJCadContent(**doc)          # extra='forbid': schema-strict
     path = Path(path)
-    path.write_text(json.dumps(doc, indent=1))
+    path.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     return path
 
 
@@ -692,7 +692,7 @@ def jcad_to_step(jcad, step_path, *, close_tol_mm=1e-6,
     if isinstance(jcad, dict):
         doc = jcad
     else:
-        doc = json.loads(Path(jcad).read_text())
+        doc = json.loads(Path(jcad).read_text(encoding="utf-8"))
     objs = doc.get("objects")
     if not objs:
         raise ValueError("jcad document has no objects")

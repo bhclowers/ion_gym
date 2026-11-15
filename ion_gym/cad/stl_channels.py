@@ -269,10 +269,10 @@ def emit_simspec(registry: ChannelRegistry, stl_files: Mapping[str, str], *,
             "(pass a SourceSpec); this emitter does not guess birth "
             "positions")
     if integration is None:
-        # R2 (PI ruling 2026-10-15), the SimSpec rule at the CAD door:
+        # The SimSpec rule at the CAD door:
         # the step and flight time set the physics; IntegrationSpec()'s
-        # 1 ns / 400 us is one deck's value, not a neutral one (L-526).
-        # Collisions left out stay VACUUM (R3 Q1, SimSpec's default).
+        # 1 ns / 400 us is one deck's value, not a neutral one.
+        # Collisions left out stay VACUUM (SimSpec's default).
         raise ValueError(
             "integration is required: pass an IntegrationSpec with the "
             "deck's dt_ns and t_max_us; this emitter does not guess them")
@@ -330,11 +330,11 @@ def write_spec_json(spec: SimSpec, path, *, stl_dir_path) -> Path:
     with (stl_resolve.preflight_stls checks the same digests). Refuses if
     any referenced STL is missing — a manifest over absent files certifies
     nothing. The manifest comes from THE one builder,
-    stl_resolve.build_manifest (L-546: this carried its own copy).
+    stl_resolve.build_manifest (this once carried its own copy).
     """
     from ion_gym.io.stl_resolve import build_manifest
     spec.geometry.stl_manifest = build_manifest(spec,
                                                 stl_dir=Path(stl_dir_path))
     path = Path(path)
-    path.write_text(spec.to_json(indent=1))
+    path.write_text(spec.to_json(indent=1), encoding="utf-8")
     return path

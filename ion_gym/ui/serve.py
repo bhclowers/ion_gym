@@ -1,7 +1,8 @@
 """THE dashboard route table, in one place.
 
-The dashboard is three routes on ONE server: `/` (the app), `/editor`
-(the geometry editor) and `/flight` (the 3-D flight viewer). The app's
+The dashboard is three pages on ONE server: `/` (the app), `/editor`
+(the geometry editor) and `/flight` (the 3-D flight viewer), plus the
+`/export/<token>` file downloads (ui.exports). The app's
 own buttons link to `/editor` and `/flight` as relative paths, so they
 work only if all three were registered on the server that served `/`.
 
@@ -15,6 +16,22 @@ Imports of `ion_gym.edit` are deferred to call time: the editor pulls in
 the browser layer, and importing this module must not.
 """
 from __future__ import annotations
+
+# THE GEOMETRY EDITOR IS SWITCHED OFF while it is reworked. With this
+# False the dashboard shows its link greyed out, `/editor` serves a
+# notice instead of the editor, and `ion-gym edit` refuses. The editor
+# code and its tests are untouched; set True to restore all three.
+EDITOR_ENABLED = False
+EDITOR_OFF_NOTE = ("The geometry editor is temporarily disabled while it "
+                   "is being reworked.")
+
+
+def editor_off_page():
+    """What `/editor` serves while the editor is switched off."""
+    import panel as pn
+    return pn.Column(pn.pane.Markdown(
+        f"## Geometry editor\n\n{EDITOR_OFF_NOTE} Edit the deck's JSON, or "
+        f"its STL files, and load it in the dashboard."), margin=20)
 
 
 def dashboard_routes(app=None, spec=None):
@@ -43,10 +60,13 @@ def dashboard_routes(app=None, spec=None):
     # paths, so an app served some other way still gets its hang dump.
     # Both calls are idempotent.
     app.start_telemetry()
-    return {"/": app.panel(), "/editor": editor_page, "/flight": flight_page}
+    return {"/": app.panel(),
+            "/editor": editor_page if EDITOR_ENABLED else editor_off_page,
+            "/flight": flight_page}
 
 
-def serve_dashboard(app=None, spec=None, *, port=5006, show=True, **kw):
+def serve_dashboard(app=None, spec=None, *, port=5006, show=True,
+                    on_quit=None, **kw):
     """Serve the full dashboard — `/`, `/editor` and `/flight` together.
 
     Use this instead of `app.panel().show()` anywhere the editor and
@@ -57,8 +77,24 @@ def serve_dashboard(app=None, spec=None, *, port=5006, show=True, **kw):
     `threaded=True` from a notebook: `pn.serve` otherwise BLOCKS the
     calling cell, and every cell below it would sit unrun behind a
     server that only stops when the kernel does.
+
+    `on_quit`: a no-argument callable that ends the process, given only
+    by a launcher that owns it (`ion-gym dashboard`). It arms the app's
+    Quit button; without it the button stays disabled, because quitting
+    a notebook's server process would end the user's kernel.
+
+    The server also carries `/export/<token>` (ui.exports): the Runs
+    tab's prepared CSV, NPZ and HTML download from there as ordinary
+    files, at any size, instead of through the page's connection.
     """
     import panel as pn
+    from ion_gym.ui import exports
     pn.extension("plotly")
-    return pn.serve(dashboard_routes(app=app, spec=spec),
-                    port=port, show=show, **kw)
+    kw["extra_patterns"] = list(kw.get("extra_patterns", [])) + exports.routes()
+    exports.mark_served()
+    if app is None:
+        from ion_gym.ui.sim_app import SimApp
+        app = SimApp(spec) if spec is not None else SimApp()
+    if on_quit is not None:
+        app.enable_quit(on_quit)
+    return pn.serve(dashboard_routes(app=app), port=port, show=show, **kw)

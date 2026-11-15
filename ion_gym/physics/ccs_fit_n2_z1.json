@@ -151,7 +151,7 @@
   ]
  ],
  "min_n": 50,
- "measurement_temperature_note": "Compendium values are drift-tube CCS measured near room temperature (about 300 K). A deck flown at another T_k uses them unchanged: the fit is a reasonable estimate, not a temperature-corrected cross section (PI ruling 2026-10-17).",
- "generated_by": "internal/studies/funnel_opt/fit_ccs_compendium.py",
- "generated": "2026-10-17"
+ "measurement_temperature_note": "Compendium values are drift-tube CCS measured near room temperature (about 300 K). A deck flown at another T_k uses them unchanged: the fit is a reasonable estimate, not a temperature-corrected cross section.",
+ "generated_by": "a fitting script in the development tree; it does not ship",
+ "generated": "offline, from source_file"
 }

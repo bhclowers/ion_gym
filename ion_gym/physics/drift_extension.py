@@ -94,7 +94,7 @@ def edge_field_max(components, axis, side, inset=0):
     gradient (build_planar._grad2d) computes interior nodes only and
     leaves the boundary row exactly zero, so a planar face read at
     inset 0 always measured 0 and the hot-edge guard could never fire
-    (L-286, measured: an RF quad reads 0 on row 0 and up to 29 V/mm on
+    (measured: an RF quad reads 0 on row 0 and up to 29 V/mm on
     row 1). Returns the max over face nodes of the component-wise norm.
     """
     acc = None
@@ -198,7 +198,7 @@ def extend_ballistic(traj, col_names, kind, spec, *,
         if crosses and dt < tb:
             tb, bface = dt, k
     st_dts = []
-    # TERMINATING stations on the ray (L-286 + the L-435 contract): an
+    # TERMINATING stations on the ray (the station contract): an
     # impact_plane crossed outside its window, or a detect+splat patch
     # crossed inside it, ENDS the drift on that plane with its fate, as
     # the kernels do inside the domain -- a wall downstream of the solved
@@ -291,7 +291,7 @@ def extend_ballistic(traj, col_names, kind, spec, *,
 # Route-tagged FIELD PACKS (the staged-assembly packs, and the 3-D
 # single-stage pack, which is the same dict): the escape face and the
 # residual edge field, so the 3-D route and a staged final region can
-# use extend_ballistic (L-286). The weighting rules are the ones the
+# use extend_ballistic. The weighting rules are the ones the
 # single-stage planar and r-z hooks apply to their models; the 3-D rule
 # follows tracer3d._wave_eval, w = amp*base + off.
 

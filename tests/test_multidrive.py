@@ -105,28 +105,19 @@ def test_two_frequency_analytic():
     g1 = RFGroupSpec(name="LF", frequency_hz=f1, amplitude_v=5.0)
     g2 = RFGroupSpec(name="HF", frequency_hz=f2, amplitude_v=5.0)
     spec = _capacitor_spec([g1, g2], dt_ns=0.5, t_max_us=12.0)
-    # both groups on the SAME electrode: two channels, two frequencies
-    # (an old `rf_group = None` singular-field write sat here as a silent
-    # no-op for versions — caught by _StrictAttrs; the
-    # electrode list is rebuilt wholesale just below, so nothing to do)
-    # assign via two stacked coincident plates, one per group
-    e0 = spec.geometry.electrodes[0]
-    spec.geometry.electrodes = [
-        ElectrodeSpec(name="driveLF", dc=0.0, rf_groups=["LF"],
-                      shapes=e0.shapes),
-        spec.geometry.electrodes[1],
-        ElectrodeSpec(name="driveHF", dc=0.0, rf_groups=["HF"],
-                      shapes=e0.shapes),
-    ]
+    # both groups on the SAME electrode: two channels, two frequencies.
+    # (This once stacked two coincident plates, one per group, and relied
+    # on their shared nodes adding; a node claimed by two electrodes is
+    # refused on every route now (C-03), and rf_groups is a list.)
+    spec.geometry.electrodes[0].rf_groups = ["LF", "HF"]
     model, fly, cols, births = build_planar_run(spec)
     # two frequencies -> two quadrature pairs = 4 channels (Bc all-zero
     # cos partners kept deliberately for arithmetic parity)
     assert model.ch_kind.tolist() == [0, 1, 0, 1], model.ch_kind
     assert len({round(o, 9) for o in model.ch_om}) == 2
 
-    # NOTE: coincident driveLF/driveHF masks overlap — the solver treats
-    # overlapping nodes by later-mask precedence; verify BOTH channels
-    # actually carry field at the centre before trusting the analytics.
+    # verify BOTH channels actually carry field at the centre before
+    # trusting the analytics.
     Ey = _E0_at_center(model, spec)
     assert abs(Ey[0]) > 1.0 and abs(Ey[2]) > 1.0, Ey
 

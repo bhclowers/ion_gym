@@ -204,6 +204,17 @@ def fly_checked(field, geom, s0, u0, vs0=None, vu0=None, mz=1000.0,
                 rays, '' otherwise
       e_drift : energy-conservation diagnostic for EXIT rays (nan otherwise)
       crossings : dict name -> plane_gate.Recording (record/port planes)
+
+    Arguments (units in brackets; [-] is dimensionless):
+      field     [-]      object with E(s, u) [V/mm] and pot(s, u) [V]
+      geom      [-]      PlaneGeometry: electrode rectangles [mm]
+      s0, u0    [mm]     start positions, one per ray
+      vs0, vu0  [mm/us]  start velocities (None: at rest)
+      mz        [Da]     ion mass, charge +1 (a = ACC * E / mz)
+      s_end     [mm]     exit plane
+      dt        [us]     step (DT, 1e-3 us, matches the frozen flyer)
+      t_max     [us]     time limit
+      planes    [-]      plane_gate.Plane list, positions in mm
     """
     if s_end is None:
         raise ValueError("s_end must be given explicitly")

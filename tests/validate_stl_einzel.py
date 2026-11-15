@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+from ion_gym.io.paths import outputs_dir  # noqa: E402  scratch under the configured outputs root
 from ion_gym.io.sim_spec import (SimSpec, GeometrySpec, ElectrodeSpec, SourceSpec,
                       CollisionSpec, IntegrationSpec, ViewSpec)
 from ion_gym.io.sim_spec import (SymmetrySpec)
@@ -91,7 +92,7 @@ def main():
     from ion_gym.physics.build_stl import stl_masks_2d, build_stl_run
     from ion_gym.physics.ensemble_driver import run
     ok = True
-    stl_dir = "/tmp/stl_einzel"
+    stl_dir = str(outputs_dir("tests", "stl_einzel"))
 
     spec = stl_einzel_spec(stl_dir, lens_v=-100.0)
 
@@ -138,7 +139,7 @@ def main():
     # proper Mathieu saddle, and a single run with per-ion mass shows one
     # STABLE (q<0.908) and one UNSTABLE (q>0.908) ion.
     # THE quad fixture (STL rods + deck, generated once from the retired
-    # examples/stl_demos generator; D6c, 2026-08-18 pattern). A fresh spec
+    # examples/stl_demos generator). A fresh spec
     # per use: S-4 and S-5 each edit their own copy.
     _QUAD = str(Path(__file__).resolve().parent / "fixtures" / "stl_quad"
                 / "quad_stl_transport.json")
@@ -165,12 +166,17 @@ def main():
     qspec.bounds.y_min = cc - 3.84
     qspec.bounds.y_max = cc + 3.84
     qm, qf, qc, qb = build_stl_run(qspec, ground_border=True)
-    # saddle check
+    # saddle check, on the drives COMPOSED at their peak (potential_image:
+    # the static field plus every group at the reference peak instant, the
+    # picture the app shows). One drive channel per rod pair is stored, and
+    # a single pair alone is no saddle -- the anti-phase pair together is;
+    # reading one channel (Bk[0][0]) failed on a correct field.
     hh = qm.mm_per_gu
     cci = int(round(cc / hh))
     oo = int(round(2.0 / hh))
-    Bq = qm.Bk[0][0]
-    saddle = Bq[cci + oo, cci] * Bq[cci, cci + oo] < 0
+    Pq = np.asarray(qm.potential_image()[2])
+    saddle = ((Pq[cci + oo, cci] - Pq[cci, cci])
+              * (Pq[cci, cci + oo] - Pq[cci, cci]) < 0)
     qres = run(len(qb), qf, check_every=1, decimate=1)
     # THE FLOWN RECORD NAMES ITS OWN MASS: indices come from
     # summary["mz"] -- the kernel's statement of what flew -- never from

@@ -1,5 +1,5 @@
 """
-JCAD MIRROR GATE (L-528, PI-approved 2026-10-15).
+JCAD MIRROR GATE.
 
 The JupyterCAD / STEP export emits the mirrored half of every declared
 mirror plane as real objects. Their placement algebra was wrong for

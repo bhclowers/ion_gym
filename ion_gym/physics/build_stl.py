@@ -23,10 +23,9 @@ electrode and a faithful approximation for a gently varying one.
 
 The STL EXAMPLE instruments (four-rod quadrupole, three-plate einzel)
 that used to live here were device generators, not route machinery. They
-were retired on the 2026-08-18 pattern (generate once, ship the data,
+were retired on the usual pattern (generate once, ship the data,
 delete the Python): their meshes and decks are test fixtures under
-tests/fixtures/stl_quad and tests/fixtures/stl_einzel3d (D6b/D6c,
-2026-10-16).
+tests/fixtures/stl_quad and tests/fixtures/stl_einzel3d.
 """
 
 import numpy as np
@@ -35,7 +34,7 @@ import numpy as np
 def _require_trimesh():
     """Import trimesh with a clear, actionable message. Kept under this
     name because notebook 02 imports it; the ONE definition is
-    io.stl_resolve._require_trimesh (L-546)."""
+    io.stl_resolve._require_trimesh."""
     from ion_gym.io.stl_resolve import _require_trimesh as _one
     return _one()
 
@@ -44,8 +43,8 @@ from ion_gym.io.sim_spec import SimSpec
 
 
 def unsupported_drive_features(spec):
-    """Declared drive features the 2-D STL route does NOT apply: NONE,
-    as of 2026-09-16 (L-455). The single signed-B fold (every drive as
+    """Declared drive features the 2-D STL route does NOT apply: NONE.
+    The single signed-B fold (every drive as
     sin at the lowest frequency) is superseded: this route assembles the
     same per-group channels as the planar build
     (build_planar.assemble_drive_groups) and flies the same kernel, so
@@ -113,9 +112,15 @@ def stl_masks_2d(spec: SimSpec, verbose=False):
 
     lab = voxelize_meshes(meshes, grid)
     kmid = nz // 2
+    from ion_gym.physics.raster2d import refuse_empty_mask
     masks = {}
     for idx in range(1, len(g.electrodes) + 1):
         masks[idx] = (lab[:, :, kmid] == idx)
+        # the same zero-node rule as the shapes routes: a mesh thinner
+        # than the pitch, outside the domain, or entirely inside another
+        # electrode's mesh leaves this electrode out of the solve
+        refuse_empty_mask(g.electrodes[idx - 1], masks[idx],
+                          route="planar STL builder", pitch_mm=h)
     return masks
 
 
@@ -145,7 +150,7 @@ def _stl_geom_signature(spec, ground_border):
     bases (fast-adjust invariant).
 
     The STL folder is stl_resolve.resolve_stl_dir, THE folder the meshes
-    are loaded from (L-557): this used Path(stl_dir) or '.', against the
+    are loaded from: this once used Path(stl_dir) or '.', against the
     CWD, while loading resolves a relative stl_dir against the spec's own
     location -- so the key could stat different files, or none, and a
     missing file keyed as mtime -1.0, which never changes, so an edited
@@ -174,15 +179,11 @@ def _stl_geom_signature(spec, ground_border):
 
 
 def _stl_bases(spec, ground_border, verbose):
-    """Voxelize + solve the per-electrode bases — the EXPENSIVE part (SOR
-    on the grid). Cached on geometry so repeated builds (voltage tweaks,
-    view switches, fly) reuse it instead of re-solving. Returns
-    (bases, masks2d, ele, bands, nx, ny, ground_border)."""
+    """Voxelize + solve the per-electrode bases — the EXPENSIVE part (a
+    multigrid solve on the grid). Cached on geometry so repeated builds
+    (voltage tweaks, view switches, fly) reuse it instead of re-solving.
+    Returns (bases, masks2d, ele, bands, nx, ny, ground_border)."""
     import time
-    # F401-cleanup fallout fix: build_planar merely
-    # RE-EXPORTED solve_bases; the cleanup removed the locally-unused
-    # import and broke this hidden indirection. Import from the OWNER.
-    from ion_gym.physics.solver3d import solve_bases
 
     g = spec.geometry
     h = g.mm_per_gu
@@ -219,28 +220,16 @@ def _stl_bases(spec, ground_border, verbose):
             frame &= ~m
         masks[10_000] = frame[:, :, None]
     t0 = time.time()
-    # ImportError ONLY (the same fix build_planar got -- this
-    # sibling was missed).  The old `except Exception` around import+solve
-    # ALSO caught multigrid THROWING and silently recomputed the field
-    # with a DIFFERENT SOLVER (SOR) -- the exact silent-substitution the
-    # except-policy gate documents.  "Falls back if multigrid is
-    # UNAVAILABLE" is an ImportError; anything else is a solver bug and
-    # must surface.  Announced unconditionally (a fallback is
-    # never under `verbose`).
-    # the STL routes' ONE solver setting (L-552: 1e-4 and 1.9 were literals
-    # here, a copy of the values build_stl3d names)
-    from ion_gym.physics.build_stl3d import STL3D_SOLVE_TOL, STL3D_SOR_OMEGA
-    try:
-        from ion_gym.physics.multigrid3d import solve_bases_mg
-    except ImportError as e:
-        print(f"[stl] multigrid unavailable ({e}); solving by SOR")
-        bases3 = solve_bases(masks, mirror=(False, False, False),
-                             tol=STL3D_SOLVE_TOL, stencil="ghost_linear",
-                             verbose=verbose, omega=STL3D_SOR_OMEGA)
-    else:
-        bases3 = solve_bases_mg(masks, mirror=(False, False, False),
-                                tol=STL3D_SOLVE_TOL, stencil="ghost_linear",
-                                verbose=verbose)
+    # the STL routes' ONE solver setting (1e-4 was a literal here,
+    # a copy of the value build_stl3d names)
+    from ion_gym.physics.build_stl3d import STL3D_SOLVE_TOL
+    # Multigrid, imported unguarded: it is part of this package, so failing
+    # to import it is a broken install, and solving by another solver
+    # instead would make the field depend on that accident.
+    from ion_gym.physics.multigrid3d import solve_bases_mg
+    bases3 = solve_bases_mg(masks, mirror=(False, False, False),
+                            tol=STL3D_SOLVE_TOL, stencil="ghost_linear",
+                            verbose=verbose)
     bases = {i: b[:, :, 0] for i, b in bases3.items()}
     t_solve = time.time() - t0
 
@@ -322,7 +311,7 @@ def build_stl_run(spec: SimSpec, verbose=False, ground_border=False):
     # the ONE shared 2-D assembly (build_planar.assemble_drive_groups):
     # every waveform, phase, frequency, offset, duty and multi-group
     # membership the planar kernel honours is honoured here identically.
-    # SUPERSEDED in this change (L-455): the single signed-B fold that
+    # SUPERSEDED: the single signed-B fold that
     # flew every drive as sin at the lowest frequency, and its >2-phase
     # warning — the general channel kernel flies the drives as declared.
     from ion_gym.physics.build_planar import assemble_drive_groups
@@ -343,7 +332,7 @@ def build_stl_run(spec: SimSpec, verbose=False, ground_border=False):
     model.z_extent_mm = (float(ax[0]), float(ax[1])) if ax else None
     model.el_masks = masks2d       # per-electrode masks -> labeled display
     births = generate_births(spec)
-    fly_fn, cols = make_planar_fly_fn(model, births, spec)
+    fly_fn, cols = make_planar_fly_fn(model, births, spec, verbose=verbose)
     if verbose:
         print(f"[stl] assembled A/B + fly fn in "
               f"{time.time() - _t_assemble:.3f}s "
